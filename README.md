@@ -16,7 +16,7 @@ Self-hosted charting and alerting server for forex and metals. It runs 24/7 on y
 | Milestone | Status |
 |---|---|
 | M0 Scaffolding: package layout, config, SQLite migrations, tests, CI | done |
-| M1 OANDA provider, storage, backfill | not started |
+| M1 OANDA provider, storage, backfill | done, waiting on owner acceptance checks |
 | M2 Aggregation, live candles, API, websocket | not started |
 | M3 Web chart | not started |
 | M4 Setup wizard, login, settings | not started |
@@ -41,9 +41,28 @@ ruff check . && ruff format --check .
 
 Configuration is read from environment variables or a `.env` file in the working directory. Copy `.env.example` to `.env` and fill in your values. `.env` is git-ignored; never commit it.
 
+## Command line (M1)
+
+Fill in `.env` first (OANDA practice token and account ID), then:
+
 ```bash
-openchart migrate      # create or upgrade the database in data/
+openchart test-connection          # one live call, prints OK or the error
+openchart backfill XAU_USD         # 2 years of M1 (default); add --years N to change
+openchart stats                    # rows, range, % of expected trading minutes covered
+openchart gaps XAU_USD             # holes not explained by weekends or the daily break
+openchart run                      # gap-fill, then stream live ticks (Ctrl+C to stop)
 ```
+
+- `backfill` is idempotent and resumable: run it again and it only fetches what is missing. A larger `--years` later extends history backwards.
+- `run` fills any gap since the last stored candle, streams ticks, saves them to `data/ticks/` (Parquet), and logs feed status every minute. If the link drops or goes silent for 15 s, it reconnects with backoff and gap-fills from REST.
+- Live candle building from ticks comes in M2; until then stored candles advance through gap-fills on start and reconnect.
+- `pytest -m live -v` runs a few checks against the real OANDA API using your `.env`.
+
+### What works / what does not (M1)
+
+Works: OANDA candles (paginated, retried, complete candles only), pricing stream with heartbeat supervision and reconnect, SQLite M1 storage, idempotent and resumable backfill, gap-fill on start and after reconnect, gap report, Parquet tick storage.
+
+Not yet: live candles, API, web UI, setup wizard (credentials come from `.env` until M4), alerts.
 
 ## Project layout
 
