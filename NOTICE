@@ -1,0 +1,20 @@
+OpenChart
+Copyright 2026 The OpenChart contributors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+OpenChart is an independent project. It is not affiliated with, endorsed by or
+sponsored by TradingView, Inc.
+
+-------------------------------------------------------------------------------
+Third-party software
+-------------------------------------------------------------------------------
+
+This product includes TradingView Lightweight Charts(TM), licensed under the
+Apache License, Version 2.0.
+  TradingView Lightweight Charts(TM)
+  Copyright (c) 2025 TradingView, Inc. https://www.tradingview.com/
+  https://github.com/tradingview/lightweight-charts
+
+As required by its license, the chart page displays a link to
+https://www.tradingview.com/ as attribution.
