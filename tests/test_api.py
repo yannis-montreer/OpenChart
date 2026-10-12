@@ -1,0 +1,150 @@
+import time
+from dataclasses import replace
+
+import pytest
+from fastapi.testclient import TestClient
+
+from openchart import API_VERSION
+from openchart.api.app import create_app
+from openchart.config import Config
+from openchart.market.instruments import METAL_HOURS
+from openchart.providers.base import InstrumentInfo, Tick
+from openchart.providers.fake import FakeProvider, synthetic_m1
+from openchart.server import Server
+from openchart.store.candles import CandleStore
+from openchart.store.sqlite import Database
+
+GOLD = InstrumentInfo("XAU_USD", "XAU_USD", "Gold", 3, 0.01, "METAL")
+NOW = int(time.time()) // 60 * 60
+CANDLES = synthetic_m1(NOW - 3 * 86400, NOW)
+
+
+@pytest.fixture
+def client(tmp_path):
+    import asyncio
+
+    config = replace(Config(), data_dir=tmp_path)
+
+    async def seed():
+        async with await Database.open(config.db_path) as db:
+            store = CandleStore(db.conn)
+            await store.upsert_instrument("fake", GOLD, METAL_HOURS)
+            await store.upsert_m1("fake", "XAU_USD", CANDLES)
+
+    asyncio.run(seed())
+    # The fake stream stays silent; tests push ticks through the feed themselves.
+    provider = FakeProvider({"XAU_USD": CANDLES})
+    server = Server(config, provider=provider)
+    with TestClient(create_app(server)) as c:
+        c.server = server
+        yield c
+
+
+def push(client, tick: Tick) -> None:
+    client.portal.call(client.server.feed.handle_tick, tick)
+
+
+def test_health_and_version(client):
+    assert client.get("/api/health").json() == {"status": "ok"}
+    assert client.get("/api/version").json()["api_version"] == API_VERSION
+
+
+def test_instruments(client):
+    [gold] = client.get("/api/instruments").json()
+    assert gold["instrument"] == "XAU_USD" and gold["decimals"] == 3
+    assert gold["hours"]["open"] == {"day": "sun", "time": "18:00"}
+
+
+def test_candles(client):
+    body = client.get(
+        "/api/candles", params={"instrument": "XAU_USD", "timeframe": "1h", "limit": 24}
+    ).json()
+    assert body["timeframe"] == "1h" and body["price"] == "mid" and body["decimals"] == 3
+    candles = body["candles"]
+    assert len(candles) == 24
+    assert set(candles[0]) == {"t", "o", "h", "l", "c", "v", "complete"}
+    assert [c["t"] for c in candles] == sorted(c["t"] for c in candles)
+
+
+def test_candles_from_to(client):
+    base = NOW // 900 * 900
+    params = {"instrument": "XAU_USD", "timeframe": "15m", "from": base - 7200, "to": base - 3600}
+    candles = client.get("/api/candles", params=params).json()["candles"]
+    assert [c["t"] for c in candles] == list(range(base - 7200, base - 3600, 900))
+
+
+@pytest.mark.parametrize(
+    ("params", "status"),
+    [
+        ({"instrument": "XAU_USD", "timeframe": "2h"}, 400),
+        ({"instrument": "XAU_USD", "price": "last"}, 400),
+        ({"instrument": "NOPE"}, 404),
+        ({"instrument": "XAU_USD", "limit": 0}, 422),
+    ],
+)
+def test_candles_validation(client, params, status):
+    assert client.get("/api/candles", params=params).status_code == status
+
+
+def test_status(client):
+    status = client.get("/api/status").json()
+    assert status["provider"] == "fake"
+    assert "XAU_USD" in status["instruments"]
+
+
+def receive_until(ws, kind: str, limit: int = 50) -> dict:
+    for _ in range(limit):
+        message = ws.receive_json()
+        if message["type"] == kind:
+            return message
+    raise AssertionError(f"no {kind} message")
+
+
+def test_websocket_handshake_and_ping(client):
+    with client.websocket_connect("/ws") as ws:
+        hello = ws.receive_json()
+        assert hello["type"] == "hello" and hello["api_version"] == API_VERSION
+        assert abs(hello["server_time"] - time.time()) < 5
+        assert ws.receive_json()["type"] == "status"
+        ws.send_json({"type": "ping"})
+        assert receive_until(ws, "pong")["server_time"] > 0
+
+
+def test_websocket_streams_ticks_and_candles(client):
+    with client.websocket_connect("/ws") as ws:
+        ws.send_json({"type": "subscribe", "instrument": "XAU_USD", "timeframe": "5s"})
+        assert receive_until(ws, "subscribed")["timeframe"] == "5s"
+
+        now = time.time()
+        push(client, Tick("XAU_USD", now, 2400.0, 2400.4))
+        tick = receive_until(ws, "tick")
+        assert (tick["instrument"], tick["bid"], tick["ask"]) == ("XAU_USD", 2400.0, 2400.4)
+        candle = receive_until(ws, "candle")
+        assert candle["timeframe"] == "5s" and candle["closed"] is False
+        assert candle["candle"]["c"] == pytest.approx(2400.2)  # mid
+
+        push(client, Tick("XAU_USD", now + 6, 2401.0, 2401.4))  # next 5s bar
+        closed = receive_until(ws, "candle")
+        assert closed["closed"] is True and closed["candle"]["v"] == 1
+
+
+def test_websocket_higher_timeframe_starts_from_history(client):
+    with client.websocket_connect("/ws") as ws:
+        ws.send_json(
+            {"type": "subscribe", "instrument": "XAU_USD", "timeframe": "1D", "price": "bid"}
+        )
+        receive_until(ws, "subscribed")
+        push(client, Tick("XAU_USD", time.time(), 1900.0, 1900.4))
+        candle = receive_until(ws, "candle")["candle"]
+        assert candle["v"] > 1  # stored M1 of today's session plus the new tick
+        assert candle["l"] <= 1900.0
+
+
+def test_websocket_errors(client):
+    with client.websocket_connect("/ws") as ws:
+        ws.send_json({"type": "subscribe", "instrument": "XAU_USD", "timeframe": "7m"})
+        assert "unknown timeframe" in receive_until(ws, "error")["error"]
+        ws.send_json({"type": "subscribe", "instrument": "NOPE", "timeframe": "1m"})
+        assert "unknown instrument" in receive_until(ws, "error")["error"]
+        ws.send_json({"type": "dance"})
+        assert receive_until(ws, "error")

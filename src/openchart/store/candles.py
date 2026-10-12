@@ -6,7 +6,9 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 import aiosqlite
+import pandas as pd
 
+from openchart.market.aggregate import COLUMNS, PRICES, empty_frame
 from openchart.market.sessions import TradingHours
 from openchart.providers.base import OHLC, Candle, InstrumentInfo
 
@@ -89,6 +91,24 @@ class CandleStore:
         async with self.conn.execute(sql, (source, instrument, start, end)) as cur:
             rows = await cur.fetchall()
         return [Candle(r[0], OHLC(*r[1:5]), OHLC(*r[5:9]), OHLC(*r[9:13]), r[13]) for r in rows]
+
+    async def read_m1_frame(
+        self, source: str, instrument: str, start: int, end: int, price: str = "mid"
+    ) -> pd.DataFrame:
+        """M1 rows in `[start, end)` for one price series: columns ts, o, h, l, c, v."""
+        if price not in PRICES:
+            raise ValueError(f"price must be one of {PRICES}")
+        p = price
+        sql = (
+            f"SELECT ts, {p}_o, {p}_h, {p}_l, {p}_c, volume FROM candles_m1"
+            " WHERE source=? AND instrument=? AND ts>=? AND ts<? ORDER BY ts"
+        )
+        async with self.conn.execute(sql, (source, instrument, start, end)) as cur:
+            rows = await cur.fetchall()
+        if not rows:
+            return empty_frame()
+        frame = pd.DataFrame.from_records(rows, columns=COLUMNS)
+        return frame.astype({"ts": "int64", "v": "int64"})
 
     # Instruments
 

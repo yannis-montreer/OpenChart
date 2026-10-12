@@ -14,14 +14,12 @@ from datetime import UTC, datetime, timedelta
 from openchart import __version__
 from openchart.config import Config, ConfigError, load_config
 from openchart.market.backfill import backfill
-from openchart.market.feed import Feed
 from openchart.market.gaps import find_gaps
 from openchart.market.instruments import default_hours
 from openchart.providers.base import AuthError, Provider, ProviderError
 from openchart.providers.registry import create_provider
 from openchart.store.candles import CandleStore
 from openchart.store.sqlite import Database
-from openchart.store.ticks import TickWriter
 
 log = logging.getLogger("openchart")
 
@@ -156,20 +154,24 @@ async def _cmd_gaps(config: Config, args: argparse.Namespace) -> int:
 
 
 async def _cmd_run(config: Config, args: argparse.Namespace) -> int:
-    async with _context(config) as ctx:
-        rows = await ctx.store.instruments(ctx.provider.name, enabled_only=True)
-        if not rows:
-            print("No instruments enabled. Run `openchart backfill <INSTRUMENT>` first.")
-            return 1
-        writer = TickWriter(config.ticks_dir, ctx.provider.name) if config.store_ticks else None
-        feed = Feed(
-            ctx.provider,
-            ctx.store,
-            [r.instrument for r in rows],
-            tick_writer=writer,
-            backfill_years=config.backfill_years,
+    import uvicorn
+
+    from openchart.api.app import create_app
+    from openchart.server import Server
+
+    host = args.host or config.host
+    port = args.port or config.port
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        log.warning(
+            "listening on %s: there is no login until M4, so only do this on a private "
+            "network such as Tailscale",
+            host,
         )
-        await feed.run()
+    app = create_app(Server(config))
+    server = uvicorn.Server(
+        uvicorn.Config(app, host=host, port=port, log_level=config.log_level.lower())
+    )
+    await server.serve()
     return 0
 
 
@@ -197,7 +199,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("instrument")
     p.add_argument("--source", default="oanda")
     p.add_argument("--min-minutes", type=int, default=10)
-    sub.add_parser("run", help="gap-fill, then stream live ticks (Ctrl+C to stop)")
+    p = sub.add_parser("run", help="start the server: API, websocket and live feed")
+    p.add_argument("--host", help="bind address (default 127.0.0.1, from config)")
+    p.add_argument("--port", type=int, help="port (default 8000, from config)")
     return parser
 
 

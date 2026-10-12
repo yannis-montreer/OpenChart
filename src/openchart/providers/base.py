@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import NamedTuple, Protocol, runtime_checkable
 
+MID_DECIMALS = 9
+
 
 class OHLC(NamedTuple):
     o: float
@@ -43,7 +45,9 @@ class Tick:
 
     @property
     def mid(self) -> float:
-        return (self.bid + self.ask) / 2
+        # Rounded only to drop float noise (2050.1 + 2050.4) / 2 = 2050.2499999999995.
+        # 9 places is finer than any instrument's precision.
+        return round((self.bid + self.ask) / 2, MID_DECIMALS)
 
 
 @dataclass(frozen=True, slots=True)

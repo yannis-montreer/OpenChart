@@ -112,3 +112,22 @@ async def gap_fill(
     if result.written:
         log.info("gap-fill %s: %d candles up to %s", instrument, result.written, result.last_ts)
     return result
+
+
+async def refresh_recent(
+    provider: Provider,
+    store: CandleStore,
+    instrument: str,
+    lookback: timedelta = timedelta(minutes=15),
+    *,
+    source: str | None = None,
+) -> int:
+    """Re-fetch the last few minutes of M1 from the provider and upsert them.
+
+    Live M1 bars built from streamed ticks can differ slightly from the broker's own
+    candles (the stream is sampled). This replaces them with the official version.
+    """
+    source = source or provider.name
+    end = datetime.now(UTC)
+    candles = [c async for c in provider.fetch_candles(instrument, end - lookback, end)]
+    return await store.upsert_m1(source, instrument, candles)

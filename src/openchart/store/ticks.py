@@ -52,6 +52,14 @@ class TickWriter:
     def add(self, tick: Tick) -> None:
         self._buffer[(tick.instrument, _day(tick.ts))].append(tick)
 
+    def buffered(self, instrument: str) -> list[Tick]:
+        """Ticks for `instrument` not flushed to disk yet, in arrival order."""
+        out: list[Tick] = []
+        for (name, _day), ticks in sorted(self._buffer.items()):
+            if name == instrument:
+                out.extend(ticks)
+        return out
+
     @property
     def pending(self) -> int:
         return sum(len(v) for v in self._buffer.values())

@@ -53,3 +53,40 @@ async def test_stream_sends_heartbeat(provider):
         async for event in provider.stream_ticks([INSTRUMENT]):
             if isinstance(event, Heartbeat):
                 break
+
+
+# Sample ranges, Friday 17:00 New York to Friday 17:00 New York, each spanning a DST change.
+DST_RANGES = {
+    "autumn-2025": (datetime(2025, 10, 24, 21, tzinfo=UTC), datetime(2025, 11, 14, 22, tzinfo=UTC)),
+    "spring-2026": (datetime(2026, 2, 27, 22, tzinfo=UTC), datetime(2026, 3, 20, 21, tzinfo=UTC)),
+}
+
+
+@pytest.mark.parametrize("tf_name", ["1D", "4h"])
+@pytest.mark.parametrize("period", list(DST_RANGES))
+async def test_derived_candles_match_oanda(provider, tf_name, period):
+    """Bars resampled from OANDA M1 equal OANDA's own D/H4 candles (SPEC section 6)."""
+    import pandas as pd
+
+    from openchart.market.aggregate import resample
+    from openchart.market.timeframes import TIMEFRAMES
+
+    tf = TIMEFRAMES[tf_name]
+    start, end = DST_RANGES[period]
+    m1 = [c async for c in provider.fetch_candles(INSTRUMENT, start, end)]
+    broker = [c async for c in provider.fetch_candles(INSTRUMENT, start, end, tf.oanda)]
+    assert len(broker) >= (14 if tf_name == "1D" else 80)
+
+    for price in ("bid", "ask", "mid"):
+        frame = pd.DataFrame(
+            [(c.ts, *getattr(c, price), c.volume) for c in m1],
+            columns=["ts", "o", "h", "l", "c", "v"],
+        )
+        derived = {row.ts: row for row in resample(frame, tf).itertuples()}
+        assert set(derived) == {c.ts for c in broker}, f"{price}: bar times differ"
+        for c in broker:
+            d = derived[c.ts]
+            assert (d.o, d.h, d.l, d.c) == pytest.approx(tuple(getattr(c, price)), abs=1e-9), (
+                f"{price} {tf_name} bar at {c.ts}"
+            )
+            assert d.v == c.volume
