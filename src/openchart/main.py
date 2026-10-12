@@ -102,14 +102,16 @@ async def _cmd_backfill(config: Config, args: argparse.Namespace) -> int:
         before = await ctx.store.count(ctx.provider.name, args.instrument)
         print(f"Backfilling {args.instrument} M1 from {start:%Y-%m-%d} ({before} rows stored)")
 
-        def progress(written: int, ts: int) -> None:
-            print(f"\r  {written:>9,} candles written, at {_fmt(ts)}", end="", flush=True)
+        def progress(written: int, ts: int, direction: str) -> None:
+            where = "up to" if direction == "forward" else "searched back to"
+            print(f"\r  {written:>9,} candles written, {where} {_fmt(ts)}   ", end="", flush=True)
 
         result = await backfill(ctx.provider, ctx.store, args.instrument, start, progress=progress)
         after = await ctx.store.count(ctx.provider.name, args.instrument)
         print(
-            f"\nDone. {after - before:,} new rows ({result.written:,} written incl. updates), "
-            f"{after:,} total, {_fmt(result.first_ts)} to {_fmt(result.last_ts)}"
+            f"\nDone: reached the latest complete candle. {after - before:,} new rows "
+            f"({result.written:,} written incl. updates), {after:,} total, "
+            f"{_fmt(result.first_ts)} to {_fmt(result.last_ts)}"
         )
     return 0
 

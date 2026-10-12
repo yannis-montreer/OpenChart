@@ -7,43 +7,10 @@ import pytest
 from openchart.config import OandaConfig
 from openchart.providers.base import AuthError, Heartbeat, RequestError, Tick
 from openchart.providers.oanda import OandaProvider, parse_stream_line
+from tests.oanda_mock import TOKEN, CandleServer
 
-TOKEN = "test-token-abcdef-9876"
 CONFIG = OandaConfig("practice", TOKEN, "101-001-1-001")
 T0 = int(datetime(2024, 3, 4, tzinfo=UTC).timestamp())  # a Monday
-
-
-def raw_candle(ts: int, complete: bool = True) -> dict:
-    px = {"o": "2000.0", "h": "2001.0", "l": "1999.0", "c": "2000.5"}
-    return {
-        "time": f"{ts}.000000000",
-        "bid": px,
-        "ask": px,
-        "mid": px,
-        "volume": 7,
-        "complete": complete,
-    }
-
-
-class CandleServer:
-    """Mimics OANDA's from/count/includeFirst pagination over a fixed candle list."""
-
-    def __init__(self, stamps: list[int], incomplete_last: bool = False):
-        self.stamps = stamps
-        self.incomplete_last = incomplete_last
-        self.requests: list[httpx.Request] = []
-
-    def __call__(self, request: httpx.Request) -> httpx.Response:
-        self.requests.append(request)
-        assert request.headers["Authorization"] == f"Bearer {TOKEN}"
-        assert request.headers["Accept-Datetime-Format"] == "UNIX"
-        q = request.url.params
-        start, count = int(q["from"]), int(q["count"])
-        include_first = q.get("includeFirst", "true") == "true"
-        sel = [t for t in self.stamps if t > start or (include_first and t == start)][:count]
-        last = self.stamps[-1]
-        body = [raw_candle(t, not (self.incomplete_last and t == last)) for t in sel]
-        return httpx.Response(200, json={"instrument": "XAU_USD", "candles": body})
 
 
 def provider(handler) -> OandaProvider:

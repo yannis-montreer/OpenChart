@@ -174,13 +174,20 @@ class OandaProvider:
                 params["includeFirst"] = "false"
             data = await self._get(f"/v3/instruments/{instrument}/candles", params)
             batch = [parse_candle(raw) for raw in data.get("candles", [])]
+            # A short page does NOT mean we reached the present: with includeFirst=false
+            # OANDA counts the skipped candle toward `count`, so full pages hold 4999.
+            # The only end signals are an empty page or the still-forming candle.
+            if not batch:
+                return
             for candle in batch:
                 if candle.ts >= end_ts:
                     return
-                if candle.complete and candle.ts >= start_ts:
+                if not candle.complete:
+                    return  # the current, still-forming candle: we are at the present
+                if candle.ts >= start_ts:
                     yield candle
-            if len(batch) < MAX_CANDLES_PER_REQUEST:
-                return  # reached the present
+            if batch[-1].ts <= cursor and not include_first:
+                raise ProviderError(f"OANDA pagination stalled at {cursor} for {instrument}")
             cursor, include_first = batch[-1].ts, False
             if self.request_delay:
                 await asyncio.sleep(self.request_delay)

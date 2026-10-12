@@ -21,7 +21,9 @@ log = logging.getLogger(__name__)
 
 M1_SECONDS = 60
 
-Progress = Callable[[int, int], None]  # (rows written so far, last candle ts)
+# (rows written so far, ts, direction). Forward: newest candle stored so far.
+# Backward: how far back history has been searched.
+Progress = Callable[[int, int, str], None]
 
 
 @dataclass
@@ -54,9 +56,9 @@ async def backfill(
     start_ts, end_ts = int(start.timestamp()), int(end.timestamp())
     written = 0
 
-    def report(ts: int) -> None:
+    def report(ts: int, direction: str) -> None:
         if progress:
-            progress(written, ts)
+            progress(written, ts, direction)
 
     first = await store.first_ts(source, instrument)
     last = await store.last_ts(source, instrument)
@@ -69,11 +71,11 @@ async def backfill(
             batch.append(candle)
             if len(batch) >= batch_size:
                 written += await store.upsert_m1(source, instrument, batch)
-                report(batch[-1].ts)
+                report(batch[-1].ts, "forward")
                 batch = []
         if batch:
             written += await store.upsert_m1(source, instrument, batch)
-            report(batch[-1].ts)
+            report(batch[-1].ts, "forward")
 
     # Head: backward from the oldest stored candle, one window per transaction.
     if first is not None and start_ts < first:
@@ -87,7 +89,7 @@ async def backfill(
                 )
             ]
             written += await store.upsert_m1(source, instrument, candles)
-            report(window_start)
+            report(window_start, "backward")
             window_end = window_start
 
     return BackfillResult(
