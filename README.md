@@ -16,8 +16,8 @@ Self-hosted charting and alerting server for forex and metals. It runs 24/7 on y
 | Milestone | Status |
 |---|---|
 | M0 Scaffolding: package layout, config, SQLite migrations, tests, CI | done |
-| M1 OANDA provider, storage, backfill | done, waiting on owner acceptance checks |
-| M2 Aggregation, live candles, API, websocket | not started |
+| M1 OANDA provider, storage, backfill | done |
+| M2 Aggregation, live candles, API, websocket | done, waiting on owner review |
 | M3 Web chart | not started |
 | M4 Setup wizard, login, settings | not started |
 | M5 Drawings | not started |
@@ -41,7 +41,7 @@ ruff check . && ruff format --check .
 
 Configuration is read from environment variables or a `.env` file in the working directory. Copy `.env.example` to `.env` and fill in your values. `.env` is git-ignored; never commit it.
 
-## Command line (M1)
+## Command line
 
 Fill in `.env` first (OANDA practice token and account ID), then:
 
@@ -50,19 +50,27 @@ openchart test-connection          # one live call, prints OK or the error
 openchart backfill XAU_USD         # 2 years of M1 (default); add --years N to change
 openchart stats                    # rows, range, % of expected trading minutes covered
 openchart gaps XAU_USD             # holes not explained by weekends or the daily break
-openchart run                      # gap-fill, then stream live ticks (Ctrl+C to stop)
+openchart run                      # start the server: API, websocket and live feed
 ```
 
 - `backfill` is idempotent and resumable: run it again and it only fetches what is missing. A larger `--years` later extends history backwards.
-- `run` fills any gap since the last stored candle, streams ticks, saves them to `data/ticks/` (Parquet), and logs feed status every minute. If the link drops or goes silent for 15 s, it reconnects with backoff and gap-fills from REST.
-- Live candle building from ticks comes in M2; until then stored candles advance through gap-fills on start and reconnect.
+- `run` starts the server on http://127.0.0.1:8000 (change with `--host`/`--port`). It fills any gap since the last stored candle, streams ticks, builds live candles for every timeframe, saves closed M1 bars and raw ticks, and logs feed status every minute. If the link drops or goes silent for 15 s, it reconnects with backoff and gap-fills from REST. Once a minute it re-fetches the last 15 minutes of M1 from OANDA so stored history matches the broker's candles exactly.
+- There is no login until M4, so keep the default `127.0.0.1` for now.
+- REST and WebSocket reference: [`docs/api.md`](docs/api.md). Try http://127.0.0.1:8000/api/candles?instrument=XAU_USD&timeframe=1h&limit=5 or the interactive docs at http://127.0.0.1:8000/docs.
 - `pytest -m live -v` runs a few checks against the real OANDA API using your `.env`.
 
-### What works / what does not (M1)
+### What works / what does not
 
-Works: OANDA candles (paginated, retried, complete candles only), pricing stream with heartbeat supervision and reconnect, SQLite M1 storage, idempotent and resumable backfill, gap-fill on start and after reconnect, gap report, Parquet tick storage.
+Works:
+- OANDA candles (paginated, retried, complete only), pricing stream with heartbeat supervision and reconnect, SQLite M1 storage, idempotent and resumable backfill, gap-fill on start and after reconnect, gap report, Parquet tick storage (M1).
+- All timeframes from 1s to 1W. 4h, daily and weekly bars use the 17:00 New York trading day and follow DST; derived daily and 4h bars match OANDA's own candles exactly, checked on both 2025/2026 DST changes (M2).
+- Live candles from ticks for every timeframe, REST candles (`mid`, `bid`, `ask`), websocket with ticks, live candles and feed status (M2).
 
-Not yet: live candles, API, web UI, setup wizard (credentials come from `.env` until M4), alerts.
+Not yet: web UI (M3), login and setup wizard (M4; credentials come from `.env` until then), drawings, alerts, indicators.
+
+Known limits:
+- Daily and weekly requests resample all stored M1 on each call: about 1.4 s for two years of gold. A cache table can be added if this feels slow in the chart.
+- Sub-minute history is only available for periods when the server was running with tick storage on, and REST serves at most the last 3 days of it.
 
 ## Project layout
 
