@@ -22,7 +22,7 @@ Self-hosted charting and alerting server for forex and metals. It runs 24/7 on y
 | M4 Setup wizard, login, settings | done |
 | M5 Drawings | done |
 | M6 Alerts and Telegram | done |
-| M7 Indicators, chart types, layouts | not started |
+| M7 Indicators, chart types, layouts | done (reduced scope: EMA only), waiting on owner acceptance checks |
 | M8 Packaging and deployment | not started |
 | M9 Second instrument (EURUSD) | not started |
 
@@ -106,7 +106,11 @@ Works:
 
 - Alerts (M6): right-click a line and choose Add alert (or select it and press Alt+A, or use the Alert button; without a selected line the alert is on a price level). Crossing, crossing up or down; once, once per bar, on bar close or at most once a minute; bid, mid or ask; an expiry. Alerts run in the server whether a browser is open or not, on exactly the line drawn, and go to Telegram (set it up in Settings) and to open browsers. The bell in the right column lists them (stop, restart, edit, delete) with a log of what fired and whether Telegram got it. If the computer slept, the feed dropped or the server was off, the missed minutes are checked as soon as it is back and those alerts arrive marked as late; after sleep Telegram also tells you how long the server was frozen. Telegram also gets "engine started" and "feed stalled" / "feed recovered" messages.
 
-Not yet: indicators and other chart types (M7). Their buttons are visible but disabled.
+- Indicators (M7): the Indicators button (or `/`) lists them; for now EMA. Each one gets a legend row (hide, settings, remove) and a settings dialog with Inputs and Style tabs. Values are computed by the server on the chart's bars and price type. You can add your own: a Python file in `data/indicators/`, picked up when the server starts (see [docs/indicators.md](docs/indicators.md)).
+- Chart types (M7): candles, bars, line, area and Heikin Ashi (display only: drawings, alerts and price labels use real prices).
+- Layouts (M7): the layout menu in the top bar saves the chart (instrument, timeframe, chart type, price type, theme, panel, indicators) under a name on the server and loads it back; the starred one loads on start. Ctrl+S saves.
+
+Not yet: multi-timeframe indicators, indicator alerts and the other indicators of the first set (deferred, see docs/decisions.md).
 
 - Deep history: 1h, 4h, daily and weekly charts go back as far as the broker has H1 (gold on OANDA: March 2006). The server downloads it in the background on first start. Complete 4h/D/W bars are cached, so these charts load in milliseconds.
 

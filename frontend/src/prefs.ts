@@ -3,7 +3,7 @@
  * the server; these are only conveniences, so storage failures are ignored.
  */
 
-import type { DrawingStyle, Price } from "./api";
+import type { ChartType, DrawingStyle, IndicatorEntry, Price } from "./api";
 
 export interface Prefs {
   instrument: string | null;
@@ -16,6 +16,9 @@ export interface Prefs {
   panelView: "watchlist" | "alerts";
   drawingsHidden: boolean;
   drawingStyle: DrawingStyle; // style of the next new drawing (the last one chosen)
+  chartType: ChartType;
+  indicators: IndicatorEntry[]; // the chart's indicators when no layout is saved
+  layoutId: string | null; // the layout the chart was loaded from or saved as
 }
 
 const KEY = "openchart.prefs.v1";
@@ -31,6 +34,9 @@ export const DEFAULT_PREFS: Prefs = {
   panelView: "watchlist",
   drawingsHidden: false,
   drawingStyle: { color: "#4d8dff", width: 2, dash: "solid" },
+  chartType: "candles",
+  indicators: [],
+  layoutId: null,
 };
 
 export function loadPrefs(): Prefs {

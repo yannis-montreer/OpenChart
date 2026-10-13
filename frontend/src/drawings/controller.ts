@@ -118,7 +118,12 @@ export class DrawingController {
   ) {
     this.hidden = hidden;
     this.layer = new DrawingLayer(this);
-    view.candleSeries.attachPrimitive(this.layer);
+    view.priceSeries.attachPrimitive(this.layer);
+    // A new chart type replaces the price series: the drawings move to the new one.
+    view.onSeriesChange((before, after) => {
+      before.detachPrimitive(this.layer);
+      after.attachPrimitive(this.layer);
+    });
     this.toolbar = new StyleToolbar(area, this);
 
     const opts = { capture: true };
@@ -365,7 +370,7 @@ export class DrawingController {
   }
 
   private yOf(price: number): number | null {
-    return this.view.candleSeries.priceToCoordinate(price);
+    return this.view.priceSeries.priceToCoordinate(price);
   }
 
   private round(price: number): number {
@@ -377,7 +382,7 @@ export class DrawingController {
   private pointAt(x: number, y: number): Point | null {
     const index = this.index();
     const logical = this.view.chart.timeScale().coordinateToLogical(x);
-    const price = this.view.candleSeries.coordinateToPrice(y);
+    const price = this.view.priceSeries.coordinateToPrice(y);
     if (logical === null || price === null || index.size === 0) return null;
     const bar = Math.round(logical);
     let p = price as number;
@@ -472,7 +477,7 @@ export class DrawingController {
     const d = this.drawings.get(hit.id)!;
     this.select(hit.id);
     const logical = this.view.chart.timeScale().coordinateToLogical(pos.x) ?? 0;
-    const price = this.view.candleSeries.coordinateToPrice(pos.y) ?? 0;
+    const price = this.view.priceSeries.coordinateToPrice(pos.y) ?? 0;
     this.drag = {
       id: hit.id,
       part: hit.part,
@@ -548,7 +553,7 @@ export class DrawingController {
     drag.moved = true;
     const index = this.index();
     const logical = this.view.chart.timeScale().coordinateToLogical(x);
-    const price = this.view.candleSeries.coordinateToPrice(y);
+    const price = this.view.priceSeries.coordinateToPrice(y);
     if (logical === null || price === null) return;
     let points: Point[];
     if (drag.part === "body") {
