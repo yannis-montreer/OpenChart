@@ -17,12 +17,27 @@ from openchart.providers.base import OHLC, Candle, Tick
 
 PRICES = ("mid", "bid", "ask")
 COLUMNS = ["ts", "o", "h", "l", "c", "v"]
+# All three price series: ts, bid_o..bid_c, ask_o..ask_c, mid_o..mid_c, v.
+FULL_COLUMNS = ["ts", *(f"{p}_{k}" for p in ("bid", "ask", "mid") for k in "ohlc"), "v"]
 
 
-def empty_frame() -> pd.DataFrame:
+def empty_frame(columns: list[str] = COLUMNS) -> pd.DataFrame:
     return pd.DataFrame(
-        {c: pd.Series(dtype="int64" if c in ("ts", "v") else "float64") for c in COLUMNS}
+        {c: pd.Series(dtype="int64" if c in ("ts", "v") else "float64") for c in columns}
     )
+
+
+def resample_full(frame: pd.DataFrame, tf: Timeframe) -> pd.DataFrame:
+    """`resample` for a frame with FULL_COLUMNS (bid, ask and mid at once)."""
+    if frame.empty:
+        return empty_frame(FULL_COLUMNS)
+    keys = bar_starts(frame["ts"].to_numpy(), tf)
+    rules = {"o": "first", "h": "max", "l": "min", "c": "last"}
+    agg = {f"{p}_{k}": rule for p in ("bid", "ask", "mid") for k, rule in rules.items()}
+    agg["v"] = "sum"
+    out = frame.groupby(keys, sort=True).agg(agg)
+    out.insert(0, "ts", out.index.to_numpy(dtype=np.int64))
+    return out.reset_index(drop=True)[FULL_COLUMNS]
 
 
 def resample(frame: pd.DataFrame, tf: Timeframe) -> pd.DataFrame:

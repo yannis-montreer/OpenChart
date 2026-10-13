@@ -192,14 +192,16 @@ Use a simple migration system (numbered SQL files) from the start.
 1. First run: backfill M1 from the provider (default 2 years, configurable) into `candles_m1`.
 2. Every later start: read the last stored `ts`, fill the gap since then, then switch to the live stream.
 3. Backfill must be idempotent (upsert) and resumable.
+4. **Deep history tier:** H1 candles (bid, ask, mid) as far back as the provider has them, in `candles_h1` (OANDA XAU_USD: from 2006-03-19). Downloaded once in the background on first start (or with `openchart backfill <INSTRUMENT> --deep`), then gap-filled on every start. On by default (`OPENCHART_DEEP_HISTORY`).
 
 ### Higher timeframes
-Derived from M1 on demand with a resample:
+Derived on demand with a resample:
 - open = first open, high = max, low = min, close = last close, volume = sum.
 - Supported: 1m, 5m, 15m, 30m, 1h, 4h, 1D, 1W. Sub-minute (1s, 5s, 15s, 30s) from ticks only.
+- **Base data:** 1m to 30m come from M1 only. 1h, 4h, 1D and 1W come from H1 where M1 does not reach and from M1 where it does. The switch is at the first whole hour covered by M1, so the two never overlap. Bars derived from H1 equal bars derived from M1 over the same range (tested against OANDA data, including tick volume).
 - **Alignment matters.** Use the same boundaries as OANDA and most forex brokers: the trading day closes at **17:00 America/New_York**, weekly candles start Sunday evening (week aligned to Friday 17:00 New York close). H4 and D bars are anchored to that 17:00 boundary, not UTC midnight. Define this once in `market/sessions.py` and use it everywhere. Handle DST through the New York timezone, not fixed offsets.
 - Include a test that compares derived D candles against OANDA's own D candles for a sample range.
-- Optional cache table for heavy timeframes, always rebuildable from M1.
+- **Cache:** complete 4h, 1D and 1W bars are stored in `candles_cache`, always rebuildable from M1/H1 (`openchart rebuild-cache`). The cache grows as bars close (checked every minute and on each request); any M1 or H1 write deletes the cached bars it affects, which are then recomputed. The forming bar is never cached; it is computed from base data on each request.
 
 ### Price series choice
 The API accepts `price=mid|bid|ask`. Charts default to mid. Alerts and backtests choose bid or ask explicitly.

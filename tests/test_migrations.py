@@ -13,6 +13,8 @@ SPEC_TABLES = {
     "layouts",
     "settings",
     "sessions",
+    "candles_h1",
+    "candles_cache",
 }
 
 

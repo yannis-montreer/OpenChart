@@ -126,9 +126,10 @@ export function formatClock(utc: number, tz: string): string {
   return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
 }
 
-/** "4:59" or "1:02:03" until `end`. */
+/** "04:59", "1:02:03", or "3d 12h" for more than a day. */
 export function formatCountdown(seconds: number): string {
   const s = Math.max(0, Math.floor(seconds));
+  if (s >= 86400) return `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`;
   const h = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);
   return h ? `${h}:${pad(m)}:${pad(s % 60)}` : `${pad(m)}:${pad(s % 60)}`;

@@ -48,7 +48,7 @@ Choices made where `SPEC.md` was open or ambiguous (SPEC section 18, rule 7). Ne
 - **WebSocket `subscribe` takes an optional `price`** (`mid` default, `bid`, `ask`), and candle messages carry it. A tick is sent before the candle update it causes. Each client has a 2000-message queue; a client that falls behind is closed with code 1013 and should refetch and resubscribe.
 - **No authentication until M4.** The API is bound to 127.0.0.1 by default, and `run` warns when bound elsewhere. The spec's session requirement applies from M4.
 - **`openchart run` now starts the HTTP server** (API, websocket, feed) instead of the bare feed. If the first gap-fill fails (network down at boot), the feed retries every 30 s while the API keeps serving stored data. If the credentials are rejected, the feed stops and `/api/status` shows the error.
-- **No candle cache table yet.** Daily and weekly requests resample all stored M1 (about 1.4 s for 2 years of gold); add the optional cache if the chart needs it.
+- **No candle cache table yet.** Daily and weekly requests resample all stored M1 (about 1.4 s for 2 years of gold); add the optional cache if the chart needs it. (Superseded in M3: see "Deep history and cache".)
 - **The derived-vs-OANDA candle check is a live test** (`pytest -m live`), so it runs with the owner's credentials and not in CI. No market-data fixtures are committed (SPEC section 14).
 
 ## M3
@@ -67,3 +67,17 @@ Choices made where `SPEC.md` was open or ambiguous (SPEC section 18, rule 7). Ne
 - **`window.openchart`** exposes the app object for debugging in the browser console.
 - **The Python wheel ships the built UI** through `artifacts` in `pyproject.toml`.
 - **The broker's limit on concurrent price streams** (practice: about two per account) surfaced during testing. The stream log now says "no answer to the stream request … Brokers limit concurrent price streams" instead of a generic timeout, and the README says to run one server per account.
+
+## M3: deep history and cache (owner request, 2026-10-13)
+
+- **Why:** daily and weekly charts took about 2 s and only had the 2 years of M1. The owner asked for a cache of D, W and 4h and for deeper history from H1 (SPEC section 6 updated).
+- **How far OANDA goes:** probed on the practice account, XAU_USD starts on 2006-03-19 at every granularity (M1, M5, M15, H1, H4, D). The deep tier is H1 from that date: about 125,000 rows, downloaded in about 20 s.
+- **Why H1 and not more M1:** M1 also exists back to 2006, but that is about 7 million rows (about 1 GB). H1 gives identical 1h, 4h, D and W bars for about 2% of that.
+- **The switch from H1 to M1** is at the first whole hour covered by M1 (H1 rows before it, M1 rows from it). Extending M1 further back later moves the switch and invalidates the cache from there automatically.
+- **Checked against OANDA:** bars resampled from OANDA H1 equal those resampled from OANDA M1 (live test, D/4h/W, both DST windows, prices and tick volume), and equal OANDA's own D, W and H4 candles in windows from 2006, 2007 (first year of the current US DST rules), 2011 and 2016.
+- **The only difference found:** OANDA's first two H1 hours (2006-03-19 20:00 and 21:00 UTC, before that Sunday's 17:00 New York open) form one extra small bar at the very start of our D, W and 4h history; OANDA's own aggregates leave them out. Kept, because it is real data.
+- **Cache table** `candles_cache(source, instrument, timeframe, ts, bid/ask/mid OHLC, volume)`, for 4h, 1D and 1W. Only complete bars (period over) are stored; the forming bar is computed on every request. Results are identical to the uncached path (tested).
+- **Invalidation instead of bookkeeping:** every M1/H1 upsert deletes cached bars from the period of its earliest candle onward. The cache resumes from its newest bar, so no "built until" state can go stale. A counter bumped before each write lets `extend` notice that data changed while it was computing and drop that chunk (tested).
+- **Bars are never cut at `to` either:** `/api/candles?to=` returns every bar that starts before `to`, whole. This is what the cache does naturally; the uncached path was changed to match.
+- **1h also uses H1 before M1**, so 1h charts go back to 2006 too. Timeframes below 1h cannot be built from H1 and stay limited to the M1 depth.
+- **Speed (2 years of M1 plus 20 years of H1, gold):** first 1000 bars of 4h, D or W in about 12 ms (was about 1.4 to 2 s); each older page about 5 ms; 1h about 110 ms. Full cache build about 2 s.

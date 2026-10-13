@@ -16,7 +16,8 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from openchart.market.backfill import backfill, gap_fill, refresh_recent
+from openchart.market.backfill import backfill, deep_fill, gap_fill, refresh_recent
+from openchart.market.cache import CandleCache
 from openchart.market.candle_builder import CandleBuilder
 from openchart.providers.base import Candle, Provider, Tick
 from openchart.providers.stream import ResilientTickStream
@@ -37,6 +38,8 @@ class Feed:
         *,
         tick_writer: TickWriter | None = None,
         builder: CandleBuilder | None = None,
+        cache: CandleCache | None = None,
+        deep_history: bool = True,
         backfill_years: float = 2.0,
         flush_interval: float = 60.0,
         status_interval: float = 60.0,
@@ -52,6 +55,9 @@ class Feed:
         self.status_interval = status_interval
         self.refresh_interval = refresh_interval
         self.builder = builder or CandleBuilder()
+        self.cache = cache
+        self.deep_history = deep_history
+        self._background: asyncio.Task[None] | None = None
         self.builder.on_m1_closed = self._queue_m1
         self.builder.load_m1 = self._load_m1
         self.stream = ResilientTickStream(provider, instruments, on_connected=self._on_connected)
@@ -59,7 +65,8 @@ class Feed:
         self.last_tick: dict[str, Tick] = {}
         self.tick_count = 0
         self.history: dict[str, dict[str, Any]] = {
-            name: {"state": "pending", "written": 0, "at": None} for name in instruments
+            name: {"state": "pending", "written": 0, "at": None, "deep": None, "deep_from": None}
+            for name in instruments
         }
         self._pending_m1: list[tuple[str, Candle]] = []
 
@@ -87,6 +94,33 @@ class Feed:
                 raise
             info.update(state="done", at=result.last_ts)
             log.info("%s: history up to %s (%d new)", instrument, result.last_ts, result.written)
+
+    async def fill_deep_history_and_cache(self) -> None:
+        """Deep H1 history (first run: everything the provider has), then the bar cache.
+
+        Runs in the background so live ticks start flowing straight away.
+        """
+        for instrument in self.instruments:
+            info = self.history[instrument]
+            if self.deep_history:
+                info["deep"] = "running"
+                try:
+                    result = await deep_fill(self.provider, self.store, instrument)
+                    info.update(deep="done", deep_from=result.first_ts)
+                except Exception as exc:
+                    info["deep"] = "failed"
+                    log.warning("deep history for %s failed: %s", instrument, exc)
+            await self.extend_cache(instrument)
+
+    async def extend_cache(self, instrument: str) -> None:
+        if self.cache is None:
+            return
+        try:
+            written = await self.cache.extend_all(self.source, instrument)
+            if written > 10:
+                log.info("cached %d derived bars for %s", written, instrument)
+        except Exception:
+            log.exception("extending the bar cache for %s failed", instrument)
 
     async def _on_connected(self, reconnect: bool) -> None:
         if reconnect:
@@ -146,6 +180,8 @@ class Feed:
             if now - last_refresh >= self.refresh_interval:
                 last_refresh = now
                 await self.refresh()
+                for instrument in self.instruments:
+                    await self.extend_cache(instrument)
             if now - last_status >= self.status_interval:
                 last_status = now
                 self.log_status()
@@ -189,13 +225,16 @@ class Feed:
         if self.tick_writer:
             await asyncio.to_thread(self.tick_writer.compact_closed_days)
         periodic = asyncio.create_task(self._periodic())
+        self._background = asyncio.create_task(self.fill_deep_history_and_cache())
         try:
             async for tick in self.stream.ticks():
                 self.handle_tick(tick)
         finally:
-            periodic.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await periodic
+            for task in (periodic, self._background):
+                if task is not None:
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await task
             with contextlib.suppress(Exception):
                 await self.flush_m1()
             if self.tick_writer and self.tick_writer.pending:

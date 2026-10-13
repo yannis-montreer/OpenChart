@@ -58,7 +58,9 @@ Fill in `.env` first (OANDA practice token and account ID), then:
 ```bash
 openchart test-connection          # one live call, prints OK or the error
 openchart backfill XAU_USD         # 2 years of M1 (default); add --years N to change
-openchart stats                    # rows, range, % of expected trading minutes covered
+openchart backfill XAU_USD --deep  # also H1 back to the broker's first candle (gold: 2006)
+openchart stats                    # rows, range, coverage, H1 depth, cached bars
+openchart rebuild-cache            # recompute cached 4h/D/W bars (never needed normally)
 openchart gaps XAU_USD             # holes not explained by weekends or the daily break
 openchart run                      # start the server: API, websocket and live feed
 ```
@@ -82,8 +84,10 @@ Works:
 
 Not yet: login and setup wizard (M4; credentials come from `.env` until then), drawings (M5), alerts (M6), indicators and other chart types (M7). Their buttons are visible but disabled.
 
+- Deep history: 1h, 4h, daily and weekly charts go back as far as the broker has H1 (gold on OANDA: March 2006). The server downloads it in the background on first start. Complete 4h/D/W bars are cached, so these charts load in milliseconds.
+
 Known limits:
-- Daily and weekly requests resample all stored M1 on each call: about 1.4 s for two years of gold. A cache table can be added if this feels slow in the chart.
+- 1m to 30m charts only go back as far as stored M1 (2 years by default, `--years` to change). They cannot be built from H1.
 - Sub-minute history is only available for periods when the server was running with tick storage on, and REST serves at most the last 3 days of it.
 
 ## Project layout
