@@ -119,6 +119,20 @@ def test_files_in_the_indicators_folder_are_discovered(tmp_path):
     assert "'length' is not a color parameter" in errors["bad_ref.py"]
 
 
+def test_files_can_use_the_helpers_named_like_builtin_indicators(tmp_path):
+    # ema.py is a built-in indicator and ema() a helper: loading the first must not
+    # replace the second for the files that import it.
+    write(tmp_path, "double.py", GOOD.replace("sma", "ema"))
+    registry = load_indicators(tmp_path)
+    assert registry.errors == []
+    bars = pd.DataFrame({"o": 1.0, "h": 2.0, "l": 0.0, "c": [float(x) for x in range(10)]})
+    out = registry.get("double").run(bars, registry.get("double").normalize({"length": 3}))
+    assert out["mid"].iloc[2] == pytest.approx(1.0)
+    from openchart import indicators
+
+    assert callable(indicators.ema)
+
+
 def test_parameters_are_validated_and_completed():
     ema_ind = load_indicators(None).get("ema")
     assert ema_ind.normalize({"length": 20.0}) == {

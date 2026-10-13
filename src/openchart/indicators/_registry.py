@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import importlib
 import importlib.util
 import logging
-import pkgutil
 import re
 import sys
 from dataclasses import dataclass, field
@@ -18,6 +16,7 @@ from openchart.indicators._base import Indicator, Output, Param
 log = logging.getLogger(__name__)
 
 _ID = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
+BUILTIN_DIR = Path(package.__file__).resolve().parent
 
 
 @dataclass
@@ -36,22 +35,25 @@ def load_indicators(user_dir: Path | None = None) -> Registry:
     """The built-in indicators, then the owner's files in `user_dir` (which win on a
     clash of names). A file that fails to load is reported, not fatal."""
     registry = Registry()
-    for info in pkgutil.iter_modules(package.__path__):
-        if info.name.startswith("_"):
-            continue
+    for path in _files(BUILTIN_DIR):
+        where = f"openchart/indicators/{path.name}"
         _add(
-            registry,
-            info.name,
-            f"openchart/indicators/{info.name}.py",
-            builtin=True,
-            load=lambda name=info.name: importlib.import_module(f"{package.__name__}.{name}"),
+            registry, path.stem, where, builtin=True, load=lambda p=path: _import_file(p, "builtin")
         )
     if user_dir is not None and user_dir.is_dir():
-        for path in sorted(user_dir.glob("*.py")):
-            if path.stem.startswith("_"):
-                continue
-            _add(registry, path.stem, str(path), builtin=False, load=lambda p=path: _import_file(p))
+        for path in _files(user_dir):
+            _add(
+                registry,
+                path.stem,
+                str(path),
+                builtin=False,
+                load=lambda p=path: _import_file(p, "user"),
+            )
     return registry
+
+
+def _files(folder: Path) -> list[Path]:
+    return [p for p in sorted(folder.glob("*.py")) if not p.stem.startswith("_")]
 
 
 def _add(registry: Registry, stem: str, where: str, *, builtin: bool, load) -> None:
@@ -68,8 +70,11 @@ def _add(registry: Registry, stem: str, where: str, *, builtin: bool, load) -> N
     registry.indicators[stem] = indicator
 
 
-def _import_file(path: Path) -> ModuleType:
-    name = f"openchart_user_indicators.{path.stem}"
+def _import_file(path: Path, kind: str) -> ModuleType:
+    """Run an indicator file as a module of its own. Not as `openchart.indicators.<name>`:
+    importing a submodule sets an attribute of the package, so `ema.py` would replace the
+    `ema` function that indicator files import from it."""
+    name = f"openchart_indicator_files.{kind}.{path.stem}"
     spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load {path}")
