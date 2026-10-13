@@ -12,6 +12,7 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
+from openchart.alerts.service import AlertService
 from openchart.api.auth import Auth
 from openchart.api.hub import Hub
 from openchart.config import Config, OandaConfig
@@ -104,6 +105,8 @@ class Server:
             cache=self.cache,
         )
         self._tasks.append(asyncio.create_task(self._status_loop(), name="status"))
+        self.alerts = AlertService(self)
+        await self.alerts.start()
 
         if not await self.auth.password_set():
             log.warning(
@@ -112,6 +115,7 @@ class Server:
                 self.auth.setup_code,
             )
         await self.reconfigure()
+        await self.alerts.announce_start()
 
     async def app_settings(self) -> AppSettings:
         return await load_app_settings(self.settings, self.config)
@@ -152,9 +156,11 @@ class Server:
                 )
                 self.feed.tick_listeners.append(self.hub.on_tick)
                 self.feed.on_closures = self.broadcast_closures
+                self.alerts.attach(self.feed)
                 self.feed.stream.on_state = self._on_stream_state
                 if self.run_feed:
                     self._feed_task = asyncio.create_task(self._run_feed(self.feed), name="feed")
+            await self.alerts.refresh_clocks()
             self.hub.broadcast_status()
 
     async def _stop_feed(self) -> None:
@@ -190,6 +196,7 @@ class Server:
     async def broadcast_closures(self, instrument: str) -> None:
         """Browsers redraw lines with the instrument's newly learned closures."""
         closures = await self.store.closures(self.source, instrument)
+        await self.alerts.refresh_clocks(instrument)
         self.hub.broadcast(
             {"type": "closures", "instrument": instrument, "closures": [list(c) for c in closures]}
         )
@@ -219,6 +226,7 @@ class Server:
 
     async def stop(self) -> None:
         await self._stop_feed()
+        await self.alerts.stop()
         for task in self._tasks:
             task.cancel()
         for task in self._tasks:

@@ -71,6 +71,8 @@ def drawing_routes(server: Server) -> APIRouter:
         return DrawingStore(server.db.conn)
 
     def announce(op: str, drawing: Drawing) -> dict[str, Any]:
+        if op != "delete":
+            server.alerts.drawing_changed(drawing)  # a moved line re-arms its alerts
         data = drawing.to_json()
         server.hub.broadcast({"type": "drawing_changed", "op": op, "drawing": data})
         return data
@@ -117,12 +119,14 @@ def drawing_routes(server: Server) -> APIRouter:
         drawing = await store().delete(drawing_id)
         if drawing is None:
             raise HTTPException(404, "no such drawing")
+        await server.alerts.drawing_deleted(drawing.id)  # its alerts go with it
         return announce("delete", drawing)
 
     @router.delete("")
     async def delete_all(instrument: str) -> dict[str, Any]:
         removed = await store().delete_all(instrument)
         for drawing in removed:
+            await server.alerts.drawing_deleted(drawing.id)
             announce("delete", drawing)
         return {"deleted": len(removed)}
 
