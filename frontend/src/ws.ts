@@ -6,7 +6,8 @@
  * the server sends status every 5 s, so silence means the link is gone.
  */
 
-import type { Bar, Price, Status } from "./api";
+import type { Bar, Drawing, Price, Status } from "./api";
+import type { Closure } from "./drawings/tradingTime";
 
 export interface SubKey {
   instrument: string;
@@ -28,6 +29,8 @@ export type ServerMessage =
     }
   | { type: "subscribed" | "unsubscribed"; instrument: string; timeframe: string; price: Price }
   | { type: "pong"; server_time: number }
+  | { type: "drawing_changed"; op: "create" | "update" | "delete"; drawing: Drawing }
+  | { type: "closures"; instrument: string; closures: Closure[] }
   | { type: "error"; error: string };
 
 export type SocketState = "connecting" | "open" | "reconnecting";

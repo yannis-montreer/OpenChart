@@ -107,6 +107,25 @@ def account_routes(server: Server) -> APIRouter:
             (account_id or "").strip() or current.account_id,
         )
 
+    async def refuse_feed_switch(new: OandaConfig) -> None:
+        """Stored history belongs to one OANDA environment and account. Another one is a
+        different price feed, and SPEC section 3 forbids mixing feeds in one series."""
+        current = (await server.effective_config()).oanda
+        if not current.account_id:
+            return
+        same = (new.environment, new.account_id) == (current.environment, current.account_id)
+        if same or not await server.store.has_data(server.source):
+            return
+        raise HTTPException(
+            409,
+            f"The stored price history comes from the OANDA {current.environment} account "
+            f"{current.account_id}. Switching to the {new.environment} account "
+            f"{new.account_id} would mix two price feeds in the same charts and alerts, so "
+            "it is refused. To use another account, start OpenChart with a new data folder "
+            "(openchart run --data-dir <folder>) or move the current one aside. A new token "
+            "for the same account is fine.",
+        )
+
     async def oanda_instruments(oanda: OandaConfig) -> tuple[str, list[InstrumentInfo]]:
         """(source name, instruments of this account). Proves the token and account work."""
         if not oanda.configured:
@@ -187,6 +206,7 @@ def account_routes(server: Server) -> APIRouter:
             oanda = await candidate_oanda(
                 body.oanda_environment, body.oanda_account_id, body.oanda_token
             )
+            await refuse_feed_switch(oanda)
             found = await oanda_instruments(oanda)
             instrument = body.instrument.strip().upper()
 
@@ -271,6 +291,7 @@ def account_routes(server: Server) -> APIRouter:
             oanda = await candidate_oanda(
                 body.oanda_environment, body.oanda_account_id, body.oanda_token
             )
+            await refuse_feed_switch(oanda)
             await oanda_instruments(oanda)  # refuse to save credentials that do not work
             await server.settings.set("oanda_environment", oanda.environment)
             await server.settings.set("oanda_account_id", oanda.account_id)

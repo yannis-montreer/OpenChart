@@ -1,5 +1,7 @@
 /** REST client for the OpenChart server (see docs/api.md). */
 
+import type { DrawingType, Point } from "./drawings/geometry";
+import type { Closure, TradingHoursJson } from "./drawings/tradingTime";
 import type { SessionMeta } from "./time";
 
 /** The API version this client was written against. */
@@ -38,6 +40,9 @@ export interface Instrument {
   decimals: number;
   pip_size: number;
   enabled: boolean;
+  hours: TradingHoursJson | null;
+  /** Learned closures (holidays, early closes): [start, end) in UTC epoch seconds. */
+  closures: Closure[];
 }
 
 export interface InstrumentStatus {
@@ -183,4 +188,40 @@ export const account = {
     request<{ ok: true }>("POST", "api/instruments", { body: { instrument } }),
   removeInstrument: (instrument: string) =>
     request<{ ok: true }>("DELETE", `api/instruments/${encodeURIComponent(instrument)}`),
+};
+
+// Drawings
+
+export interface DrawingStyle {
+  color: string;
+  width: number;
+  dash: "solid" | "dashed" | "dotted";
+}
+
+export interface Drawing {
+  id: string;
+  instrument: string;
+  type: DrawingType;
+  points: Point[];
+  style: DrawingStyle;
+  label: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface DrawingPatch {
+  points?: Point[];
+  style?: Partial<DrawingStyle>;
+  label?: string;
+  clear_label?: boolean;
+}
+
+export const drawingsApi = {
+  list: (instrument: string) => get<Drawing[]>("api/drawings", { instrument }),
+  create: (body: { instrument: string; type: DrawingType; points: Point[]; style: DrawingStyle; label?: string | null }) =>
+    request<Drawing>("POST", "api/drawings", { body }),
+  update: (id: string, body: DrawingPatch) => request<Drawing>("PUT", `api/drawings/${id}`, { body }),
+  remove: (id: string) => request<Drawing>("DELETE", `api/drawings/${id}`),
+  removeAll: (instrument: string) =>
+    request<{ deleted: number }>("DELETE", "api/drawings", { params: { instrument } }),
 };

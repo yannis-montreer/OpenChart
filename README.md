@@ -19,8 +19,8 @@ Self-hosted charting and alerting server for forex and metals. It runs 24/7 on y
 | M1 OANDA provider, storage, backfill | done |
 | M2 Aggregation, live candles, API, websocket | done |
 | M3 Web chart | done |
-| M4 Setup wizard, login, settings | done, waiting on owner acceptance checks |
-| M5 Drawings | not started |
+| M4 Setup wizard, login, settings | done |
+| M5 Drawings | done, waiting on owner acceptance checks |
 | M6 Alerts and Telegram | not started |
 | M7 Indicators, chart types, layouts | not started |
 | M8 Packaging and deployment | not started |
@@ -79,6 +79,7 @@ openchart stats                    # rows, range, coverage, H1 depth, cached bar
 openchart rebuild-cache            # recompute cached 4h/D/W bars (never needed normally)
 openchart reset-password           # set a new web password from the server console
 openchart gaps XAU_USD             # holes not explained by weekends or the daily break
+openchart repair XAU_USD           # refetch those holes from the broker (fills what it has)
 openchart run                      # start the server: API, websocket and live feed
 ```
 
@@ -101,7 +102,9 @@ Works:
 
 - Setup, login and settings (M4): first-run wizard with connection tests, single-password login (argon2, 30-day HTTP-only session cookie, rate limited), settings page, instruments added and removed from the UI (history downloads in the background), secrets in the OS credential store and never returned by the API.
 
-Not yet: drawings (M5), alerts and the Telegram notifier (M6; the Telegram test button already works), indicators and other chart types (M7). Their buttons are visible but disabled.
+- Drawings (M5): horizontal line, trendline, ray and extended line from the left toolbar. Click point 1, click point 2 (or press, drag, release); hover shows the handles; drag a handle or the whole line; Delete removes; right-click for style, label, clone and delete; a floating toolbar sets colour, width and dash. Hold Ctrl while drawing to snap to the bar's open, high, low or close. Drawings are stored on the server and every open browser sees changes at once. The eye hides them; the bin deletes all of them on the instrument.
+
+Not yet: alerts and the Telegram notifier (M6; "Add alert" on a line is shown disabled; the Telegram test button already works), indicators and other chart types (M7). Their buttons are visible but disabled.
 
 - Deep history: 1h, 4h, daily and weekly charts go back as far as the broker has H1 (gold on OANDA: March 2006). The server downloads it in the background on first start. Complete 4h/D/W bars are cached, so these charts load in milliseconds.
 

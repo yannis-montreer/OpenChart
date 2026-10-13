@@ -3,7 +3,7 @@
  * the server; these are only conveniences, so storage failures are ignored.
  */
 
-import type { Price } from "./api";
+import type { DrawingStyle, Price } from "./api";
 
 export interface Prefs {
   instrument: string | null;
@@ -13,6 +13,8 @@ export interface Prefs {
   timezone: string; // IANA name, "local" or "UTC"
   favorites: string[];
   panelOpen: boolean;
+  drawingsHidden: boolean;
+  drawingStyle: DrawingStyle; // style of the next new drawing (the last one chosen)
 }
 
 const KEY = "openchart.prefs.v1";
@@ -25,6 +27,8 @@ export const DEFAULT_PREFS: Prefs = {
   timezone: "local",
   favorites: ["1m", "5m", "15m", "30m", "1h", "4h", "1D", "1W"],
   panelOpen: true,
+  drawingsHidden: false,
+  drawingStyle: { color: "#4d8dff", width: 2, dash: "solid" },
 };
 
 export function loadPrefs(): Prefs {

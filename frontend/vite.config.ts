@@ -15,9 +15,11 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+    // Keep the browser's Host header: the server only accepts writes whose Origin
+    // matches it (the string shorthand would set changeOrigin and get every write a 403).
     proxy: {
-      "/api": api,
-      "/ws": { target: api.replace(/^http/, "ws"), ws: true },
+      "/api": { target: api, changeOrigin: false },
+      "/ws": { target: api.replace(/^http/, "ws"), ws: true, changeOrigin: false },
     },
   },
   test: {

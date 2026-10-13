@@ -115,11 +115,15 @@ class CandleStore:
             instrument,
         )
 
-    async def last_ts(self, source: str, instrument: str, granularity: str = "M1") -> int | None:
+    async def last_ts(
+        self, source: str, instrument: str, granularity: str = "M1", *, before: int | None = None
+    ) -> int | None:
+        """Newest stored candle, or the newest one strictly before `before`."""
         return await self._scalar(
-            f"SELECT MAX(ts) FROM {TABLES[granularity]} WHERE source=? AND instrument=?",
+            f"SELECT MAX(ts) FROM {TABLES[granularity]} WHERE source=? AND instrument=? AND ts<?",
             source,
             instrument,
+            2**62 if before is None else before,
         )
 
     async def timestamps(
@@ -360,6 +364,61 @@ class CandleStore:
         )
         await self.conn.commit()
         return cur.rowcount > 0
+
+    async def has_data(self, source: str) -> bool:
+        """Any stored candles from this source (any instrument, M1 or H1)."""
+        for table in ("candles_m1", "candles_h1"):
+            async with self.conn.execute(
+                f"SELECT 1 FROM {table} WHERE source=? LIMIT 1", (source,)
+            ) as cur:
+                if await cur.fetchone():
+                    return True
+        return False
+
+    # Learned closures (holidays, early closes)
+
+    async def closures(self, source: str, instrument: str) -> list[tuple[int, int]]:
+        async with self.conn.execute(
+            "SELECT start_ts, end_ts FROM closures WHERE source=? AND instrument=?"
+            " ORDER BY start_ts",
+            (source, instrument),
+        ) as cur:
+            return [(r[0], r[1]) for r in await cur.fetchall()]
+
+    async def replace_closures(
+        self, source: str, instrument: str, start: int, end: int, intervals: list[tuple[int, int]]
+    ) -> bool:
+        """Make `intervals` the closures that start in `[start, end)`. True if that changed them."""
+        current = [c for c in await self.closures(source, instrument) if start <= c[0] < end]
+        new = sorted(intervals)
+        if current == new:
+            return False
+        await self.conn.execute(
+            "DELETE FROM closures WHERE source=? AND instrument=? AND start_ts>=? AND start_ts<?",
+            (source, instrument, start, end),
+        )
+        await self.conn.executemany(
+            "INSERT OR REPLACE INTO closures (source, instrument, start_ts, end_ts)"
+            " VALUES (?, ?, ?, ?)",
+            [(source, instrument, s, e) for s, e in new],
+        )
+        await self.conn.commit()
+        return True
+
+    async def closures_scanned(self, source: str, instrument: str) -> bool:
+        at = await self._scalar(
+            "SELECT closures_scanned_at FROM instruments WHERE source=? AND instrument=?",
+            source,
+            instrument,
+        )
+        return at is not None
+
+    async def mark_closures_scanned(self, source: str, instrument: str, at: int) -> None:
+        await self.conn.execute(
+            "UPDATE instruments SET closures_scanned_at=? WHERE source=? AND instrument=?",
+            (at, source, instrument),
+        )
+        await self.conn.commit()
 
     async def instrument(self, source: str, instrument: str) -> InstrumentRow | None:
         for row in await self.instruments(source):

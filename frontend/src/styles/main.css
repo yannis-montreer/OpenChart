@@ -671,3 +671,79 @@ kbd {
   border-radius: 2px 0 0 2px;
   background: inherit;
 }
+
+/* Drawings: floating style toolbar and palette */
+
+.draw-toolbar {
+  position: absolute;
+  top: 58px; /* below the legend */
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  background: var(--raised);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+.draw-toolbar .btn {
+  height: 30px;
+  min-width: 30px;
+  padding: 0 7px;
+  justify-content: center;
+}
+.draw-toolbar .sep {
+  height: 20px;
+  margin: 0 3px;
+}
+.swatch {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+}
+.palette {
+  display: grid;
+  grid-template-columns: repeat(6, 24px);
+  gap: 6px;
+  padding: 6px;
+}
+.palette-swatch {
+  width: 24px;
+  height: 24px;
+  border-radius: 5px;
+  border: 1px solid rgba(127, 127, 127, 0.45);
+}
+.palette-swatch.on {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.palette-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 4px 8px 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.palette-custom {
+  width: 34px;
+  height: 24px;
+  border: 0;
+  padding: 0;
+  background: none;
+  cursor: pointer;
+}
+.label-editor {
+  display: flex;
+  gap: 8px;
+  padding: 6px;
+  width: 300px;
+}
+.label-editor .btn {
+  height: 36px;
+}

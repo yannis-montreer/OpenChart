@@ -24,6 +24,7 @@ from openchart import API_VERSION, __version__
 from openchart.api.auth import SESSION_COOKIE
 from openchart.api.hub import Client
 from openchart.api.routes_account import account_routes, client_host
+from openchart.api.routes_drawings import drawing_routes
 from openchart.market import sessions
 from openchart.market.aggregate import PRICES
 from openchart.market.timeframes import TIMEFRAMES, parse_timeframe
@@ -36,6 +37,20 @@ PUBLIC = {"/api/health", "/api/setup/status", "/api/setup", "/api/login"}
 # Reachable without a session only before setup, by someone allowed to run it.
 SETUP_ONLY = {"/api/setup/defaults", "/api/settings/test/oanda", "/api/settings/test/telegram"}
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+class WebFiles(StaticFiles):
+    """The web UI. Built files under assets/ have a content hash in their name and never
+    change; index.html is checked on every load, so a rebuild takes effect at once
+    (a cached page would keep running the previous build)."""
+
+    def file_response(self, full_path, stat_result, scope, status_code=200):
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        immutable = scope["path"].startswith("/assets/")
+        response.headers["Cache-Control"] = (
+            "public, max-age=31536000, immutable" if immutable else "no-cache"
+        )
+        return response
 
 
 def same_origin(origin: str | None, host: str | None) -> bool:
@@ -85,6 +100,7 @@ def create_app(server: Server) -> FastAPI:
         return await call_next(request)
 
     app.include_router(account_routes(server))
+    app.include_router(drawing_routes(server))
 
     @app.get("/api/health")
     async def health() -> dict[str, Any]:
@@ -119,6 +135,7 @@ def create_app(server: Server) -> FastAPI:
     @app.get("/api/instruments")
     async def instruments() -> list[dict[str, Any]]:
         rows = await server.store.instruments(server.source)
+        closures = {r.instrument: await server.store.closures(r.source, r.instrument) for r in rows}
         return [
             {
                 "instrument": r.instrument,
@@ -129,6 +146,7 @@ def create_app(server: Server) -> FastAPI:
                 "pip_size": r.pip_size,
                 "enabled": r.enabled,
                 "hours": r.hours.to_dict() if r.hours else None,
+                "closures": [list(c) for c in closures[r.instrument]],
             }
             for r in rows
         ]
@@ -183,7 +201,7 @@ def create_app(server: Server) -> FastAPI:
 
     # The built web UI, served last so /api and /ws take precedence.
     if (WEB_DIR / "index.html").is_file():
-        app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")
+        app.mount("/", WebFiles(directory=WEB_DIR, html=True), name="web")
     else:
 
         @app.get("/", include_in_schema=False)

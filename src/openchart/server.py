@@ -143,6 +143,7 @@ class Server:
                     self.provider,
                     self.store,
                     [r.instrument for r in rows],
+                    hours={r.instrument: r.hours for r in rows},
                     tick_writer=self.tick_writer,
                     builder=self.builder,
                     cache=self.cache,
@@ -150,6 +151,7 @@ class Server:
                     backfill_years=cfg.backfill_years,
                 )
                 self.feed.tick_listeners.append(self.hub.on_tick)
+                self.feed.on_closures = self.broadcast_closures
                 self.feed.stream.on_state = self._on_stream_state
                 if self.run_feed:
                     self._feed_task = asyncio.create_task(self._run_feed(self.feed), name="feed")
@@ -184,6 +186,13 @@ class Server:
                 log.exception("feed failed, retrying in %.0fs", FEED_RETRY_SECONDS)
                 self.hub.broadcast_status()
                 await asyncio.sleep(FEED_RETRY_SECONDS)
+
+    async def broadcast_closures(self, instrument: str) -> None:
+        """Browsers redraw lines with the instrument's newly learned closures."""
+        closures = await self.store.closures(self.source, instrument)
+        self.hub.broadcast(
+            {"type": "closures", "instrument": instrument, "closures": [list(c) for c in closures]}
+        )
 
     def _on_stream_state(self, state: StreamState, detail: str) -> None:
         if state is StreamState.CONNECTED:

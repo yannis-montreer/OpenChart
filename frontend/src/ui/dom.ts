@@ -7,6 +7,7 @@ import {
   Check,
   ChevronDown,
   CircleCheck,
+  Copy,
   CircleX,
   Crosshair,
   Database,
@@ -20,6 +21,7 @@ import {
   List,
   LoaderCircle,
   Lock,
+  Palette,
   LogOut,
   Magnet,
   Maximize2,
@@ -37,6 +39,7 @@ import {
   Star,
   Sun,
   Trash,
+  Type,
   X,
   createElement,
   type IconNode,
@@ -47,6 +50,9 @@ export const icons = {
   camera: Camera,
   candles: ChartCandlestick,
   check: Check,
+  copy: Copy,
+  palette: Palette,
+  text: Type,
   chevron: ChevronDown,
   crosshair: Crosshair,
   database: Database,
@@ -184,6 +190,19 @@ export function showMenu(
   document.addEventListener("pointerdown", onDown, true);
   document.addEventListener("keydown", onKey, true);
   openMenu = { el, anchor, close };
+}
+
+/** Show `content` as a menu at a screen point (right-click menus). */
+export function showMenuAt(x: number, y: number, content: HTMLElement): void {
+  closeMenu();
+  let point = document.getElementById("menu-point");
+  if (!point) {
+    point = h("div", { id: "menu-point", style: "position:fixed;width:1px;height:1px;pointer-events:none" });
+    document.body.append(point);
+  }
+  point.style.left = `${x}px`;
+  point.style.top = `${y - 4}px`;
+  showMenu(point, content);
 }
 
 export function menuItem(opts: {
