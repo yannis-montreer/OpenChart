@@ -81,3 +81,21 @@ Choices made where `SPEC.md` was open or ambiguous (SPEC section 18, rule 7). Ne
 - **Bars are never cut at `to` either:** `/api/candles?to=` returns every bar that starts before `to`, whole. This is what the cache does naturally; the uncached path was changed to match.
 - **1h also uses H1 before M1**, so 1h charts go back to 2006 too. Timeframes below 1h cannot be built from H1 and stay limited to the M1 depth.
 - **Speed (2 years of M1 plus 20 years of H1, gold):** first 1000 bars of 4h, D or W in about 12 ms (was about 1.4 to 2 s); each older page about 5 ms; 1h about 110 ms. Full cache build about 2 s.
+
+## M4
+
+- **Secrets:** OS credential store through `keyring` (Windows Credential Manager on the target PC). Entries are named `OpenChart/<instance_id>` per secret; `instance_id` is random per database, so two installs or a test copy on one machine never share secrets. Fallback when no store exists (Docker, headless Linux): `data/secrets.enc`, Fernet-encrypted with the key from `OPENCHART_SECRET_KEY` (SPEC 8.4). An explicit key always selects the file store. New dependency: `cryptography`.
+- **Never stored, logged or returned:** the settings table refuses secret names; API responses only carry `{set, masked, source}`; request models hide tokens from their repr; the Telegram client rebuilds error messages so the bot token (part of Telegram's URL) never appears. Tested by crawling every GET route and the logs for the token values.
+- **The password hash is in the settings table** (argon2id, argon2-cffi defaults). It is not a secret in the sense of SPEC 8.4, and keeping it there means `openchart reset-password` works from the console without the credential store.
+- **Sessions:** 256-bit random token in an HTTP-only, SameSite=Lax cookie, 30 days; the database stores only its SHA-256. `Secure` is set when the page is served over https. A password change ends every other session.
+- **Rate limit:** 5 failed logins per client address and 30 in total per 15 minutes; then `429` with `Retry-After`, even for the right password. In memory, so a restart clears it (acceptable for one user; argon2 also makes each guess slow).
+- **Who may run setup:** before a password exists anyone reaching the port could claim the server. Setup is allowed from the server computer itself; from anywhere else a 6-character code printed in the server log is required. The wizard's two test buttons follow the same rule.
+- **Cross-site requests:** cookie auth plus SameSite=Lax already blocks most of them; in addition, state-changing requests and websocket connections with a foreign `Origin` are refused (websocket hijacking would otherwise work with Lax cookies).
+- **Setup checks before saving:** `POST /api/setup` and OANDA changes in Settings call the broker first (list instruments) and save nothing if that fails, so a typo cannot leave the server with a broken feed.
+- **Settings take effect without a restart:** `Server.reconfigure()` rebuilds provider and feed (setup, token or account change, tick storage, instruments). Only "Allow other devices" needs a restart, since it changes the listening address; the response says so.
+- **Bind address precedence:** `--host`, then `OPENCHART_HOST`, then the Settings switch (`0.0.0.0` when on, `127.0.0.1` otherwise).
+- **Environment fallback kept:** `OPENCHART_OANDA_*` from M1 still work for headless installs; anything saved in the UI wins. The wizard shows values found there and lets you keep them.
+- **Instruments from the UI:** `POST /api/instruments` validates against the account, enables the instrument and restarts the feed, which downloads its M1 and deep H1 history in the background. Removing hides it and keeps its data.
+- **Timezones:** the Settings timezone is the server's (used for alert messages from M6). Each browser keeps its own chart timezone (bottom bar), as SPEC rule 5 makes display timezone a client setting.
+- **Added routes not listed in SPEC section 7:** `GET /api/setup/defaults`, `POST /api/password`, `GET /api/instruments/available`. See `docs/api.md`.
+- **Recovery:** `openchart reset-password` (console of the server) sets a new password and ends all sessions.

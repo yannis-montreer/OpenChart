@@ -352,6 +352,15 @@ class CandleStore:
             for r in rows
         ]
 
+    async def set_instrument_enabled(self, source: str, instrument: str, enabled: bool) -> bool:
+        """Show or hide an instrument. Its stored history is kept. False if unknown."""
+        cur = await self.conn.execute(
+            "UPDATE instruments SET enabled=? WHERE source=? AND instrument=?",
+            (int(enabled), source, instrument),
+        )
+        await self.conn.commit()
+        return cur.rowcount > 0
+
     async def instrument(self, source: str, instrument: str) -> InstrumentRow | None:
         for row in await self.instruments(source):
             if row.instrument == instrument:
