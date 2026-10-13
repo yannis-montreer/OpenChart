@@ -10,6 +10,7 @@ import {
   type TimeframeMeta,
 } from "./api";
 import { ChartView, type ChartContext } from "./chart/view";
+import { DrawingController, type Tool } from "./drawings/controller";
 import { loadPrefs, resolveTimezone, savePrefs, type Prefs } from "./prefs";
 import { formatClock, offsetLabel } from "./time";
 import { showLogin } from "./ui/auth";
@@ -61,6 +62,8 @@ export class App {
   private historyState = new Map<string, string>();
 
   chart!: ChartView;
+  drawings!: DrawingController;
+  private toolButtons = new Map<Tool, HTMLButtonElement>();
   private watchlist!: Watchlist;
   private els = {} as Record<
     "symbol" | "tfGroup" | "conn" | "status" | "clock" | "tz" | "priceSeg" | "panel" | "panelBtn" | "chartArea" | "banner",
@@ -100,7 +103,9 @@ export class App {
       if (changed) location.reload();
     };
     this.socket.onOpen = (reconnect) => {
-      if (reconnect) void this.chart.resync();
+      if (!reconnect) return;
+      void this.chart.resync();
+      void this.drawings.reload(); // changes made while we were away
     };
     // Once a minute, re-check the last bars against the server. This picks up bars that
     // were forming while we (or the server) were disconnected, which the server stores
@@ -162,25 +167,58 @@ export class App {
       this.els.conn,
     );
 
+    // Chart
+    this.chart = new ChartView(chartArea);
+    this.drawings = new DrawingController(
+      this.chart,
+      chartArea.querySelector(".chart-host") as HTMLElement,
+      chartArea,
+      () => this.prefs.drawingStyle,
+      this.prefs.drawingsHidden,
+    );
+    this.drawings.onToolChange = (tool) => {
+      for (const [t, b] of this.toolButtons) b.classList.toggle("active", t === tool);
+    };
+    this.drawings.onStyleUsed = (style) => {
+      this.prefs.drawingStyle = style;
+      savePrefs(this.prefs);
+    };
+
     // Left tools
-    const drawSoon = soon("Drawing tools", "M5");
+    const snapHint = "Hold Ctrl to snap to the bar's open, high, low or close";
+    const tool = (t: Tool, ic: Parameters<typeof icon>[0], title: string) => {
+      const b = button({ icon: ic, title, onClick: () => this.drawings.setTool(this.drawings.tool === t ? "cursor" : t) });
+      this.toolButtons.set(t, b);
+      return b;
+    };
+    const eye = button({
+      icon: this.prefs.drawingsHidden ? "eyeOff" : "eye",
+      title: "Show or hide drawings",
+      class: this.prefs.drawingsHidden ? "active" : "",
+      onClick: () => this.drawings.setHidden(!this.drawings.hidden),
+    });
+    this.drawings.onHiddenChange = (hidden) => {
+      eye.replaceChildren(icon(hidden ? "eyeOff" : "eye"));
+      eye.classList.toggle("active", hidden);
+      this.prefs.drawingsHidden = hidden;
+      savePrefs(this.prefs);
+    };
+    const trash = button({ icon: "trash", title: "Delete all drawings on this instrument" });
+    trash.addEventListener("click", () => this.confirmDeleteAll(trash));
     tools.append(
-      button({ icon: "crosshair", title: "Crosshair (Esc)", class: "active" }),
+      tool("cursor", "crosshair", "Cursor (Esc)"),
       h("div", { class: "sep-h" }),
-      button({ icon: "trendline", title: `Trendline: ${drawSoon}`, disabled: true }),
-      button({ icon: "ray", title: `Ray: ${drawSoon}`, disabled: true }),
-      button({ icon: "extended", title: `Extended line: ${drawSoon}`, disabled: true }),
-      button({ icon: "hline", title: `Horizontal line: ${drawSoon}`, disabled: true }),
+      tool("trendline", "trendline", `Trendline (Alt+T). ${snapHint}`),
+      tool("ray", "ray", `Ray (Alt+Y). ${snapHint}`),
+      tool("extended", "extended", `Extended line (Alt+E). ${snapHint}`),
+      tool("hline", "hline", `Horizontal line (Alt+H). ${snapHint}`),
       h("div", { class: "sep-h" }),
-      button({ icon: "magnet", title: `Snap to candles: ${drawSoon}`, disabled: true }),
-      button({ icon: "eye", title: `Show or hide drawings: ${drawSoon}`, disabled: true }),
-      button({ icon: "trash", title: `Delete all drawings: ${drawSoon}`, disabled: true }),
+      eye,
+      trash,
       h("div", { class: "grow" }),
       button({ icon: "keyboard", title: "Keyboard shortcuts (?)", onClick: (ev) => this.openShortcuts(ev.currentTarget as HTMLElement) }),
     );
-
-    // Chart
-    this.chart = new ChartView(chartArea);
+    this.drawings.onToolChange("cursor");
     this.els.banner = h("div", { class: "banner", hidden: true });
     chartArea.append(this.els.banner);
 
@@ -255,6 +293,7 @@ export class App {
     this.socket.subscribe(key);
     savePrefs(this.prefs);
     this.updateFeedIndicators();
+    void this.drawings.setInstrument(this.instrument.instrument, this.instrument.hours);
     await this.chart.load(this.context(), opts);
     document.title = `${this.instrument.instrument} ${this.prefs.timeframe} · OpenChart`;
   }
@@ -448,6 +487,9 @@ export class App {
         if (m.timeframe === "1D" && m.price === "mid") this.watchlist.onDaily(m.instrument, m.candle);
         break;
       }
+      case "drawing_changed":
+        this.drawings.applyRemote(m.op, m.drawing);
+        break;
       case "error":
         console.warn("server:", m.error);
         break;
@@ -522,6 +564,26 @@ export class App {
 
   // Actions
 
+  private confirmDeleteAll(anchor: HTMLElement): void {
+    const n = this.drawings.count();
+    const name = this.instrument?.instrument ?? "";
+    if (n === 0) {
+      showMenu(anchor, h("div", {}, h("p", {}, `No drawings on ${name}.`)), "right");
+      return;
+    }
+    showMenu(
+      anchor,
+      h(
+        "div",
+        { style: "min-width:240px" },
+        h("p", {}, `Delete all ${n} drawing${n === 1 ? "" : "s"} on ${name}? This cannot be undone.`),
+        menuItem({ label: "Delete all", icon: "trash", onClick: () => void this.drawings.removeAll() }),
+        menuItem({ label: "Cancel" }),
+      ),
+      "right",
+    );
+  }
+
   private openSettings(section?: Section): Promise<void> {
     closeMenu();
     return this.settingsDialog.open(section);
@@ -585,7 +647,10 @@ export class App {
         row("1 – 9", "Timeframes in the top bar"),
         row("[  ]", "Previous / next timeframe"),
         row("Alt + R", "Reset chart view"),
-        row("Esc", "Close menu, back to crosshair"),
+        row("Esc", "Cancel drawing, back to the cursor"),
+        row("Alt + T / Y / E / H", "Trendline, ray, extended line, horizontal line"),
+        row("Ctrl (while drawing)", "Snap to the bar's open, high, low or close"),
+        row("Del", "Delete the selected drawing"),
         row("?", "This list"),
         h("hr"),
         h("p", {}, "Mouse: wheel to zoom, drag to pan, drag the price scale to stretch it, double-click it to fit."),
@@ -618,8 +683,8 @@ export class App {
   }
 
   private onKey(ev: KeyboardEvent): void {
-    const target = ev.target as HTMLElement;
-    if (target.closest("input, select, textarea, [contenteditable]")) return;
+    const target = ev.target;
+    if (target instanceof Element && target.closest("input, select, textarea, [contenteditable]")) return;
     if (ev.key === "Escape") {
       closeMenu();
       return;

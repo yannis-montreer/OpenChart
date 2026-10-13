@@ -24,6 +24,7 @@ from openchart import API_VERSION, __version__
 from openchart.api.auth import SESSION_COOKIE
 from openchart.api.hub import Client
 from openchart.api.routes_account import account_routes, client_host
+from openchart.api.routes_drawings import drawing_routes
 from openchart.market import sessions
 from openchart.market.aggregate import PRICES
 from openchart.market.timeframes import TIMEFRAMES, parse_timeframe
@@ -85,6 +86,7 @@ def create_app(server: Server) -> FastAPI:
         return await call_next(request)
 
     app.include_router(account_routes(server))
+    app.include_router(drawing_routes(server))
 
     @app.get("/api/health")
     async def health() -> dict[str, Any]:

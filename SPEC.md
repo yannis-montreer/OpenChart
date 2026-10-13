@@ -272,10 +272,11 @@ The alert engine runs inside the server, independent of any open UI.
 - **indicator:** condition on an indicator (RSI above X, EMA cross). Milestone 7, after indicators exist.
 
 ### Line geometry
-A line is two anchor points `(t1, p1)` and `(t2, p2)` in UTC epoch seconds and price. Use **clock time**, not bar index, so the line the user sees and the line the alert checks are identical.
+A line is two anchor points `(t1, p1)` and `(t2, p2)` in UTC epoch seconds and price. Its slope is measured in **trading time** `T(t)`: a clock that runs only while the instrument's market is open (from its trading hours in the `instruments` table, on their local clock, so DST is handled) and stops during weekends and daily breaks. Not bar index (which would depend on the timeframe) and not raw clock time (which would make lines drop a weekend's worth at every weekend). The line the user sees and the line the alert checks are identical, on every timeframe. Instruments without trading hours fall back to clock time.
 ```
-line_price(t) = p1 + (p2 - p1) * (t - t1) / (t2 - t1)
+line_price(t) = p1 + (p2 - p1) * (T(t) - T(t1)) / (T(t2) - T(t1))
 ```
+The two anchors must have trading time between them. `T` is implemented twice, in `market/sessions.py` (server, alerts) and `frontend/src/drawings/tradingTime.ts` (drawing); a shared fixture test keeps them identical.
 - `trendline` (segment): only valid for `t1 <= t <= t2`.
 - `ray`: valid for `t >= t1` (in the direction of point 2).
 - `extended`: valid for all `t`.
@@ -358,7 +359,8 @@ Aim: a fast, clean chart workstation with the interaction quality people like in
 - Smooth wheel zoom and drag pan, double-click on the price scale to auto-fit.
 - Crosshair with price and time labels.
 - Drawing flow: select tool, click anchor 1, click anchor 2, the tool returns to cursor. Escape cancels.
-- Drag handles with live preview, snapping to candle OHLC values as an optional setting.
+- Drag handles with live preview.
+- Magnet: holding **Ctrl** while a drawing tool is active snaps the cursor to the nearest (by price) of the open, high, low or close of the bar under the mouse, using the price type shown (mid, bid or ask), with a small marker at the snap point. It only works while a drawing tool is active. (Replaces an optional snapping setting.)
 - Right-click on a drawing: Add alert, Edit style, Delete.
 - Creating an alert shows a compact dialog: direction, trigger price (bid, ask, mid), trigger mode, frequency, cooldown, name. Sensible defaults so one click confirms.
 - Live candle updates without flicker.

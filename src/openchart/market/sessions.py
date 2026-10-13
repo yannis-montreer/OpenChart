@@ -95,7 +95,11 @@ class TradingHours:
     def is_open(self, ts: float) -> bool:
         local = datetime.fromtimestamp(ts, ZoneInfo(self.tz))
         minute_of_day = local.hour * 60 + local.minute
-        week_minute = ((local.weekday() + 1) % 7) * 1440 + minute_of_day
+        return self.open_at(((local.weekday() + 1) % 7) * 1440 + minute_of_day)
+
+    def open_at(self, week_minute: int) -> bool:
+        """Is the market open at this minute of the local week (Sunday 00:00 = 0)?"""
+        minute_of_day = week_minute % 1440
         start = _week_minute(self.open_day, self.open_time)
         end = _week_minute(self.close_day, self.close_time)
         in_week = (start <= week_minute < end) if start < end else not (end <= week_minute < start)
@@ -106,6 +110,44 @@ class TradingHours:
             if (s <= minute_of_day < e) if s < e else not (e <= minute_of_day < s):
                 return False
         return True
+
+
+# Trading time (SPEC section 9, line geometry)
+
+_WEEK_SECONDS = 7 * 86400
+_SUNDAY_EPOCH = 3 * 86400  # 1970-01-04 00:00, the first Sunday after the Unix epoch
+
+
+class TradingClock:
+    """Seconds of market-open time: it runs while the market is open and stops while
+    it is closed (weekend, daily break), measured on the trading hours' local clock.
+
+    A drawn line's slope is measured on this clock, so a line keeps its slope from one
+    trading hour to the next and is straight on the chart across weekends, and the
+    alert engine evaluates exactly that line. The frontend has the same function
+    (`frontend/src/drawings/tradingTime.ts`); a shared fixture keeps them identical.
+    """
+
+    def __init__(self, hours: TradingHours):
+        self.zone = ZoneInfo(hours.tz)
+        open_minutes = [hours.open_at(m) for m in range(_WEEK_SECONDS // 60)]
+        self.open_minutes = open_minutes
+        self.prefix = [0]
+        for is_open in open_minutes:
+            self.prefix.append(self.prefix[-1] + (1 if is_open else 0))
+        self.week_open_seconds = self.prefix[-1] * 60
+
+    def __call__(self, ts: float) -> float:
+        local = ts + self.zone.utcoffset(datetime.fromtimestamp(ts, self.zone)).total_seconds()
+        week, rem = divmod(local - _SUNDAY_EPOCH, _WEEK_SECONDS)
+        minute = int(rem // 60)
+        partial = rem - minute * 60 if self.open_minutes[minute] else 0.0
+        return week * self.week_open_seconds + self.prefix[minute] * 60 + partial
+
+
+def trading_clock(hours: TradingHours | None):
+    """The trading clock for these hours, or plain clock time if hours are unknown."""
+    return TradingClock(hours) if hours is not None else (lambda ts: float(ts))
 
 
 # Bar alignment

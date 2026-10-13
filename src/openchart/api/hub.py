@@ -108,6 +108,11 @@ class Hub:
                 if inst == update.instrument and tf == update.timeframe:
                     client.send(self._candle_message(inst, tf, price, update.candle, update.closed))
 
+    def broadcast(self, message: dict[str, Any]) -> None:
+        """Send to every connected client (drawings, later alerts)."""
+        for client in self.clients:
+            client.send(message)
+
     def broadcast_status(self) -> None:
         message = {"type": "status", **self.status()}
         for client in self.clients:

@@ -27,6 +27,7 @@ import {
 import { api, type Bar, type Instrument, type Price, type TimeframeMeta } from "../api";
 import { h } from "../ui/dom";
 import { mergeBars } from "./merge";
+import { TimeIndex } from "../drawings/geometry";
 import {
   formatChartTime,
   formatCountdown,
@@ -404,6 +405,41 @@ export class ChartView {
     this.askLine?.applyOptions({ color: p.ask });
     this.bidLine?.applyOptions({ color: p.bid });
     if (this.ctx) this.volume.setData(this.bars.map((b, i) => this.volumeData(b, this.times[i])));
+  }
+
+  // Access for the drawing layer
+
+  get candleSeries(): ISeriesApi<"Candlestick"> {
+    return this.candles;
+  }
+
+  private indexCache?: { key: string; index: TimeIndex };
+
+  /** Clock time <-> bar index over the bars on screen (cached until they change). */
+  timeIndex(): TimeIndex {
+    const n = this.bars.length;
+    const key = `${n}:${this.bars[0]?.t}:${this.bars[n - 1]?.t}:${this.ctx?.timeframe.name}`;
+    if (this.indexCache?.key !== key) {
+      this.indexCache = { key, index: new TimeIndex(this.bars.map((b) => b.t), this.ctx?.timeframe.seconds ?? 60) };
+    }
+    return this.indexCache.index;
+  }
+
+  barAt(index: number): Bar | undefined {
+    return Number.isInteger(index) ? this.bars[index] : undefined;
+  }
+
+  formatPriceValue(x: number): string {
+    return this.formatPrice(x);
+  }
+
+  /** Crosshair-style label for clock time `t` in the display timezone. */
+  labelForTime(t: number): string {
+    return this.ctx ? formatChartTime(this.toChart(t), this.ctx.timeframe.name) : "";
+  }
+
+  get chartBackground(): string {
+    return this.palette.chart;
   }
 
   /** Server times of the bars on screen (for debugging and tests). */

@@ -67,6 +67,22 @@ Before setup, the two test routes and `/api/setup/defaults` also work without a 
 
 Errors: `400` unknown timeframe or price, `404` unknown instrument, `422` invalid parameter.
 
+## Drawings
+
+| Route | |
+|---|---|
+| `GET /api/drawings?instrument=` | drawings (all instruments if omitted) |
+| `POST /api/drawings` | `{instrument, type, points, style?, label?}` → the drawing with its `id` |
+| `PUT /api/drawings/{id}` | any of `points`, `style` (partial), `label`, `clear_label` |
+| `DELETE /api/drawings/{id}` | delete one |
+| `DELETE /api/drawings?instrument=` | delete all on an instrument → `{deleted}` |
+
+- `type`: `hline` (1 point), `trendline`, `ray`, `extended` (2 points each).
+- `points`: `[{t, p}]`, `t` in UTC epoch seconds, `p` a price. The two points of a line need trading time between them (`400` otherwise).
+- `style`: `{color: "#rrggbb", width: 1-4, dash: "solid" | "dashed" | "dotted"}`; `label` up to 100 characters.
+- Every change is sent to all connected browsers as a websocket `drawing_changed` message.
+- Line geometry (how `points` define the line, in trading time): SPEC section 9.
+
 ## WebSocket `/ws`
 
 JSON messages, each with a `type`.
@@ -88,6 +104,7 @@ On connect the server sends `hello` `{api_version, server_time}` and then `statu
 | `tick` `{instrument, t, bid, ask}` | every price update for an instrument the client subscribed to (any timeframe) |
 | `candle` `{instrument, timeframe, price, candle: {t, o, h, l, c, v}, closed}` | on every tick (`closed: false`, the forming bar) and once when the bar ends (`closed: true`). A subscription immediately receives the current forming bar if there is one |
 | `status` | every 5 s and on feed state changes, same body as `GET /api/status` |
+| `drawing_changed` `{op: create\|update\|delete, drawing}` | any drawing changed, from any browser |
 | `error` `{error}` | invalid message |
 
 A tick is always sent before the candle update it causes.
