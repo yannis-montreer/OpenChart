@@ -25,6 +25,7 @@ from openchart.market.series import SeriesReader
 from openchart.providers.base import AuthError, Provider
 from openchart.providers.stream import StreamState
 from openchart.settings import (
+    SECRET_NAMES,
     AppSettings,
     Secrets,
     SecretStoreUnavailable,
@@ -99,6 +100,14 @@ class Server:
         else:
             try:
                 self.secrets = open_secrets(cfg, await self.settings.instance_id())
+                # Where the tokens come from, and whether they are there (never their
+                # values): the first thing to check when a service cannot connect.
+                present = {name: bool(self.secrets.get(name)) for name in SECRET_NAMES}
+                log.info(
+                    "secrets: %s; %s",
+                    self.secrets.backend,
+                    ", ".join(f"{n} {'set' if ok else 'not set'}" for n, ok in present.items()),
+                )
             except SecretStoreUnavailable as exc:
                 self.secrets_error = str(exc)
                 log.error("secrets: %s", exc)

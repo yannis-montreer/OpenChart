@@ -103,6 +103,7 @@ class EncryptedFileSecrets:
             ) from exc
         self._invalid = InvalidToken
         self.path = path
+        self.backend = f"encrypted file {path}"
 
     def _load(self) -> dict[str, str]:
         if not self.path.is_file():
