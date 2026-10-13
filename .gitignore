@@ -42,3 +42,8 @@ src/openchart/web/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Owner's UI reference screenshots: kept locally, never published (they show a
+# third-party product's interface). Only the folder placeholder is tracked.
+reference/*
+!reference/.gitkeep
