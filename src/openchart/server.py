@@ -10,12 +10,14 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from openchart.alerts.service import AlertService
 from openchart.api.auth import Auth
 from openchart.api.hub import Hub
 from openchart.config import Config, OandaConfig
+from openchart.indicators._registry import Registry, load_indicators
 from openchart.market.cache import CandleCache
 from openchart.market.candle_builder import CandleBuilder
 from openchart.market.feed import Feed
@@ -75,6 +77,12 @@ class Server:
         self._tasks: list[asyncio.Task[Any]] = []
         self._reconfigure_lock = asyncio.Lock()
         self.telegram_transport = None  # tests replace the HTTP transport
+        self.indicators = Registry()
+
+    @property
+    def indicators_dir(self) -> Path:
+        """The owner's indicator files (docs/indicators.md)."""
+        return self.config.data_dir / "indicators"
 
     @property
     def source(self) -> str:
@@ -104,6 +112,10 @@ class Server:
             lambda instrument: self.tick_writer.buffered(instrument) if self.tick_writer else [],
             cache=self.cache,
         )
+        with contextlib.suppress(OSError):
+            self.indicators_dir.mkdir(parents=True, exist_ok=True)
+        self.indicators = load_indicators(self.indicators_dir)
+        log.info("indicators: %s", ", ".join(self.indicators.indicators) or "none")
         self._tasks.append(asyncio.create_task(self._status_loop(), name="status"))
         self.alerts = AlertService(self)
         await self.alerts.start()
