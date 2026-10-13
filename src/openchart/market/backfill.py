@@ -10,6 +10,10 @@ Holes inside the stored range can still appear: if the process is paused (the co
 sleeps), the once-a-minute refresh of the last few minutes writes candles ahead of the
 hole on waking, and the tail gap-fill then starts after it. `repair` finds and refills
 such holes; the feed runs it over the last few days on every start, reconnect and wake-up.
+
+A hole of at least `CLOSURE_MINUTES` open minutes that the broker has no candles for,
+even when asked again, is a closure the trading hours do not know about (a holiday, an
+early close). `repair` records those, and the trading clock stops during them.
 """
 
 from __future__ import annotations
@@ -37,6 +41,8 @@ HEAD_WINDOW = {"M1": timedelta(days=3), "H1": timedelta(days=180)}
 RECENT_REPAIR = timedelta(days=3)
 # Holes within this span are refetched with one range (OANDA: 5000 M1 candles a page).
 REPAIR_WINDOW = 3 * 86400
+# Shorter holes are a few missing broker minutes, not a closure: they do not bend lines.
+CLOSURE_MINUTES = 30
 
 # (rows written so far, ts, direction). Forward: newest candle stored so far.
 # Backward: how far back history has been searched.
@@ -153,6 +159,7 @@ class RepairResult:
     holes: list[Gap] = field(default_factory=list)  # found before the repair
     filled: int = 0  # candles written into them
     requests: int = 0
+    closures_changed: bool = False
 
 
 def _fetch_windows(holes: list[Gap], span: int) -> list[tuple[int, int]]:
@@ -189,12 +196,7 @@ async def repair(
     """
     source = source or provider.name
     result = RepairResult(instrument)
-    stamps = await store.timestamps(source, instrument, start, end)
-    if start is not None and stamps:
-        # A hole that began before `start` ends inside the range: include its left edge.
-        before = await store.last_ts(source, instrument, before=stamps[0])
-        if before is not None:
-            stamps.insert(0, before)
+    stamps = await _stamps(store, source, instrument, start, end)
     result.holes = find_gaps(stamps, hours, min_open_minutes)
     windows = _fetch_windows(result.holes, REPAIR_WINDOW)
     for i, (lo, hi) in enumerate(windows):
@@ -206,7 +208,44 @@ async def repair(
             result.filled += await store.upsert(source, instrument, missing)
         if progress:
             progress(i + 1, len(windows))
+    if hours is not None and min_open_minutes <= CLOSURE_MINUTES:
+        # Every hole of CLOSURE_MINUTES or more was just asked for again: what is left
+        # is where the broker has nothing.
+        result.closures_changed = await learn_closures(store, source, instrument, hours, start, end)
     return result
+
+
+async def _stamps(
+    store: CandleStore, source: str, instrument: str, start: int | None, end: int | None
+) -> list[int]:
+    stamps = await store.timestamps(source, instrument, start, end)
+    if start is not None and stamps:
+        # A hole that began before `start` ends inside the range: include its left edge.
+        before = await store.last_ts(source, instrument, before=stamps[0])
+        if before is not None:
+            stamps.insert(0, before)
+    return stamps
+
+
+async def learn_closures(
+    store: CandleStore,
+    source: str,
+    instrument: str,
+    hours: TradingHours,
+    start: int | None = None,
+    end: int | None = None,
+) -> bool:
+    """Store the holes of `CLOSURE_MINUTES`+ open minutes in `[start, end)` as closures.
+
+    Only call this right after those holes were requested from the broker again.
+    Returns True if the stored closures changed.
+    """
+    stamps = await _stamps(store, source, instrument, start, end)
+    if len(stamps) < 2:
+        return False
+    gaps = find_gaps(stamps, hours, CLOSURE_MINUTES)
+    found = [(g.before + M1_SECONDS, g.after) for g in gaps]
+    return await store.replace_closures(source, instrument, stamps[0], stamps[-1], found)
 
 
 async def repair_recent(

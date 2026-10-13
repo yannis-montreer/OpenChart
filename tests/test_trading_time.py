@@ -26,11 +26,30 @@ def sample_times() -> list[int]:
     return out
 
 
+# Learned closures for the fixture: an early close, a closure spanning a weekend, and two
+# overlapping ones (merged), all inside the sampled periods.
+CLOSURES = [
+    (int(utc(2024, 3, 7, 18, 30)), int(utc(2024, 3, 7, 22))),
+    (int(utc(2024, 3, 11, 10)), int(utc(2024, 3, 11, 11))),
+    (int(utc(2024, 3, 11, 10, 30)), int(utc(2024, 3, 11, 12))),
+    (int(utc(2024, 11, 1, 12)), int(utc(2024, 11, 4, 23))),
+]
+
+
 def fixture_data() -> dict:
     data = {}
-    for name, hours in (("metal", METAL_HOURS), ("fx", FX_HOURS)):
-        clock = TradingClock(hours)
-        data[name] = {"hours": hours.to_dict(), "samples": [[t, clock(t)] for t in sample_times()]}
+    cases = (
+        ("metal", METAL_HOURS, []),
+        ("fx", FX_HOURS, []),
+        ("metal_closures", METAL_HOURS, CLOSURES),
+    )
+    for name, hours, closures in cases:
+        clock = TradingClock(hours, closures)
+        data[name] = {
+            "hours": hours.to_dict(),
+            "closures": [list(c) for c in closures],
+            "samples": [[t, clock(t)] for t in sample_times()],
+        }
     return data
 
 
@@ -106,3 +125,43 @@ def test_line_is_straight_across_the_weekend_in_trading_time():
     # Friday 09:00 to Monday 09:00 is one trading day (23 h), not three calendar days.
     assert line_price("extended", pts, monday, gold) == pytest.approx(98.0)
     assert line_price("extended", pts, monday) == pytest.approx(96.0)  # clock time
+
+
+# Learned closures (holidays, early closes)
+
+LABOR_DAY = (int(utc(2024, 9, 2, 17, 30)), int(utc(2024, 9, 2, 22)))  # early close
+
+
+def test_the_clock_stops_during_a_closure():
+    plain, clock = TradingClock(METAL_HOURS), TradingClock(METAL_HOURS, [LABOR_DAY])
+    start, end = LABOR_DAY
+    before, after = start - 3600, end + 3600
+    assert clock(before) == plain(before)
+    assert clock(start + 1800) == clock(start) == clock(end)  # flat inside
+    lost = plain(end) - plain(start)
+    assert lost == 3.5 * 3600  # 17:30-22:00 UTC less the daily break 21:00-22:00
+    assert clock(after) - clock(before) == plain(after) - plain(before) - lost
+
+
+def test_a_closure_over_a_weekend_only_removes_open_time():
+    plain = TradingClock(METAL_HOURS)
+    friday, monday = int(utc(2024, 3, 29, 12)), int(utc(2024, 4, 1, 23))  # Good Friday
+    clock = TradingClock(METAL_HOURS, [(friday, monday)])
+    lost = plain(monday) - plain(friday)
+    assert clock(monday + 3600) == plain(monday + 3600) - lost
+    assert clock(friday) == clock(monday)
+
+
+def test_overlapping_closures_are_merged():
+    a = TradingClock(METAL_HOURS, [(1000, 5000), (3000, 9000)])
+    assert a.closures == [(1000, 9000)]
+
+
+def test_a_line_is_straight_across_a_learned_holiday():
+    start, end = LABOR_DAY
+    clock = TradingClock(METAL_HOURS, [LABOR_DAY])
+    a, b = start - 4 * 3600, start - 3600
+    pts = [{"t": a, "p": 100.0}, {"t": b, "p": 97.0}]  # -1 per open hour
+    assert line_price("extended", pts, end, clock) == pytest.approx(96.0)  # no drop inside
+    assert line_price("extended", pts, end + 3600, clock) == pytest.approx(95.0)
+    assert line_price("extended", pts, end, TradingClock(METAL_HOURS)) < 93.5  # without it

@@ -7,6 +7,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
@@ -15,7 +16,7 @@ from pathlib import Path
 
 from openchart import __version__
 from openchart.config import Config, ConfigError, load_config
-from openchart.market.backfill import backfill, deep_fill, repair
+from openchart.market.backfill import CLOSURE_MINUTES, backfill, deep_fill, repair
 from openchart.market.cache import CandleCache
 from openchart.market.gaps import find_gaps
 from openchart.market.instruments import default_hours
@@ -235,6 +236,13 @@ async def _cmd_repair(config: Config, args: argparse.Namespace) -> int:
             f"{len(result.holes)} hole(s) of at least {args.min_minutes} open minutes, "
             f"{result.filled:,} candles filled with {result.requests} request(s)."
         )
+        if args.min_minutes <= CLOSURE_MINUTES and row.hours is not None:
+            await ctx.store.mark_closures_scanned(source, args.instrument, int(time.time()))
+            closures = await ctx.store.closures(source, args.instrument)
+            print(
+                f"{len(closures)} market closure(s) of {CLOSURE_MINUTES}+ minutes recorded; "
+                "drawn lines and alerts skip them."
+            )
         if result.filled:
             n = await CandleCache(ctx.store).extend_all(source, args.instrument)
             print(f"4h/D/W cache brought up to date ({n:,} bars recomputed).")

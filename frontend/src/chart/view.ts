@@ -27,7 +27,8 @@ import {
 import { api, type Bar, type Instrument, type Price, type TimeframeMeta } from "../api";
 import { h } from "../ui/dom";
 import { mergeBars } from "./merge";
-import { TimeIndex } from "../drawings/geometry";
+import { TimeIndex, wallAdvance } from "../drawings/geometry";
+import type { Clock } from "../drawings/tradingTime";
 import {
   formatChartTime,
   formatCountdown,
@@ -413,14 +414,22 @@ export class ChartView {
     return this.candles;
   }
 
-  private indexCache?: { key: string; index: TimeIndex };
+  private indexCache?: { key: string; clock?: Clock; index: TimeIndex };
 
-  /** Clock time <-> bar index over the bars on screen (cached until they change). */
-  timeIndex(): TimeIndex {
+  /**
+   * Clock time <-> bar index over the bars on screen (cached until they or the clock
+   * change). With the instrument's trading clock, future slots skip closed periods.
+   */
+  timeIndex(clock?: Clock): TimeIndex {
     const n = this.bars.length;
     const key = `${n}:${this.bars[0]?.t}:${this.bars[n - 1]?.t}:${this.ctx?.timeframe.name}`;
-    if (this.indexCache?.key !== key) {
-      this.indexCache = { key, index: new TimeIndex(this.bars.map((b) => b.t), this.ctx?.timeframe.seconds ?? 60) };
+    if (this.indexCache?.key !== key || this.indexCache.clock !== clock) {
+      const tf = this.ctx?.timeframe;
+      const step = tf?.seconds ?? 60;
+      // 4h, 1D, 1W bars are aligned on the session's wall clock (17:00 New York).
+      const advance = tf?.kind === "session" && this.ctx ? wallAdvance(step, this.ctx.session.timezone) : undefined;
+      const index = new TimeIndex(this.bars.map((b) => b.t), step, clock, advance);
+      this.indexCache = { key, clock, index };
     }
     return this.indexCache.index;
   }

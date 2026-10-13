@@ -21,7 +21,7 @@ import type { ChartView } from "../chart/view";
 import { h, menuItem, showMenuAt } from "../ui/dom";
 import {
   POINTS_NEEDED,
-  lineVertices,
+  linePath,
   logicalX,
   nearestOhlc,
   segmentDistance,
@@ -29,7 +29,7 @@ import {
   type Point,
 } from "./geometry";
 import { DrawingLayer, type MediaTarget } from "./layer";
-import { tradingClock, type Clock, type TradingHoursJson } from "./tradingTime";
+import { tradingClock, type Clock, type Closure, type TradingHoursJson } from "./tradingTime";
 import { StyleToolbar } from "./toolbar";
 
 export type Tool = "cursor" | DrawingType;
@@ -70,6 +70,7 @@ export class DrawingController {
   private instrument?: string;
   /** Slopes are measured on this instrument's trading clock (see geometry.ts). */
   private clock: Clock = (t) => t;
+  private hours: TradingHoursJson | null = null;
   private hover?: Hit;
   private placing?: { type: DrawingType; points: Point[]; cursor?: Point; down?: { x: number; y: number } };
   private drag?: {
@@ -126,16 +127,29 @@ export class DrawingController {
 
   // Data
 
-  async setInstrument(instrument: string, hours: TradingHoursJson | null): Promise<void> {
+  async setInstrument(instrument: string, hours: TradingHoursJson | null, closures: readonly Closure[] = []): Promise<void> {
+    this.hours = hours;
+    this.clock = tradingClock(hours, closures);
     if (instrument !== this.instrument) {
       this.instrument = instrument;
-      this.clock = tradingClock(hours);
       this.cancelPlacing();
       this.select(undefined);
       this.drawings.clear();
       this.redraw();
     }
     await this.reload();
+  }
+
+  /** The server learned new closures (a holiday passed): lines skip them from now on. */
+  setClosures(instrument: string, closures: readonly Closure[]): void {
+    if (instrument !== this.instrument) return;
+    this.clock = tradingClock(this.hours, closures);
+    this.redraw();
+  }
+
+  /** Bar index of the chart, with future slots placed by this instrument's clock. */
+  private index() {
+    return this.view.timeIndex(this.clock);
   }
 
   /** Fetch the drawings again (after switching instrument or reconnecting). */
@@ -331,7 +345,7 @@ export class DrawingController {
 
   /** Anchor under the mouse: the nearest bar's time, the mouse price (or Ctrl snap). */
   private pointAt(x: number, y: number): Point | null {
-    const index = this.view.timeIndex();
+    const index = this.index();
     const logical = this.view.chart.timeScale().coordinateToLogical(x);
     const price = this.view.candleSeries.coordinateToPrice(y);
     if (logical === null || price === null || index.size === 0) return null;
@@ -483,7 +497,7 @@ export class DrawingController {
     if (!d) return;
     if (!drag.moved && Math.hypot(x - drag.down.x, y - drag.down.y) < DRAG_THRESHOLD) return;
     drag.moved = true;
-    const index = this.view.timeIndex();
+    const index = this.index();
     const logical = this.view.chart.timeScale().coordinateToLogical(x);
     const price = this.view.candleSeries.coordinateToPrice(y);
     if (logical === null || price === null) return;
@@ -617,7 +631,7 @@ export class DrawingController {
     to: number,
     label: string | null,
   ): Shape | undefined {
-    const index = this.view.timeIndex();
+    const index = this.index();
     let path: [number, number][] = [];
     if (type === "hline") {
       const y = this.yOf(pts[0].p);
@@ -627,11 +641,7 @@ export class DrawingController {
         [width, y],
       ];
     } else {
-      for (const v of lineVertices(type, pts, index, from, to, this.clock)) {
-        const x = this.xOf(v.logical);
-        const y = this.yOf(v.price);
-        if (x !== null && y !== null) path.push([x, y]);
-      }
+      path = linePath(type, pts, index, from, to, this.clock, (l) => this.xOf(l), (p) => this.yOf(p));
     }
     ctx.save();
     ctx.strokeStyle = style.color;
@@ -672,7 +682,7 @@ export class DrawingController {
   }
 
   private paintHandle(ctx: CanvasRenderingContext2D, p: Point, color: string): void {
-    const x = this.xOf(this.view.timeIndex().toLogical(p.t));
+    const x = this.xOf(this.index().toLogical(p.t));
     const y = this.yOf(p.p);
     if (x !== null && y !== null) this.drawHandle(ctx, x, y, color);
   }
@@ -704,7 +714,7 @@ export class DrawingController {
   }
 
   timeX(t: number): number | null {
-    return this.xOf(this.view.timeIndex().toLogical(t));
+    return this.xOf(this.index().toLogical(t));
   }
 
   formatPrice(p: number): string {

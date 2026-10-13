@@ -12,12 +12,12 @@ Requests that change something (`POST`, `PUT`, `DELETE`) and websocket connectio
 |---|---|
 | `GET /api/setup/status` | `{setup_required, authenticated, setup_code_required, secret_store_error}` |
 | `GET /api/setup/defaults` | before setup: values already known from the environment (masked), to prefill the wizard |
-| `POST /api/setup` | `{password, oanda_environment, oanda_account_id, oanda_token, telegram_token?, telegram_chat_id?, instrument, setup_code?}`. Only once (`409` afterwards). From another computer than the server, `setup_code` (printed in the server log) is required (`403`). OANDA credentials and the instrument are checked first (`400` with OANDA's message). Logs the browser in. |
+| `POST /api/setup` | `{password, oanda_environment, oanda_account_id, oanda_token, telegram_token?, telegram_chat_id?, instrument, setup_code?}`. Only once (`409` afterwards). From another computer than the server, `setup_code` (printed in the server log) is required (`403`). OANDA credentials and the instrument are checked first (`400` with OANDA's message). Another OANDA environment or account than the one the stored history came from: `409`. Logs the browser in. |
 | `POST /api/login` | `{password}`. `401` wrong, `429` with `Retry-After` after 5 failures from one address (or 30 in total) within 15 minutes |
 | `POST /api/logout` | ends this browser's session |
 | `POST /api/password` | `{current, new}`; logs out every other session |
 | `GET /api/settings` | settings; secrets only as `{set, masked: "****1234", source: "saved" \| "environment" \| null}` |
-| `PUT /api/settings` | any of `oanda_environment`, `oanda_account_id`, `oanda_token`, `telegram_token`, `telegram_chat_id`, `clear_telegram`, `store_ticks`, `timezone`, `listen_on_network`. Empty or missing tokens are kept. New OANDA credentials are checked before saving (`400`). Returns the settings plus `restart_required` |
+| `PUT /api/settings` | any of `oanda_environment`, `oanda_account_id`, `oanda_token`, `telegram_token`, `telegram_chat_id`, `clear_telegram`, `store_ticks`, `timezone`, `listen_on_network`. Empty or missing tokens are kept. New OANDA credentials are checked before saving (`400`). Another environment or account while price history is stored: `409` with the reason (it would mix two price feeds). Returns the settings plus `restart_required` |
 | `POST /api/settings/test/oanda` | `{environment?, account_id?, token?}` (missing: the saved value) → `{ok, message}` |
 | `POST /api/settings/test/telegram` | `{token?, chat_id?}` → `{ok, message}`; sends a test message |
 | `GET /api/instruments/available?q=` | instruments of the broker account, matching `q` |
@@ -43,7 +43,7 @@ Before setup, the two test routes and `/api/setup/defaults` also work without a 
 | `GET /api/health` | `{"status": "ok"}` |
 | `GET /api/version` | `{"version", "api_version"}` |
 | `GET /api/status` | feed state: `provider`, `provider_state` (`connecting`, `connected`, `reconnecting`, `stopped`, `not_configured`, `no_instruments`), `reconnects`, `error`, and per instrument `last_tick_age` (seconds) and `history` (backfill state) |
-| `GET /api/instruments` | stored instruments with `decimals`, `pip_size`, `display_name`, trading `hours` |
+| `GET /api/instruments` | stored instruments with `decimals`, `pip_size`, `display_name`, trading `hours`, and learned `closures` (`[[start, end], ...]`, holidays and early closes; SPEC section 9) |
 | `GET /api/candles` | see below |
 
 ### `GET /api/candles`
@@ -105,6 +105,7 @@ On connect the server sends `hello` `{api_version, server_time}` and then `statu
 | `candle` `{instrument, timeframe, price, candle: {t, o, h, l, c, v}, closed}` | on every tick (`closed: false`, the forming bar) and once when the bar ends (`closed: true`). A subscription immediately receives the current forming bar if there is one |
 | `status` | every 5 s and on feed state changes, same body as `GET /api/status` |
 | `drawing_changed` `{op: create\|update\|delete, drawing}` | any drawing changed, from any browser |
+| `closures` `{instrument, closures}` | learned market closures changed (a holiday passed): `[[start, end], ...]` in UTC epoch seconds |
 | `error` `{error}` | invalid message |
 
 A tick is always sent before the candle update it causes.

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { TimeIndex, lineVertices, linePrice, logicalX, nearestOhlc, segmentDistance, timeRange } from "./geometry";
+import { TimeIndex, linePath, lineVertices, linePrice, logicalX, nearestOhlc, nextOpenSlot, segmentDistance, timeRange, wallAdvance } from "./geometry";
 
 const A = { t: 1000, p: 10 };
 const B = { t: 2000, p: 20 };
@@ -115,12 +115,13 @@ describe("helpers", () => {
 });
 
 import fixture from "./trading-time.fixture.json";
-import { tradingClock, type TradingHoursJson } from "./tradingTime";
+import { tradingClock, type Closure, type TradingHoursJson } from "./tradingTime";
 
 describe("trading clock (same as the Python server)", () => {
-  for (const [name, data] of Object.entries(fixture as unknown as Record<string, { hours: TradingHoursJson; samples: [number, number][] }>)) {
+  type Case = { hours: TradingHoursJson; closures: Closure[]; samples: [number, number][] };
+  for (const [name, data] of Object.entries(fixture as unknown as Record<string, Case>)) {
     it(`matches the server for ${name} hours`, () => {
-      const clock = tradingClock(data.hours);
+      const clock = tradingClock(data.hours, data.closures);
       for (const [t, expected] of data.samples) expect(clock(t)).toBe(expected);
     });
   }
@@ -134,5 +135,123 @@ describe("trading clock (same as the Python server)", () => {
     ];
     expect(linePrice("extended", pts, utc(15, 13), gold)).toBeCloseTo(98, 9); // Monday
     expect(linePrice("extended", pts, utc(15, 13))).toBeCloseTo(96, 9); // clock time
+  });
+});
+
+// The empty area to the right of the last bar (owner's bug report, 2026-10-13)
+
+const GOLD = fixture.metal.hours as unknown as TradingHoursJson;
+const FX = fixture.fx.hours as unknown as TradingHoursJson;
+const at = (m: number, d: number, h: number) => Date.UTC(2024, m - 1, d, h) / 1000;
+
+/** Bars up to `last`, `step` apart (closed slots included: only the shape matters). */
+function bars(last: number, step: number, count = 50): number[] {
+  return Array.from({ length: count }, (_, i) => last - (count - 1 - i) * step);
+}
+
+/** Lightweight Charts 5.2.1: whole indexes only, anything else maps to x = 0. */
+const chartX = (i: number) => (Number.isInteger(i) ? 50 + 10 * i : 0);
+const x = (l: number) => logicalX(l, chartX);
+const y = (p: number) => 1000 - p;
+
+describe("future slots skip closed periods", () => {
+  it("finds the next slot with open time", () => {
+    const gold = tradingClock(GOLD);
+    const fri = at(7, 12, 17); // Friday 13:00 New York: open
+    expect(nextOpenSlot(fri, 4 * 3600, gold)).toBe(fri);
+    // Friday 17:00 New York (21:00 UTC): closed until Sunday 18:00, in the 17:00 slot.
+    expect(nextOpenSlot(at(7, 12, 21), 4 * 3600, gold)).toBe(at(7, 14, 21));
+    expect(nextOpenSlot(at(7, 12, 21), 86400, gold)).toBe(at(7, 14, 21));
+  });
+
+  it("places 4h and 1D slots on trading days only", () => {
+    const gold = tradingClock(GOLD);
+    const h4 = new TimeIndex(bars(at(7, 12, 13), 4 * 3600), 4 * 3600, gold); // last: Fri 09:00 NY
+    expect(h4.toTime(50)).toBe(at(7, 12, 17));
+    expect(h4.toTime(51)).toBe(at(7, 14, 21)); // Sunday 17:00 New York, not Friday night
+    expect(h4.toLogical(at(7, 14, 21))).toBe(51);
+    expect(h4.toLogical(at(7, 14, 23))).toBeCloseTo(51 + 1 / 3, 9); // 1 of its 3 open hours
+    const d1 = new TimeIndex(bars(at(7, 11, 21), 86400), 86400, gold); // last: Thursday's day
+    expect(d1.toTime(50)).toBe(at(7, 14, 21)); // Friday's day is followed by Monday's
+    for (const t of [at(7, 16, 5), at(7, 23, 3), at(8, 30, 12)]) expect(d1.toTime(d1.toLogical(t))).toBeCloseTo(t, 3);
+    // Saturday has no trading time of its own: it sits where Monday's trading day starts.
+    expect(d1.toLogical(at(7, 13, 5))).toBe(50);
+  });
+});
+
+describe("a line in the empty area", () => {
+  function screen(hours: TradingHoursJson, last: number, step: number, a: number, b: number) {
+    const clock = tradingClock(hours);
+    const index = new TimeIndex(bars(last, step), step, clock);
+    const pts = [
+      { t: a, p: 100 },
+      { t: b, p: 90 },
+    ];
+    // A fractional visible range, as after any scroll or zoom.
+    return { index, path: linePath("ray", pts, index, 30.37, 120.61, clock, x, y) };
+  }
+
+  it("draws one polyline from left to right: no line back to the left edge", () => {
+    const last = at(7, 10, 13);
+    const step = 4 * 3600;
+    // Point 2 beyond the last bar, like the dragged anchor in the report.
+    const { index, path } = screen(GOLD, last, step, last - 10 * step, last + 20 * step);
+    expect(index.toLogical(last + 20 * step)).toBeGreaterThan(49);
+    expect(path.length).toBeGreaterThan(50);
+    for (let i = 1; i < path.length; i++) expect(path[i][0]).toBeGreaterThan(path[i - 1][0]);
+    expect(Math.min(...path.map(([px]) => px))).toBeGreaterThan(chartX(30)); // never x = 0
+  });
+
+  it("keeps a constant slope on 1D across weekends", () => {
+    const last = at(7, 10, 21); // Wednesday 17:00 New York
+    const { path } = screen(GOLD, last, 86400, last - 5 * 86400, last + 4 * 86400);
+    const future = path.filter(([px]) => px > chartX(49));
+    expect(future.length).toBeGreaterThan(40); // several weekends
+    const slopes = future.slice(1).map(([px, py], i) => (py - future[i][1]) / (px - future[i][0]));
+    for (const s of slopes) expect(s).toBeCloseTo(slopes[0], 6);
+  });
+
+  it("keeps a constant slope on 4h across weekends (FX: no daily break)", () => {
+    const last = at(7, 10, 13);
+    const step = 4 * 3600;
+    const { path } = screen(FX, last, step, last - 10 * step, last + 6 * step);
+    const future = path.filter(([px]) => px > chartX(49));
+    const slopes = future.slice(1).map(([px, py], i) => (py - future[i][1]) / (px - future[i][0]));
+    expect(slopes.length).toBeGreaterThan(60);
+    for (const s of slopes) expect(s).toBeCloseTo(slopes[0], 6);
+  });
+
+  it("on gold 4h, a weekend looks like any other night (no flat steps)", () => {
+    // Gold's 4h bar that holds the daily break (17:00-21:00 New York) has 3 open
+    // hours, so it moves the line 3/4 as far; the weekend reopen is that same bar.
+    const last = at(7, 10, 13);
+    const step = 4 * 3600;
+    const { path } = screen(GOLD, last, step, last - 10 * step, last + 6 * step);
+    const future = path.filter(([px]) => px > chartX(49));
+    const slopes = future.slice(1).map(([px, py], i) => (py - future[i][1]) / (px - future[i][0]));
+    const full = Math.max(...slopes);
+    expect(slopes.filter((d) => Math.abs(d / full - 0.75) < 1e-6).length).toBeGreaterThan(5);
+    for (const d of slopes) {
+      expect(d).toBeGreaterThan(0); // the ray falls: every slot moves it, no flat steps
+      expect([1, 0.75].some((r) => Math.abs(d / full - r) < 1e-6)).toBe(true);
+    }
+  });
+
+  it("stays straight through a daylight saving change (slots on New York time)", () => {
+    const gold = tradingClock(GOLD);
+    const day = 86400;
+    const last = at(10, 24, 21); // Thursday 17:00 New York (EDT)
+    const index = new TimeIndex(bars(last, day), day, gold, wallAdvance(day, "America/New_York"));
+    // After the change Monday's day starts Sunday 17:00 New York = 22:00 UTC (EST).
+    expect(index.toTime(54)).toBe(at(10, 31, 21)); // Friday's day, EDT
+    expect(index.toTime(55)).toBe(at(11, 3, 22));
+    const pts = [
+      { t: last - 3 * day, p: 100 },
+      { t: last, p: 97 },
+    ];
+    const path = linePath("ray", pts, index, 30.4, 80.2, gold, x, y);
+    const future = path.filter(([px]) => px > chartX(49));
+    const slopes = future.slice(1).map(([px, py], i) => (py - future[i][1]) / (px - future[i][0]));
+    for (const sl of slopes) expect(sl).toBeCloseTo(slopes[0], 6);
   });
 });

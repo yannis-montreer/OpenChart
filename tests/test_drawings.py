@@ -142,3 +142,34 @@ def test_two_points_inside_one_closure_are_refused(client):
     response = client.post("/api/drawings", json={**RAY, "points": closed})
     assert response.status_code == 400
     assert "trading time" in response.json()["detail"]
+
+
+def test_drawings_and_instruments_use_learned_closures(client):
+    from datetime import UTC, datetime
+
+    def utc(*a):
+        return int(datetime(*a, tzinfo=UTC).timestamp())
+
+    closure = (utc(2024, 9, 2, 17, 30), utc(2024, 9, 2, 22))
+    store = client.server.store
+    client.portal.call(store.replace_closures, "fake", "XAU_USD", 0, 2**40, [closure])
+    gold = next(i for i in client.get("/api/instruments").json() if i["instrument"] == "XAU_USD")
+    assert gold["closures"] == [list(closure)]
+
+    # Both points inside the learned closure: no trading time between them.
+    inside = [{"t": closure[0] + 600, "p": 1.0}, {"t": closure[0] + 3600, "p": 2.0}]
+    assert client.post("/api/drawings", json={**RAY, "points": inside}).status_code == 400
+
+
+def test_an_anchor_beyond_the_last_bar_is_one_update_not_a_new_drawing(client):
+    """The owner's report: dragging the right anchor into the empty area showed a
+    horizontal line. It was only drawn on screen; the server holds just the ray."""
+    created = client.post("/api/drawings", json=RAY).json()
+    future = [RAY["points"][0], {"t": NOW + 30 * 86400, "p": 1990.0}]  # a month ahead
+    with client.websocket_connect("/ws") as ws:
+        updated = client.put(f"/api/drawings/{created['id']}", json={"points": future})
+        assert updated.status_code == 200
+        message = receive_until(ws, "drawing_changed")
+        assert message["op"] == "update" and message["drawing"]["id"] == created["id"]
+    listed = client.get("/api/drawings", params={"instrument": "XAU_USD"}).json()
+    assert [(d["id"], d["type"], d["points"]) for d in listed] == [(created["id"], "ray", future)]

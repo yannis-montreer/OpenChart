@@ -1,7 +1,7 @@
 /** REST client for the OpenChart server (see docs/api.md). */
 
 import type { DrawingType, Point } from "./drawings/geometry";
-import type { TradingHoursJson } from "./drawings/tradingTime";
+import type { Closure, TradingHoursJson } from "./drawings/tradingTime";
 import type { SessionMeta } from "./time";
 
 /** The API version this client was written against. */
@@ -41,6 +41,8 @@ export interface Instrument {
   pip_size: number;
   enabled: boolean;
   hours: TradingHoursJson | null;
+  /** Learned closures (holidays, early closes): [start, end) in UTC epoch seconds. */
+  closures: Closure[];
 }
 
 export interface InstrumentStatus {

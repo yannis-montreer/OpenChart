@@ -4,7 +4,7 @@ import pytest
 
 from openchart import API_VERSION
 from openchart.providers.base import Tick
-from tests.conftest import NOW
+from tests.conftest import NOW, Harness
 
 
 def push(client, tick: Tick) -> None:
@@ -131,3 +131,20 @@ def test_root_serves_web_ui_or_build_hint(client):
     response = client.get("/")
     assert response.status_code == 200
     assert "OpenChart" in response.text
+
+
+def test_the_page_is_revalidated_and_built_assets_are_cached(tmp_path, monkeypatch):
+    """After a frontend rebuild a reload must load the new build, not a cached page."""
+    from fastapi.testclient import TestClient
+
+    from openchart.api import app as app_module
+
+    (tmp_path / "assets").mkdir()
+    (tmp_path / "index.html").write_text("<html></html>")
+    (tmp_path / "assets" / "index-abc123.js").write_text("1")
+    monkeypatch.setattr(app_module, "WEB_DIR", tmp_path)
+    harness = Harness(tmp_path / "data")
+    with TestClient(app_module.create_app(harness.server)) as c:
+        assert c.get("/").headers["cache-control"] == "no-cache"
+        cached = c.get("/assets/index-abc123.js").headers["cache-control"]
+        assert "immutable" in cached

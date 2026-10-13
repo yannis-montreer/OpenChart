@@ -293,7 +293,7 @@ export class App {
     this.socket.subscribe(key);
     savePrefs(this.prefs);
     this.updateFeedIndicators();
-    void this.drawings.setInstrument(this.instrument.instrument, this.instrument.hours);
+    void this.drawings.setInstrument(this.instrument.instrument, this.instrument.hours, this.instrument.closures ?? []);
     await this.chart.load(this.context(), opts);
     document.title = `${this.instrument.instrument} ${this.prefs.timeframe} · OpenChart`;
   }
@@ -490,6 +490,12 @@ export class App {
       case "drawing_changed":
         this.drawings.applyRemote(m.op, m.drawing);
         break;
+      case "closures": {
+        const inst = this.instruments.find((i) => i.instrument === m.instrument);
+        if (inst) inst.closures = m.closures;
+        this.drawings.setClosures(m.instrument, m.closures);
+        break;
+      }
       case "error":
         console.warn("server:", m.error);
         break;

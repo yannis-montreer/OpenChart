@@ -212,3 +212,65 @@ async def test_cli_repair(tmp_path, monkeypatch, capsys):
 
     async with await Database.open(config.db_path) as db:
         assert await CandleStore(db.conn).count("fake", "XAU_USD") == len(CANDLES)
+
+
+# Learned closures: holes the broker has no data for, 30 open minutes or longer
+
+
+async def test_holes_without_broker_data_become_closures(db):
+    store = CandleStore(db.conn)
+    holiday = (utc(2024, 3, 7, 18, 30), utc(2024, 3, 7, 22))  # early close, 210 open minutes
+    blip = (utc(2024, 3, 12, 9), utc(2024, 3, 12, 9, 12))  # 12 broker minutes missing
+    broker = [c for c in CANDLES if not any(a <= c.ts < b for a, b in (holiday, blip))]
+    provider = FakeProvider({"XAU_USD": broker})
+    await backfill(provider, store, "XAU_USD", START, END)
+
+    result = await repair(provider, store, "XAU_USD", METAL_HOURS)
+    assert result.closures_changed
+    # It runs into the daily break (22:00-23:00 UTC in winter): closed until the reopen.
+    # The blip is too short to count.
+    assert await store.closures("fake", "XAU_USD") == [(holiday[0], utc(2024, 3, 7, 23))]
+
+    again = await repair(provider, store, "XAU_USD", METAL_HOURS)
+    assert not again.closures_changed
+
+
+async def test_a_hole_that_gets_data_is_no_closure(db):
+    store = CandleStore(db.conn)
+    hole = (utc(2024, 3, 6, 3), utc(2024, 3, 6, 5))
+    late = FakeProvider({"XAU_USD": [c for c in CANDLES if not hole[0] <= c.ts < hole[1]]})
+    await backfill(late, store, "XAU_USD", START, END)
+    await repair(late, store, "XAU_USD", METAL_HOURS)
+    assert await store.closures("fake", "XAU_USD") == [hole]
+
+    # The broker has the data after all (it was an outage on its side).
+    result = await repair(FakeProvider({"XAU_USD": CANDLES}), store, "XAU_USD", METAL_HOURS)
+    assert result.filled == 120 and result.closures_changed
+    assert await store.closures("fake", "XAU_USD") == []
+
+
+async def test_the_feed_scans_for_closures_once_and_announces_them(db):
+    from tests.conftest import GOLD
+
+    store = CandleStore(db.conn)
+    await store.upsert_instrument("fake", GOLD, METAL_HOURS)
+    holiday = (utc(2024, 3, 7, 18, 30), utc(2024, 3, 7, 22))
+    provider = FakeProvider(
+        {"XAU_USD": [c for c in CANDLES if not holiday[0] <= c.ts < holiday[1]]}
+    )
+    await backfill(provider, store, "XAU_USD", START, END)
+
+    feed = Feed(provider, store, ["XAU_USD"], hours={"XAU_USD": METAL_HOURS})
+    announced = []
+
+    async def on_closures(instrument):
+        announced.append(instrument)
+
+    feed.on_closures = on_closures
+    await feed.scan_closures("XAU_USD")
+    assert announced == ["XAU_USD"]
+    assert await store.closures("fake", "XAU_USD") == [(holiday[0], utc(2024, 3, 7, 23))]
+
+    calls = provider.fetch_calls
+    await feed.scan_closures("XAU_USD")  # already scanned: nothing to do
+    assert provider.fetch_calls == calls and announced == ["XAU_USD"]

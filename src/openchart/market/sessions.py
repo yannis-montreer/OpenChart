@@ -18,6 +18,8 @@ an hour longer or shorter, exactly like the broker's own candles.
 from __future__ import annotations
 
 import json
+from bisect import bisect_right
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
@@ -126,9 +128,12 @@ class TradingClock:
     trading hour to the next and is straight on the chart across weekends, and the
     alert engine evaluates exactly that line. The frontend has the same function
     (`frontend/src/drawings/tradingTime.ts`); a shared fixture keeps them identical.
+
+    `closures` are learned `(start, end)` stretches the hours call open but the broker
+    had no data for (holidays, early closes); the clock stops during them too.
     """
 
-    def __init__(self, hours: TradingHours):
+    def __init__(self, hours: TradingHours, closures: Sequence[tuple[float, float]] = ()):
         self.zone = ZoneInfo(hours.tz)
         open_minutes = [hours.open_at(m) for m in range(_WEEK_SECONDS // 60)]
         self.open_minutes = open_minutes
@@ -136,18 +141,43 @@ class TradingClock:
         for is_open in open_minutes:
             self.prefix.append(self.prefix[-1] + (1 if is_open else 0))
         self.week_open_seconds = self.prefix[-1] * 60
+        merged: list[tuple[float, float]] = []
+        for start, end in sorted(closures):
+            if end <= start:
+                continue
+            if merged and start <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+            else:
+                merged.append((start, end))
+        self.closures = merged
+        self._ends = [end for _, end in merged]
+        # _closed[k]: open time (per the hours) lost to the first k closures.
+        self._closed = [0.0]
+        for start, end in merged:
+            lost = self._hours_clock(end) - self._hours_clock(start)
+            self._closed.append(self._closed[-1] + lost)
 
-    def __call__(self, ts: float) -> float:
+    def _hours_clock(self, ts: float) -> float:
         local = ts + self.zone.utcoffset(datetime.fromtimestamp(ts, self.zone)).total_seconds()
         week, rem = divmod(local - _SUNDAY_EPOCH, _WEEK_SECONDS)
         minute = int(rem // 60)
         partial = rem - minute * 60 if self.open_minutes[minute] else 0.0
         return week * self.week_open_seconds + self.prefix[minute] * 60 + partial
 
+    def __call__(self, ts: float) -> float:
+        clock = self._hours_clock(ts)
+        if not self.closures:
+            return clock
+        k = bisect_right(self._ends, ts)  # closures over by ts
+        closed = self._closed[k]
+        if k < len(self.closures) and self.closures[k][0] < ts:
+            closed += clock - self._hours_clock(self.closures[k][0])  # inside closure k
+        return clock - closed
 
-def trading_clock(hours: TradingHours | None):
+
+def trading_clock(hours: TradingHours | None, closures: Sequence[tuple[float, float]] = ()):
     """The trading clock for these hours, or plain clock time if hours are unknown."""
-    return TradingClock(hours) if hours is not None else (lambda ts: float(ts))
+    return TradingClock(hours, closures) if hours is not None else (lambda ts: float(ts))
 
 
 # Bar alignment

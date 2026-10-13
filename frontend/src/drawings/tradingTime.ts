@@ -7,6 +7,9 @@
  * engine evaluates the same line. This is a copy of `openchart.market.sessions.
  * TradingClock`; `trading-time.fixture.json` (made by the Python tests) keeps the two
  * identical.
+ *
+ * `closures` are learned [start, end) stretches the hours call open but the broker had
+ * no data for (holidays, early closes); the clock stops during them too.
  */
 
 import { tzOffset } from "../time";
@@ -45,9 +48,42 @@ function openAt(hours: TradingHoursJson, wm: number): boolean {
   return true;
 }
 
+export type Closure = [number, number];
+
 /** The trading clock for these hours, or plain clock time if hours are unknown. */
-export function tradingClock(hours: TradingHoursJson | null | undefined): Clock {
+export function tradingClock(hours: TradingHoursJson | null | undefined, closures: readonly Closure[] = []): Clock {
   if (!hours) return (t) => t;
+  const base = hoursClock(hours);
+  // Same steps as the Python implementation, so the results are identical.
+  const merged: Closure[] = [];
+  for (const [s, e] of [...closures].sort((a, b) => a[0] - b[0] || a[1] - b[1])) {
+    if (e <= s) continue;
+    const last = merged[merged.length - 1];
+    if (last && s <= last[1]) last[1] = Math.max(e, last[1]);
+    else merged.push([s, e]);
+  }
+  if (!merged.length) return base;
+  const closed = [0];
+  for (const [s, e] of merged) {
+    const lost = base(e) - base(s);
+    closed.push(closed[closed.length - 1] + lost);
+  }
+  return (t: number) => {
+    const clock = base(t);
+    let lo = 0; // closures over by t: ends <= t (bisect_right)
+    let hi = merged.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (merged[mid][1] <= t) lo = mid + 1;
+      else hi = mid;
+    }
+    let lost = closed[lo];
+    if (lo < merged.length && merged[lo][0] < t) lost += clock - base(merged[lo][0]);
+    return clock - lost;
+  };
+}
+
+function hoursClock(hours: TradingHoursJson): Clock {
   const open = new Uint8Array(WEEK_MINUTES);
   const prefix = new Float64Array(WEEK_MINUTES + 1);
   for (let m = 0; m < WEEK_MINUTES; m++) {

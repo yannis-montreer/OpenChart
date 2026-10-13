@@ -178,6 +178,8 @@ alert_events(id INTEGER PRIMARY KEY, alert_id TEXT, ts INT, price REAL,
 layouts(id TEXT PRIMARY KEY, name TEXT, json TEXT, updated_at INT)
 settings(key TEXT PRIMARY KEY, value TEXT)        -- non-secret settings only
 sessions(token_hash TEXT PRIMARY KEY, created_at INT, expires_at INT)
+closures(source TEXT, instrument TEXT, start_ts INT, end_ts INT,   -- learned holidays
+         PRIMARY KEY (source, instrument, start_ts))                -- and early closes
 ```
 
 Raw ticks: Parquet files at `data/ticks/{source}/{instrument}/date=YYYY-MM-DD.parquet`, written in batches. Enabled by default, switchable in settings.
@@ -240,6 +242,7 @@ Server to client:
 - `tick {instrument, t, bid, ask}`
 - `candle {instrument, timeframe, candle, closed}`
 - `drawing_changed {op: create|update|delete, drawing}`
+- `closures {instrument, closures}` (learned market closures changed, section 9)
 - `alert_changed {op, alert}`
 - `alert_triggered {alert, event}`
 - `status {provider_state, instruments: {...}}`
@@ -256,7 +259,7 @@ Goal: the simplest possible UX for one user.
 
 1. **First-run wizard** (shown when no password is set). Fields: app password, OANDA environment (practice or live), OANDA token, account ID, optional Telegram bot token and chat ID, initial instrument (default XAU_USD). Each credential has a **Test connection** button that makes a live call (OANDA: one candles request, Telegram: send a test message) and shows green or red with the error text.
 2. **Login:** a single password, stored as an argon2 hash. On success the server sets an HTTP-only, SameSite session cookie valid for 30 days. No usernames, email or OAuth in v1.
-3. **Settings page:** change password, rotate OANDA token, change account, edit Telegram details, add or remove instruments, toggle tick storage, set display timezone. Same Test buttons.
+3. **Settings page:** change password, rotate OANDA token, change account (refused while price history is stored: another environment or account is another price feed, rule 3 in section 3; the message says to use a new data folder), edit Telegram details, add or remove instruments, toggle tick storage, set display timezone. Same Test buttons.
 4. **Secrets storage:** OANDA token and Telegram token go to the OS credential store through `keyring` (Windows Credential Manager). Fallback: encrypted file with a key from an environment variable. Never stored in plain text in SQLite, never logged, never returned by the API (masked, last 4 chars).
 5. **Network:** server binds to `127.0.0.1` by default. A setting (or `--host`) allows `0.0.0.0` for Tailscale use. See section 15.
 6. Rate-limit login attempts.
@@ -278,6 +281,10 @@ A line is two anchor points `(t1, p1)` and `(t2, p2)` in UTC epoch seconds and p
 line_price(t) = p1 + (p2 - p1) * (T(t) - T(t1)) / (T(t2) - T(t1))
 ```
 The two anchors must have trading time between them. `T` is implemented twice, in `market/sessions.py` (server, alerts) and `frontend/src/drawings/tradingTime.ts` (drawing); a shared fixture test keeps them identical.
+
+**Learned closures.** The trading hours do not know holidays or early closes. A hole in stored M1 of at least 30 minutes of expected trading time that the broker has no candles for, even when asked again by the repair (section 6), is stored in `closures`, and `T` also stops during it. Shorter holes are a few missing broker minutes and are ignored. They are learned once over the whole history (in the background on the first start, or with `openchart repair`) and then by the recent repair as they happen; the browser gets them with the instrument and a `closures` websocket message. A line drawn across a future holiday therefore shifts slightly beyond it once the holiday has passed.
+
+**On the chart.** The x axis counts bars. Past the last bar, the empty area is counted in the slots of the bars still to come: slots without trading time (weekends, closures) are skipped, and 4h, 1D and 1W slots follow the 17:00 New York alignment through DST changes. Inside a slot, positions are measured in trading time. So a line is straight on screen in the empty area as well; on gold's 4h chart the bar holding the daily break advances it 3/4 as far, as it does on real bars.
 - `trendline` (segment): only valid for `t1 <= t <= t2`.
 - `ray`: valid for `t >= t1` (in the direction of point 2).
 - `extended`: valid for all `t`.

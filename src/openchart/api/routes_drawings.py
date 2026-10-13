@@ -84,7 +84,8 @@ def drawing_routes(server: Server) -> APIRouter:
         row = await server.store.instrument(server.source, body.instrument)
         if row is None:
             raise HTTPException(404, f"unknown instrument {body.instrument!r}")
-        points = check_points(body.type, body.points, trading_clock(row.hours))
+        closures = await server.store.closures(server.source, body.instrument)
+        points = check_points(body.type, body.points, trading_clock(row.hours, closures))
         drawing = await store().create(
             body.instrument, body.type, points, body.style.values(), body.label
         )
@@ -98,7 +99,8 @@ def drawing_routes(server: Server) -> APIRouter:
         points = None
         if body.points is not None:
             row = await server.store.instrument(server.source, current.instrument)
-            clock = trading_clock(row.hours) if row else None
+            closures = await server.store.closures(server.source, current.instrument)
+            clock = trading_clock(row.hours, closures) if row else None
             points = check_points(current.type, body.points, clock)
         drawing = await store().update(
             drawing_id,

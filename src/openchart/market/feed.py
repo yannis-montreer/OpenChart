@@ -14,15 +14,18 @@ import asyncio
 import contextlib
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from openchart.market.backfill import (
+    CLOSURE_MINUTES,
+    RepairResult,
     backfill,
     deep_fill,
     gap_fill,
     refresh_recent,
+    repair,
     repair_recent,
 )
 from openchart.market.cache import CandleCache
@@ -36,6 +39,7 @@ from openchart.store.ticks import TickWriter
 log = logging.getLogger(__name__)
 
 TickListener = Callable[[Tick], None]
+ClosuresListener = Callable[[str], Awaitable[None]]
 
 # A once-a-second loop that took this long means the process was paused (sleep, hibernate).
 WAKE_SECONDS = 30.0
@@ -76,6 +80,8 @@ class Feed:
         self.builder.load_m1 = self._load_m1
         self.stream = ResilientTickStream(provider, instruments, on_connected=self._on_connected)
         self.tick_listeners: list[TickListener] = []
+        # Called with the instrument when its learned closures changed.
+        self.on_closures: ClosuresListener | None = None
         self.last_tick: dict[str, Tick] = {}
         self.tick_count = 0
         self.history: dict[str, dict[str, Any]] = {
@@ -103,8 +109,10 @@ class Feed:
                     )
                 else:
                     result = await gap_fill(self.provider, self.store, instrument)
-                    await repair_recent(
-                        self.provider, self.store, instrument, self.hours.get(instrument)
+                    await self._repaired(
+                        await repair_recent(
+                            self.provider, self.store, instrument, self.hours.get(instrument)
+                        )
                     )
             except Exception:
                 info["state"] = "failed"
@@ -127,6 +135,7 @@ class Feed:
                 except Exception as exc:
                     info["deep"] = "failed"
                     log.warning("deep history for %s failed: %s", instrument, exc)
+            await self.scan_closures(instrument)
             await self.extend_cache(instrument)
 
     async def extend_cache(self, instrument: str) -> None:
@@ -178,11 +187,38 @@ class Feed:
         """Refill holes in the last few days of M1."""
         for instrument in self.instruments:
             try:
-                await repair_recent(
-                    self.provider, self.store, instrument, self.hours.get(instrument)
+                await self._repaired(
+                    await repair_recent(
+                        self.provider, self.store, instrument, self.hours.get(instrument)
+                    )
                 )
             except Exception as exc:
                 log.warning("repairing recent M1 for %s failed: %s", instrument, exc)
+
+    async def scan_closures(self, instrument: str) -> None:
+        """Once per instrument: learn closures over all stored M1 (about one request per
+        holiday). Later ones are learned by the recent repair as they happen."""
+        hours = self.hours.get(instrument)
+        if hours is None or await self.store.closures_scanned(self.source, instrument):
+            return
+        try:
+            result = await repair(
+                self.provider, self.store, instrument, hours, min_open_minutes=CLOSURE_MINUTES
+            )
+        except Exception as exc:
+            log.warning("scanning %s for market closures failed: %s", instrument, exc)
+            return
+        await self.store.mark_closures_scanned(self.source, instrument, int(time.time()))
+        n = len(await self.store.closures(self.source, instrument))
+        log.info("%s: %d market closures (holidays, early closes) learned", instrument, n)
+        await self._repaired(result)
+
+    async def _repaired(self, result: RepairResult) -> None:
+        if result.closures_changed and self.on_closures is not None:
+            try:
+                await self.on_closures(result.instrument)
+            except Exception:
+                log.exception("closures listener failed")
 
     async def refresh(self) -> None:
         for instrument in self.instruments:

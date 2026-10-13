@@ -39,6 +39,20 @@ SETUP_ONLY = {"/api/setup/defaults", "/api/settings/test/oanda", "/api/settings/
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
 
+class WebFiles(StaticFiles):
+    """The web UI. Built files under assets/ have a content hash in their name and never
+    change; index.html is checked on every load, so a rebuild takes effect at once
+    (a cached page would keep running the previous build)."""
+
+    def file_response(self, full_path, stat_result, scope, status_code=200):
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        immutable = scope["path"].startswith("/assets/")
+        response.headers["Cache-Control"] = (
+            "public, max-age=31536000, immutable" if immutable else "no-cache"
+        )
+        return response
+
+
 def same_origin(origin: str | None, host: str | None) -> bool:
     """No Origin header (curl, scripts) is fine; a browser page from elsewhere is not."""
     return not origin or urlsplit(origin).netloc == host
@@ -121,6 +135,7 @@ def create_app(server: Server) -> FastAPI:
     @app.get("/api/instruments")
     async def instruments() -> list[dict[str, Any]]:
         rows = await server.store.instruments(server.source)
+        closures = {r.instrument: await server.store.closures(r.source, r.instrument) for r in rows}
         return [
             {
                 "instrument": r.instrument,
@@ -131,6 +146,7 @@ def create_app(server: Server) -> FastAPI:
                 "pip_size": r.pip_size,
                 "enabled": r.enabled,
                 "hours": r.hours.to_dict() if r.hours else None,
+                "closures": [list(c) for c in closures[r.instrument]],
             }
             for r in rows
         ]
@@ -185,7 +201,7 @@ def create_app(server: Server) -> FastAPI:
 
     # The built web UI, served last so /api and /ws take precedence.
     if (WEB_DIR / "index.html").is_file():
-        app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")
+        app.mount("/", WebFiles(directory=WEB_DIR, html=True), name="web")
     else:
 
         @app.get("/", include_in_schema=False)
