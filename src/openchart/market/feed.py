@@ -1,6 +1,8 @@
 """Live feed: history, tick stream, live candles.
 
-On start (and after every reconnect) it gap-fills M1 from REST, then streams ticks.
+On start (and after every reconnect) it gap-fills M1 from REST and repairs holes in the
+last few days, then streams ticks. When the process was paused (the computer slept), the
+repair also runs as soon as it wakes up.
 Each tick goes to the candle builder, the tick store and any listeners (the websocket
 hub). Closed M1 bars are written in small batches, and once a minute the last few
 minutes are re-fetched from the provider so stored M1 matches the broker's candles.
@@ -16,9 +18,16 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from openchart.market.backfill import backfill, deep_fill, gap_fill, refresh_recent
+from openchart.market.backfill import (
+    backfill,
+    deep_fill,
+    gap_fill,
+    refresh_recent,
+    repair_recent,
+)
 from openchart.market.cache import CandleCache
 from openchart.market.candle_builder import CandleBuilder
+from openchart.market.sessions import TradingHours
 from openchart.providers.base import Candle, Provider, Tick
 from openchart.providers.stream import ResilientTickStream
 from openchart.store.candles import CandleStore
@@ -28,6 +37,9 @@ log = logging.getLogger(__name__)
 
 TickListener = Callable[[Tick], None]
 
+# A once-a-second loop that took this long means the process was paused (sleep, hibernate).
+WAKE_SECONDS = 30.0
+
 
 class Feed:
     def __init__(
@@ -36,6 +48,7 @@ class Feed:
         store: CandleStore,
         instruments: list[str],
         *,
+        hours: dict[str, TradingHours | None] | None = None,
         tick_writer: TickWriter | None = None,
         builder: CandleBuilder | None = None,
         cache: CandleCache | None = None,
@@ -49,6 +62,7 @@ class Feed:
         self.source = provider.name
         self.store = store
         self.instruments = instruments
+        self.hours = hours or {}  # per instrument, to tell holes from market closures
         self.tick_writer = tick_writer
         self.backfill_years = backfill_years
         self.flush_interval = flush_interval
@@ -89,6 +103,9 @@ class Feed:
                     )
                 else:
                     result = await gap_fill(self.provider, self.store, instrument)
+                    await repair_recent(
+                        self.provider, self.store, instrument, self.hours.get(instrument)
+                    )
             except Exception:
                 info["state"] = "failed"
                 raise
@@ -157,6 +174,16 @@ class Feed:
         for instrument, candles in by_instrument.items():
             await self.store.upsert_m1(self.source, instrument, candles)
 
+    async def repair(self) -> None:
+        """Refill holes in the last few days of M1."""
+        for instrument in self.instruments:
+            try:
+                await repair_recent(
+                    self.provider, self.store, instrument, self.hours.get(instrument)
+                )
+            except Exception as exc:
+                log.warning("repairing recent M1 for %s failed: %s", instrument, exc)
+
     async def refresh(self) -> None:
         for instrument in self.instruments:
             try:
@@ -168,9 +195,15 @@ class Feed:
 
     async def _periodic(self) -> None:
         last_flush = last_status = last_refresh = time.monotonic()
+        last_wall = time.time()
         while True:
             await asyncio.sleep(1)
-            self.builder.on_clock(time.time())
+            wall = time.time()
+            woke = wall - last_wall > WAKE_SECONDS
+            if woke:
+                log.info("resumed after %.0fs paused; checking recent history", wall - last_wall)
+            last_wall = wall
+            self.builder.on_clock(wall)
             if self._pending_m1:
                 await self.flush_m1()
             now = time.monotonic()
@@ -182,6 +215,10 @@ class Feed:
                 await self.refresh()
                 for instrument in self.instruments:
                     await self.extend_cache(instrument)
+            if woke:
+                # The refresh wrote the last few minutes, ahead of the pause: fill what lies
+                # between. The stream's reconnect does it too, but only if it notices.
+                await self.repair()
             if now - last_status >= self.status_interval:
                 last_status = now
                 self.log_status()

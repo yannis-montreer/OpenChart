@@ -5,15 +5,22 @@ Invariant: stored candles of one granularity for a `(source, instrument)` cover 
 is extended forward and the head backward, each batch committed in order, so a run
 interrupted at any point can simply be repeated: it resumes where it stopped.
 Writes are upserts, so repeating a run never duplicates rows.
+
+Holes inside the stored range can still appear: if the process is paused (the computer
+sleeps), the once-a-minute refresh of the last few minutes writes candles ahead of the
+hole on waking, and the tail gap-fill then starts after it. `repair` finds and refills
+such holes; the feed runs it over the last few days on every start, reconnect and wake-up.
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
+from openchart.market.gaps import Gap, find_gaps
+from openchart.market.sessions import TradingHours
 from openchart.providers.base import Candle, Provider
 from openchart.store.candles import STEP_SECONDS, CandleStore
 
@@ -25,6 +32,11 @@ M1_SECONDS = 60
 DEEP_HISTORY_START = datetime(2000, 1, 1, tzinfo=UTC)
 # One head window per transaction: about one request's worth of candles.
 HEAD_WINDOW = {"M1": timedelta(days=3), "H1": timedelta(days=180)}
+
+# Interior holes in this much recent M1 are repaired on every start, reconnect and wake-up.
+RECENT_REPAIR = timedelta(days=3)
+# Holes within this span are refetched with one range (OANDA: 5000 M1 candles a page).
+REPAIR_WINDOW = 3 * 86400
 
 # (rows written so far, ts, direction). Forward: newest candle stored so far.
 # Backward: how far back history has been searched.
@@ -132,6 +144,88 @@ async def gap_fill(
             result.written,
             result.last_ts,
         )
+    return result
+
+
+@dataclass
+class RepairResult:
+    instrument: str
+    holes: list[Gap] = field(default_factory=list)  # found before the repair
+    filled: int = 0  # candles written into them
+    requests: int = 0
+
+
+def _fetch_windows(holes: list[Gap], span: int) -> list[tuple[int, int]]:
+    """Group holes into `[start, end)` fetch ranges of about `span` seconds each."""
+    windows: list[tuple[int, int]] = []
+    for gap in holes:
+        start, end = gap.before + M1_SECONDS, gap.after
+        if windows and end - windows[-1][0] <= span:
+            windows[-1] = (windows[-1][0], end)
+        else:
+            windows.append((start, end))
+    return windows
+
+
+async def repair(
+    provider: Provider,
+    store: CandleStore,
+    instrument: str,
+    hours: TradingHours | None,
+    *,
+    start: int | None = None,
+    end: int | None = None,
+    min_open_minutes: int = 2,
+    source: str | None = None,
+    progress: Callable[[int, int], None] | None = None,
+) -> RepairResult:
+    """Refill holes inside stored M1 between `start` and `end` (default: everything).
+
+    A hole is a run of missing minutes, at least `min_open_minutes` of them while the
+    market should be open (`find_gaps`). Only missing candles are written, so stored
+    ones are never replaced, and a hole the broker has no data for (a holiday, an early
+    close) costs a request and changes nothing. The tail after the newest candle is
+    `gap_fill`'s job.
+    """
+    source = source or provider.name
+    result = RepairResult(instrument)
+    stamps = await store.timestamps(source, instrument, start, end)
+    if start is not None and stamps:
+        # A hole that began before `start` ends inside the range: include its left edge.
+        before = await store.last_ts(source, instrument, before=stamps[0])
+        if before is not None:
+            stamps.insert(0, before)
+    result.holes = find_gaps(stamps, hours, min_open_minutes)
+    windows = _fetch_windows(result.holes, REPAIR_WINDOW)
+    for i, (lo, hi) in enumerate(windows):
+        have = set(await store.timestamps(source, instrument, lo, hi))
+        candles = provider.fetch_candles(instrument, _dt(lo), _dt(hi))
+        missing = [c async for c in candles if c.ts not in have]
+        result.requests += 1
+        if missing:
+            result.filled += await store.upsert(source, instrument, missing)
+        if progress:
+            progress(i + 1, len(windows))
+    return result
+
+
+async def repair_recent(
+    provider: Provider,
+    store: CandleStore,
+    instrument: str,
+    hours: TradingHours | None,
+    *,
+    source: str | None = None,
+    lookback: timedelta = RECENT_REPAIR,
+) -> RepairResult:
+    """`repair` over the last few days: one request if anything is missing, else none."""
+    start = int((datetime.now(UTC) - lookback).timestamp())
+    result = await repair(provider, store, instrument, hours, start=start, source=source)
+    if result.filled:
+        holes = ", ".join(
+            f"{_dt(g.before + M1_SECONDS):%m-%d %H:%M}-{_dt(g.after):%H:%M}" for g in result.holes
+        )
+        log.info("repaired %s: %d M1 candles filled in %s", instrument, result.filled, holes)
     return result
 
 

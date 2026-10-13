@@ -15,7 +15,7 @@ from pathlib import Path
 
 from openchart import __version__
 from openchart.config import Config, ConfigError, load_config
-from openchart.market.backfill import backfill, deep_fill
+from openchart.market.backfill import backfill, deep_fill, repair
 from openchart.market.cache import CandleCache
 from openchart.market.gaps import find_gaps
 from openchart.market.instruments import default_hours
@@ -197,6 +197,50 @@ async def _cmd_gaps(config: Config, args: argparse.Namespace) -> int:
     return 0
 
 
+async def _cmd_repair(config: Config, args: argparse.Namespace) -> int:
+    async with _context(config) as ctx:
+        source = ctx.provider.name
+        row = await ctx.store.instrument(source, args.instrument)
+        if row is None:
+            print(f"No stored data for {source}/{args.instrument}.")
+            return 1
+
+        def progress(done: int, total: int) -> None:
+            print(f"\r  {done}/{total} requests", end="", flush=True)
+
+        print(f"Scanning {source}/{args.instrument} M1 for holes inside the stored range")
+        result = await repair(
+            ctx.provider,
+            ctx.store,
+            args.instrument,
+            row.hours,
+            min_open_minutes=args.min_minutes,
+            progress=progress,
+        )
+        if result.requests:
+            print()
+        stamps = await ctx.store.timestamps(source, args.instrument)
+        left = {g.before: g for g in find_gaps(stamps, row.hours, args.min_minutes)}
+        for gap in result.holes:
+            now = left.get(gap.before)
+            if now is None:
+                state = "filled"
+            elif now.after == gap.after:
+                state = "nothing at the broker (holiday, early close or outage)"
+            else:
+                state = f"partly filled, the broker has nothing until {_fmt(now.after)}"
+            span = f"{_fmt(gap.before)} -> {_fmt(gap.after)}"
+            print(f"  {span}: {gap.open_minutes} open minutes, {state}")
+        print(
+            f"{len(result.holes)} hole(s) of at least {args.min_minutes} open minutes, "
+            f"{result.filled:,} candles filled with {result.requests} request(s)."
+        )
+        if result.filled:
+            n = await CandleCache(ctx.store).extend_all(source, args.instrument)
+            print(f"4h/D/W cache brought up to date ({n:,} bars recomputed).")
+    return 0
+
+
 async def _cmd_run(config: Config, args: argparse.Namespace) -> int:
     import uvicorn
 
@@ -255,6 +299,7 @@ COMMANDS = {
     "backfill": _cmd_backfill,
     "stats": _cmd_stats,
     "gaps": _cmd_gaps,
+    "repair": _cmd_repair,
     "rebuild-cache": _cmd_rebuild_cache,
     "reset-password": _cmd_reset_password,
     "run": _cmd_run,
@@ -281,6 +326,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("instrument")
     p.add_argument("--source", default="oanda")
     p.add_argument("--min-minutes", type=int, default=10)
+    p = sub.add_parser("repair", help="refill holes inside stored M1 history from the broker")
+    p.add_argument("instrument")
+    p.add_argument(
+        "--min-minutes",
+        type=int,
+        default=5,
+        help="smallest hole to refetch, in open minutes (default 5; 1 checks every minute)",
+    )
     p = sub.add_parser("run", help="start the server: API, websocket and live feed")
     p.add_argument(
         "--host", help="bind address (default: 127.0.0.1, or 0.0.0.0 if enabled in Settings)"

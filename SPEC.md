@@ -191,6 +191,7 @@ Use a simple migration system (numbered SQL files) from the start.
 ### History
 1. First run: backfill M1 from the provider (default 2 years, configurable) into `candles_m1`.
 2. Every later start: read the last stored `ts`, fill the gap since then, then switch to the live stream.
+   On every start, stream reconnect and wake-up from a pause (the computer slept), also refill holes inside the last 3 days of M1, not just the tail. `openchart repair <INSTRUMENT>` does the same over the whole stored range.
 3. Backfill must be idempotent (upsert) and resumable.
 4. **Deep history tier:** H1 candles (bid, ask, mid) as far back as the provider has them, in `candles_h1` (OANDA XAU_USD: from 2006-03-19). Downloaded once in the background on first start (or with `openchart backfill <INSTRUMENT> --deep`), then gap-filled on every start. On by default (`OPENCHART_DEEP_HISTORY`).
 

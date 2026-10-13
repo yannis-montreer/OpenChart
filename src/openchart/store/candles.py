@@ -115,11 +115,15 @@ class CandleStore:
             instrument,
         )
 
-    async def last_ts(self, source: str, instrument: str, granularity: str = "M1") -> int | None:
+    async def last_ts(
+        self, source: str, instrument: str, granularity: str = "M1", *, before: int | None = None
+    ) -> int | None:
+        """Newest stored candle, or the newest one strictly before `before`."""
         return await self._scalar(
-            f"SELECT MAX(ts) FROM {TABLES[granularity]} WHERE source=? AND instrument=?",
+            f"SELECT MAX(ts) FROM {TABLES[granularity]} WHERE source=? AND instrument=? AND ts<?",
             source,
             instrument,
+            2**62 if before is None else before,
         )
 
     async def timestamps(

@@ -79,6 +79,7 @@ openchart stats                    # rows, range, coverage, H1 depth, cached bar
 openchart rebuild-cache            # recompute cached 4h/D/W bars (never needed normally)
 openchart reset-password           # set a new web password from the server console
 openchart gaps XAU_USD             # holes not explained by weekends or the daily break
+openchart repair XAU_USD           # refetch those holes from the broker (fills what it has)
 openchart run                      # start the server: API, websocket and live feed
 ```
 

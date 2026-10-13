@@ -143,6 +143,7 @@ class Server:
                     self.provider,
                     self.store,
                     [r.instrument for r in rows],
+                    hours={r.instrument: r.hours for r in rows},
                     tick_writer=self.tick_writer,
                     builder=self.builder,
                     cache=self.cache,
