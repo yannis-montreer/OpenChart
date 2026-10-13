@@ -24,6 +24,7 @@ from openchart import API_VERSION, __version__
 from openchart.api.auth import SESSION_COOKIE
 from openchart.api.hub import Client
 from openchart.api.routes_account import account_routes, client_host
+from openchart.api.routes_alerts import alert_routes
 from openchart.api.routes_drawings import drawing_routes
 from openchart.market import sessions
 from openchart.market.aggregate import PRICES
@@ -101,6 +102,7 @@ def create_app(server: Server) -> FastAPI:
 
     app.include_router(account_routes(server))
     app.include_router(drawing_routes(server))
+    app.include_router(alert_routes(server))
 
     @app.get("/api/health")
     async def health() -> dict[str, Any]:
@@ -180,12 +182,19 @@ def create_app(server: Server) -> FastAPI:
 
     @app.websocket("/ws")
     async def websocket(ws: WebSocket) -> None:
-        await ws.accept()
         allowed = same_origin(ws.headers.get("origin"), ws.headers.get("host"))
         if not allowed or not await server.auth.session_valid(ws.cookies.get(SESSION_COOKIE)):
+            await ws.accept()
             await ws.close(code=4401, reason="login required")
             return
+        # Join the broadcasts before the browser sees the socket open: it reloads drawings
+        # and alerts when it does, so a change made after that must reach this client.
         client = server.hub.connect()
+        try:
+            await ws.accept()
+        except Exception:
+            server.hub.disconnect(client)
+            raise
         sender = asyncio.create_task(_send_loop(ws, client))
         try:
             while True:

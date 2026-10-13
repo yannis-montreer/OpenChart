@@ -3,6 +3,7 @@
 import pytest
 
 from tests.conftest import NOW
+from tests.ws import receive_until
 
 RAY = {
     "instrument": "XAU_USD",
@@ -10,14 +11,6 @@ RAY = {
     "points": [{"t": NOW - 7200, "p": 2010.5}, {"t": NOW - 3600, "p": 2005.25}],
     "style": {"color": "#22c55e", "width": 3},
 }
-
-
-def receive_until(ws, kind: str, limit: int = 50) -> dict:
-    for _ in range(limit):
-        message = ws.receive_json()
-        if message["type"] == kind:
-            return message
-    raise AssertionError(f"no {kind} message")
 
 
 def test_create_list_update_delete(client):

@@ -1,8 +1,13 @@
 /** Application shell: top bar, tool column, chart, watchlist, bottom bar. */
 
 import {
+  account,
   api,
   CLIENT_API_VERSION,
+  drawingsApi,
+  type Alert,
+  type AlertEvent,
+  type Drawing,
   type Instrument,
   type Meta,
   type Price,
@@ -10,12 +15,15 @@ import {
   type TimeframeMeta,
 } from "./api";
 import { ChartView, type ChartContext } from "./chart/view";
-import { DrawingController, type Tool } from "./drawings/controller";
+import { DrawingController, type AlertPlace, type Tool } from "./drawings/controller";
 import { loadPrefs, resolveTimezone, savePrefs, type Prefs } from "./prefs";
 import { formatClock, offsetLabel } from "./time";
+import { openAlertDialog } from "./ui/alertDialog";
+import { AlertsPanel } from "./ui/alertsPanel";
 import { showLogin } from "./ui/auth";
-import { button, closeMenu, h, icon, installTooltips, menuItem, showMenu } from "./ui/dom";
+import { button, closeMenu, h, icon, installTooltips, menuItem, showMenu, showMenuAt } from "./ui/dom";
 import { SettingsDialog, type Section } from "./ui/settings";
+import { toast } from "./ui/toast";
 import { Watchlist } from "./ui/watchlist";
 import { LiveSocket, type ServerMessage, type SocketState, type SubKey } from "./ws";
 
@@ -65,8 +73,9 @@ export class App {
   drawings!: DrawingController;
   private toolButtons = new Map<Tool, HTMLButtonElement>();
   private watchlist!: Watchlist;
+  private alertsPanel = new AlertsPanel();
   private els = {} as Record<
-    "symbol" | "tfGroup" | "conn" | "status" | "clock" | "tz" | "priceSeg" | "panel" | "panelBtn" | "chartArea" | "banner",
+    "symbol" | "tfGroup" | "conn" | "status" | "clock" | "tz" | "priceSeg" | "panel" | "panelBtn" | "alertsBtn" | "wlBox" | "chartArea" | "banner",
     HTMLElement
   >;
 
@@ -106,6 +115,7 @@ export class App {
       if (!reconnect) return;
       void this.chart.resync();
       void this.drawings.reload(); // changes made while we were away
+      void this.alertsPanel.load();
     };
     // Once a minute, re-check the last bars against the server. This picks up bars that
     // were forming while we (or the server) were disconnected, which the server stores
@@ -116,6 +126,7 @@ export class App {
     this.socket.start();
     for (const inst of this.instruments) this.socket.subscribe(this.watchKey(inst.instrument));
     void this.watchlist.loadPrevious(this.meta);
+    void this.alertsPanel.load();
 
     if (!this.instrument) {
       this.chartMessage("No instruments yet. Add one in Settings, Instruments.");
@@ -153,7 +164,13 @@ export class App {
       h("div", { class: "sep hide-narrow" }),
       button({ icon: "candles", title: soon("Chart type", "M7"), disabled: true, class: "hide-narrow" }),
       button({ icon: "search", label: "Indicators", title: soon("Indicators", "M7"), disabled: true, class: "hide-narrow" }),
-      button({ icon: "bell", label: "Alert", title: soon("Alerts", "M6"), disabled: true, class: "hide-narrow" }),
+      button({
+        icon: "bell",
+        label: "Alert",
+        title: "Create alert (Alt+A): on the selected line, or at a price level",
+        class: "hide-narrow",
+        onClick: () => void this.addAlert(),
+      }),
       h("div", { class: "spacer" }),
       button({
         icon: this.prefs.theme === "dark" ? "sun" : "moon",
@@ -179,6 +196,8 @@ export class App {
     this.drawings.onToolChange = (tool) => {
       for (const [t, b] of this.toolButtons) b.classList.toggle("active", t === tool);
     };
+    this.drawings.onAddAlert = (d, place) => void this.addAlert(d, place);
+    this.drawings.alertsOf = (id) => this.alertsPanel.forDrawing(id);
     this.drawings.onStyleUsed = (style) => {
       this.prefs.drawingStyle = style;
       savePrefs(this.prefs);
@@ -244,16 +263,18 @@ export class App {
     );
 
     // Right strip and panel
-    this.watchlist = new Watchlist(panel, (name) => this.selectInstrument(name));
-    this.els.panelBtn = button({
-      icon: "list",
-      title: "Watchlist",
-      class: this.prefs.panelOpen ? "active" : "",
-      onClick: () => this.togglePanel(),
-    });
+    this.els.wlBox = h("div", { class: "panel-view" });
+    this.watchlist = new Watchlist(this.els.wlBox, (name) => this.selectInstrument(name));
+    panel.append(this.els.wlBox, this.alertsPanel.el);
+    this.alertsPanel.onEdit = (a) => void this.editAlert(a);
+    this.alertsPanel.onChange = () => this.drawings.alertsChanged();
+    this.alertsPanel.decimals = (name) => this.instruments.find((i) => i.instrument === name)?.decimals ?? 5;
+    this.els.panelBtn = button({ icon: "list", title: "Watchlist", onClick: () => this.togglePanel("watchlist") });
+    this.els.alertsBtn = button({ icon: "bell", title: "Alerts and their log", onClick: () => this.togglePanel("alerts") });
+    this.showPanel();
     strip.append(
       this.els.panelBtn,
-      button({ icon: "bell", title: soon("Alerts list", "M6"), disabled: true }),
+      this.els.alertsBtn,
       h("div", { class: "grow" }),
       button({ icon: "info", title: "About OpenChart", onClick: (ev) => this.openAbout(ev.currentTarget as HTMLElement) }),
     );
@@ -490,6 +511,15 @@ export class App {
       case "drawing_changed":
         this.drawings.applyRemote(m.op, m.drawing);
         break;
+      case "alert_changed":
+        this.alertsPanel.changed(m.op, m.alert);
+        break;
+      case "alert_triggered":
+        this.alertFired(m.alert, m.event);
+        break;
+      case "alert_event":
+        this.alertsPanel.eventChanged(m.event);
+        break;
       case "closures": {
         const inst = this.instruments.find((i) => i.instrument === m.instrument);
         if (inst) inst.closures = m.closures;
@@ -617,11 +647,123 @@ export class App {
     this.chart.setTheme();
   }
 
-  private togglePanel(): void {
-    this.prefs.panelOpen = !this.prefs.panelOpen;
-    this.els.panel.hidden = !this.prefs.panelOpen;
-    this.els.panelBtn.classList.toggle("active", this.prefs.panelOpen);
+  /** The strip buttons: open a view, or close the panel if it already shows it. */
+  private togglePanel(view: Prefs["panelView"]): void {
+    this.prefs.panelOpen = !(this.prefs.panelOpen && this.prefs.panelView === view);
+    this.prefs.panelView = view;
+    this.showPanel();
     savePrefs(this.prefs);
+  }
+
+  private showPanel(): void {
+    const { panelOpen, panelView } = this.prefs;
+    this.els.panel.hidden = !panelOpen;
+    this.els.wlBox.hidden = panelView !== "watchlist";
+    this.alertsPanel.el.hidden = panelView !== "alerts";
+    this.els.panelBtn.classList.toggle("active", panelOpen && panelView === "watchlist");
+    this.els.alertsBtn.classList.toggle("active", panelOpen && panelView === "alerts");
+  }
+
+  // Alerts
+
+  private async telegramReady(): Promise<boolean> {
+    try {
+      const s = await account.settings();
+      return s.telegram.token.set && !!s.telegram.chat_id;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * The Alert button, Alt+A and a line's bell or menu: on `drawing` (or the selected line),
+   * else a new alert at the current price. A line that already has alerts opens its alert
+   * for editing, or a short list when it has several.
+   */
+  private async addAlert(drawing?: Drawing, place?: AlertPlace): Promise<void> {
+    if (!this.instrument) return;
+    const selected = this.drawings.selectedId ? this.drawings.get(this.drawings.selectedId) : undefined;
+    const line = drawing ?? selected;
+    const existing = line ? this.alertsPanel.forDrawing(line.id) : [];
+    if (existing.length === 1) return this.editAlert(existing[0]);
+    if (existing.length > 1) return this.pickAlert(existing, place);
+    openAlertDialog({
+      target: {
+        instrument: this.instrument.instrument,
+        timeframe: this.prefs.timeframe,
+        price: this.prefs.price,
+        decimals: this.instrument.decimals,
+        drawing: line,
+        level: line ? undefined : this.chart.lastClose(),
+      },
+      telegramReady: await this.telegramReady(),
+      onSaved: (a) => this.alertsPanel.changed("update", a),
+    });
+  }
+
+  /** Several alerts on one line: pick the one to edit. */
+  private pickAlert(alerts: Alert[], place?: AlertPlace): void {
+    const status = { active: "Active", triggered: "Triggered", expired: "Expired", stopped: "Stopped" } as const;
+    const box = h(
+      "div",
+      { class: "select-menu", style: "min-width:260px", "aria-label": "Alerts on this line" },
+      ...alerts.map((a) =>
+        menuItem({
+          label: a.name,
+          icon: a.status === "active" ? "bellRing" : "bellOff",
+          extra: h("span", { class: "al-pick-status" }, status[a.status]),
+          onClick: () => void this.editAlert(a),
+        }),
+      ),
+    );
+    if (place?.anchor) showMenu(place.anchor, box);
+    else {
+      const r = this.els.chartArea.getBoundingClientRect();
+      const at = place?.at ?? { x: r.left + r.width / 2, y: r.top + r.height / 3 };
+      showMenuAt(at.x, at.y, box);
+    }
+  }
+
+  private async editAlert(alert: Alert): Promise<void> {
+    const inst = this.instruments.find((i) => i.instrument === alert.instrument);
+    let drawing: Drawing | undefined;
+    if (alert.drawing_id) {
+      drawing = this.drawings.get(alert.drawing_id);
+      if (!drawing) {
+        try {
+          drawing = (await drawingsApi.list(alert.instrument)).find((d) => d.id === alert.drawing_id);
+        } catch {
+          /* the dialog then calls it "Line" */
+        }
+      }
+    }
+    openAlertDialog({
+      alert,
+      target: {
+        instrument: alert.instrument,
+        timeframe: alert.timeframe,
+        price: alert.trigger_price,
+        decimals: inst?.decimals ?? 5,
+        drawing,
+      },
+      telegramReady: await this.telegramReady(),
+      onSaved: (a) => this.alertsPanel.changed("update", a),
+      onDeleted: (a) => this.alertsPanel.changed("delete", a),
+    });
+  }
+
+  private alertFired(alert: Alert, event: AlertEvent): void {
+    this.alertsPanel.triggered(alert, event);
+    if (!alert.notify.includes("app")) return;
+    const inst = this.instruments.find((i) => i.instrument === alert.instrument);
+    const d = inst?.decimals ?? 5;
+    const fmt = (x: number | null) => (x === null ? "–" : x.toFixed(d));
+    toast({
+      title: alert.name,
+      body: `${alert.instrument} crossed ${event.cross}: ${fmt(event.price)} (line ${fmt(event.line_value)})`,
+      note: event.late ? "Found late: the server was asleep, offline or restarting." : undefined,
+      sound: true,
+    });
   }
 
   private screenshot(): void {
@@ -657,6 +799,7 @@ export class App {
         row("Alt + T / Y / E / H", "Trendline, ray, extended line, horizontal line"),
         row("Ctrl (while drawing)", "Snap to the bar's open, high, low or close"),
         row("Del", "Delete the selected drawing"),
+        row("Alt + A", "Alert on the selected line, or at a price level"),
         row("?", "This list"),
         h("hr"),
         h("p", {}, "Mouse: wheel to zoom, drag to pan, drag the price scale to stretch it, double-click it to fit."),
@@ -693,6 +836,11 @@ export class App {
     if (target instanceof Element && target.closest("input, select, textarea, [contenteditable]")) return;
     if (ev.key === "Escape") {
       closeMenu();
+      return;
+    }
+    if (ev.altKey && (ev.key === "a" || ev.key === "A")) {
+      ev.preventDefault();
+      void this.addAlert();
       return;
     }
     if (ev.altKey && (ev.key === "r" || ev.key === "R")) {

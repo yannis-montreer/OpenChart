@@ -225,3 +225,63 @@ export const drawingsApi = {
   removeAll: (instrument: string) =>
     request<{ deleted: number }>("DELETE", "api/drawings", { params: { instrument } }),
 };
+
+// Alerts (SPEC section 9)
+
+export type AlertDirection = "cross" | "up" | "down";
+export type AlertFrequency = "once" | "once_per_bar" | "repeating";
+export type AlertMode = "touch" | "candle_close";
+export type AlertChannel = "telegram" | "app";
+
+export interface Alert {
+  id: string;
+  instrument: string;
+  type: "line_cross" | "level_cross";
+  drawing_id: string | null;
+  level: number | null;
+  direction: AlertDirection;
+  trigger_price: Price;
+  trigger_mode: AlertMode;
+  timeframe: string;
+  frequency: AlertFrequency;
+  cooldown_s: number;
+  name: string;
+  expires_at: number | null;
+  notify: AlertChannel[];
+  status: "active" | "triggered" | "expired" | "stopped";
+  created_at: number;
+  updated_at: number;
+  last_fired_at: number | null;
+  fire_count: number;
+}
+
+export interface AlertEvent {
+  id: number;
+  alert_id: string;
+  ts: number;
+  price: number;
+  line_value: number | null;
+  cross: "up" | "down";
+  message: string;
+  late: "wake" | "reconnect" | "restart" | null;
+  detected_at: number;
+  delivered: boolean;
+  attempts: number;
+  error: string | null;
+}
+
+export type AlertInput = Partial<
+  Pick<
+    Alert,
+    "direction" | "trigger_price" | "trigger_mode" | "timeframe" | "frequency" | "cooldown_s" | "level" | "name" | "expires_at" | "notify"
+  >
+> & { status?: "active" | "stopped"; clear_expiry?: boolean };
+
+export const alertsApi = {
+  list: () => get<Alert[]>("api/alerts"),
+  events: (limit = 100) => get<AlertEvent[]>("api/alerts/events", { limit: String(limit) }),
+  create: (body: AlertInput & { instrument: string; type: Alert["type"]; drawing_id?: string }) =>
+    request<Alert>("POST", "api/alerts", { body }),
+  update: (id: string, body: AlertInput) => request<Alert>("PUT", `api/alerts/${id}`, { body }),
+  remove: (id: string) => request<Alert>("DELETE", `api/alerts/${id}`),
+};

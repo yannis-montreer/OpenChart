@@ -1,3 +1,4 @@
+import asyncio
 import time
 
 import pytest
@@ -5,6 +6,7 @@ import pytest
 from openchart import API_VERSION
 from openchart.providers.base import Tick
 from tests.conftest import NOW, Harness
+from tests.ws import receive, receive_until
 
 
 def push(client, tick: Tick) -> None:
@@ -59,22 +61,33 @@ def test_status(client):
     assert "XAU_USD" in status["instruments"]
 
 
-def receive_until(ws, kind: str, limit: int = 50) -> dict:
-    for _ in range(limit):
-        message = ws.receive_json()
-        if message["type"] == kind:
-            return message
-    raise AssertionError(f"no {kind} message")
-
-
 def test_websocket_handshake_and_ping(client):
     with client.websocket_connect("/ws") as ws:
-        hello = ws.receive_json()
+        hello = receive(ws)
         assert hello["type"] == "hello" and hello["api_version"] == API_VERSION
         assert abs(hello["server_time"] - time.time()) < 5
-        assert ws.receive_json()["type"] == "status"
+        assert receive(ws)["type"] == "status"
         ws.send_json({"type": "ping"})
         assert receive_until(ws, "pong")["server_time"] > 0
+
+
+def test_a_change_right_after_connecting_reaches_the_socket(client, monkeypatch):
+    """Once the socket is open the client gets every broadcast, even when the server is
+    slow to check the session (a busy CI runner). Browsers reload drawings and alerts when
+    the socket opens, so a change missed in between would never show (CI failure, M6)."""
+    auth = type(client.server.auth)
+    check = auth.session_valid
+
+    async def slow_check(self, token):
+        await asyncio.sleep(0.3)
+        return await check(self, token)
+
+    monkeypatch.setattr(auth, "session_valid", slow_check)
+    change = {"type": "drawing_changed", "op": "delete", "drawing": {"id": "d1"}}
+    with client.websocket_connect("/ws") as ws:
+        # Not through the API, whose own session check would give the socket time to join.
+        client.portal.call(client.server.hub.broadcast, change)
+        assert receive_until(ws, "drawing_changed") == change
 
 
 def test_websocket_streams_ticks_and_candles(client):

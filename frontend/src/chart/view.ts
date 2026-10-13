@@ -434,6 +434,11 @@ export class ChartView {
     return this.indexCache.index;
   }
 
+  /** Close of the newest bar (the current price). */
+  lastClose(): number | undefined {
+    return this.bars[this.bars.length - 1]?.c;
+  }
+
   barAt(index: number): Bar | undefined {
     return Number.isInteger(index) ? this.bars[index] : undefined;
   }

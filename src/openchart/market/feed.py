@@ -40,6 +40,7 @@ log = logging.getLogger(__name__)
 
 TickListener = Callable[[Tick], None]
 ClosuresListener = Callable[[str], Awaitable[None]]
+WakeListener = Callable[[float, float], None]  # frozen from, to (wall clock)
 
 # A once-a-second loop that took this long means the process was paused (sleep, hibernate).
 WAKE_SECONDS = 30.0
@@ -82,6 +83,8 @@ class Feed:
         self.tick_listeners: list[TickListener] = []
         # Called with the instrument when its learned closures changed.
         self.on_closures: ClosuresListener | None = None
+        # Called when the process was frozen (the computer slept), before the repair.
+        self.on_wake: WakeListener | None = None
         self.last_tick: dict[str, Tick] = {}
         self.tick_count = 0
         self.history: dict[str, dict[str, Any]] = {
@@ -195,6 +198,13 @@ class Feed:
             except Exception as exc:
                 log.warning("repairing recent M1 for %s failed: %s", instrument, exc)
 
+    async def repair_instrument(self, instrument: str) -> None:
+        """The tail and recent holes of one instrument (before the alert catch-up)."""
+        await gap_fill(self.provider, self.store, instrument)
+        await self._repaired(
+            await repair_recent(self.provider, self.store, instrument, self.hours.get(instrument))
+        )
+
     async def scan_closures(self, instrument: str) -> None:
         """Once per instrument: learn closures over all stored M1 (about one request per
         holiday). Later ones are learned by the recent repair as they happen."""
@@ -238,6 +248,11 @@ class Feed:
             woke = wall - last_wall > WAKE_SECONDS
             if woke:
                 log.info("resumed after %.0fs paused; checking recent history", wall - last_wall)
+                if self.on_wake is not None:
+                    try:
+                        self.on_wake(last_wall, wall)
+                    except Exception:
+                        log.exception("wake listener failed")
             last_wall = wall
             self.builder.on_clock(wall)
             if self._pending_m1:
