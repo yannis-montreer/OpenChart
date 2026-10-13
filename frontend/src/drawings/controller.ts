@@ -81,8 +81,6 @@ export class DrawingController {
   onHiddenChange: (hidden: boolean) => void = () => {};
   /** The line's bell, menu entry or Alt+A: edit its alert(s), or add one when it has none. */
   onAddAlert: (drawing: Drawing, place?: AlertPlace) => void = () => {};
-  /** "Add another alert" on a line that already has some. */
-  onNewAlert: (drawing: Drawing) => void = () => {};
   /** The alerts attached to a drawing (the line shows their state). */
   alertsOf: (drawingId: string) => Alert[] = () => [];
   onError: (text: string) => void = (text) => console.warn(text);
@@ -594,7 +592,6 @@ export class DrawingController {
             hint: "Alt+A",
             onClick: () => this.onAddAlert(d, { at }),
           }),
-          menuItem({ label: "Add another alert…", icon: "bell", onClick: () => this.onNewAlert(d) }),
         ]
       : [menuItem({ label: `Add alert on ${name}…`, icon: "bell", hint: "Alt+A", onClick: () => this.onAddAlert(d, { at }) })];
     showMenuAt(

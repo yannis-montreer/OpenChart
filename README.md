@@ -21,7 +21,7 @@ Self-hosted charting and alerting server for forex and metals. It runs 24/7 on y
 | M3 Web chart | done |
 | M4 Setup wizard, login, settings | done |
 | M5 Drawings | done |
-| M6 Alerts and Telegram | done, waiting on owner acceptance checks |
+| M6 Alerts and Telegram | done |
 | M7 Indicators, chart types, layouts | not started |
 | M8 Packaging and deployment | not started |
 | M9 Second instrument (EURUSD) | not started |

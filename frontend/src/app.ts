@@ -197,7 +197,6 @@ export class App {
       for (const [t, b] of this.toolButtons) b.classList.toggle("active", t === tool);
     };
     this.drawings.onAddAlert = (d, place) => void this.addAlert(d, place);
-    this.drawings.onNewAlert = (d) => void this.addAlert(d, undefined, true);
     this.drawings.alertsOf = (id) => this.alertsPanel.forDrawing(id);
     this.drawings.onStyleUsed = (style) => {
       this.prefs.drawingStyle = style;
@@ -679,15 +678,15 @@ export class App {
   /**
    * The Alert button, Alt+A and a line's bell or menu: on `drawing` (or the selected line),
    * else a new alert at the current price. A line that already has alerts opens its alert
-   * for editing, or a short list when it has several, unless `fresh` asks for another one.
+   * for editing, or a short list when it has several.
    */
-  private async addAlert(drawing?: Drawing, place?: AlertPlace, fresh = false): Promise<void> {
+  private async addAlert(drawing?: Drawing, place?: AlertPlace): Promise<void> {
     if (!this.instrument) return;
     const selected = this.drawings.selectedId ? this.drawings.get(this.drawings.selectedId) : undefined;
     const line = drawing ?? selected;
-    const existing = line && !fresh ? this.alertsPanel.forDrawing(line.id) : [];
+    const existing = line ? this.alertsPanel.forDrawing(line.id) : [];
     if (existing.length === 1) return this.editAlert(existing[0]);
-    if (existing.length > 1) return this.pickAlert(line!, existing, place);
+    if (existing.length > 1) return this.pickAlert(existing, place);
     openAlertDialog({
       target: {
         instrument: this.instrument.instrument,
@@ -702,8 +701,8 @@ export class App {
     });
   }
 
-  /** Several alerts on one line: pick the one to edit (or add another). */
-  private pickAlert(line: Drawing, alerts: Alert[], place?: AlertPlace): void {
+  /** Several alerts on one line: pick the one to edit. */
+  private pickAlert(alerts: Alert[], place?: AlertPlace): void {
     const status = { active: "Active", triggered: "Triggered", expired: "Expired", stopped: "Stopped" } as const;
     const box = h(
       "div",
@@ -716,8 +715,6 @@ export class App {
           onClick: () => void this.editAlert(a),
         }),
       ),
-      h("hr"),
-      menuItem({ label: "Add another alert…", icon: "bell", onClick: () => void this.addAlert(line, undefined, true) }),
     );
     if (place?.anchor) showMenu(place.anchor, box);
     else {
