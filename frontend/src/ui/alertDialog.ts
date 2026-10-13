@@ -108,7 +108,9 @@ export function openAlertDialog(opts: AlertDialogOptions): void {
 
   let direction: AlertDirection = alert?.direction ?? "cross";
   let trigger: Trigger = alert ? triggerOf(alert) : "once";
-  let expires: number | null = alert ? alert.expires_at : Math.floor(Date.now() / 1000) + 30 * DAY;
+  const in30 = () => Math.floor(Date.now() / 1000) + 30 * DAY;
+  // An expired alert gets a fresh 30 days when it is edited (saving restarts it).
+  let expires: number | null = alert ? (alert.status === "expired" ? in30() : alert.expires_at) : in30();
   let price: Price = alert?.trigger_price ?? target.price;
   const notify = new Set<AlertChannel>(alert?.notify ?? ["telegram", "app"]);
 
@@ -184,11 +186,24 @@ export function openAlertDialog(opts: AlertDialogOptions): void {
   renderTrigger();
 
   // Expiration
+  // A date (menu) and, next to it, a "Never" box so no expiry is one click.
   const expiryBtn = h("button", { class: "link-btn", type: "button" });
-  const renderExpiry = () => expiryBtn.replaceChildren(h("span", {}, expiryText(expires)), icon("chevron", 14));
+  const neverBox = h("input", { type: "checkbox" });
+  let lastDate = expires ?? in30();
+  const renderExpiry = () => {
+    if (expires !== null) lastDate = expires;
+    expiryBtn.replaceChildren(h("span", {}, expires === null ? "No expiration" : expiryText(expires)), icon("chevron", 14));
+    expiryBtn.disabled = expires === null;
+    neverBox.checked = expires === null;
+  };
+  neverBox.addEventListener("change", () => {
+    expires = neverBox.checked ? null : lastDate > Date.now() / 1000 ? lastDate : in30();
+    renderExpiry();
+  });
+  const expiryRow = h("div", { class: "al-expiry" }, expiryBtn, h("label", { class: "check" }, neverBox, h("span", {}, "Never")));
   expiryBtn.addEventListener("click", () => {
     const input = h("input", { class: "input", type: "datetime-local" });
-    input.value = localInput(expires ?? Math.floor(Date.now() / 1000) + 30 * DAY);
+    input.value = localInput(expires ?? in30());
     const set = () => {
       const t = new Date(input.value).getTime() / 1000;
       if (Number.isFinite(t)) {
@@ -204,7 +219,7 @@ export function openAlertDialog(opts: AlertDialogOptions): void {
         { class: "expiry-menu" },
         input,
         menuItem({ label: "Never expires", selected: expires === null, onClick: () => ((expires = null), renderExpiry()) }),
-        menuItem({ label: "In 30 days", onClick: () => ((expires = Math.floor(Date.now() / 1000) + 30 * DAY), renderExpiry()) }),
+        menuItem({ label: "In 30 days", onClick: () => ((expires = in30()), renderExpiry()) }),
       ),
     );
   });
@@ -263,10 +278,13 @@ export function openAlertDialog(opts: AlertDialogOptions): void {
     h(
       "div",
       { class: "al-body" },
+      editing && alert.status !== "active"
+        ? h("div", { class: "al-status-note" }, `This alert is ${alert.status}. Saving it restarts it.`)
+        : null,
       row("Condition", source, dirBtn, targetEl),
       h("hr"),
       row("Trigger", triggerBtn),
-      row("Expiration", expiryBtn),
+      row("Expiration", expiryRow),
       row("Message", nameInput),
       row("Notifications", channels),
       row("Price", priceSeg, h("small", { class: "al-note" }, "The price checked against the line")),

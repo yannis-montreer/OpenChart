@@ -1,7 +1,8 @@
 /** Floating style toolbar above the chart for the selected drawing. */
 
 import type { Drawing, DrawingStyle } from "../api";
-import { button, closeMenu, h, menuItem, showMenu } from "../ui/dom";
+import { lineAlertTitle } from "../ui/alertState";
+import { button, closeMenu, h, icon, menuItem, showMenu } from "../ui/dom";
 import type { DrawingController } from "./controller";
 import { TYPE_NAMES } from "./controller";
 
@@ -43,6 +44,7 @@ export class StyleToolbar {
   private widthBtn: HTMLButtonElement;
   private dashBtn: HTMLButtonElement;
   private labelBtn: HTMLButtonElement;
+  private bellBtn: HTMLButtonElement;
 
   constructor(
     area: HTMLElement,
@@ -52,6 +54,12 @@ export class StyleToolbar {
     this.widthBtn = button({ label: "2px", title: "Line width", onClick: () => this.openWidth() });
     this.dashBtn = button({ title: "Line style", onClick: () => this.openDash() });
     this.labelBtn = button({ icon: "text", title: "Label", onClick: () => this.openLabel() });
+    this.bellBtn = button({
+      icon: "bell",
+      title: "Add alert on this line (Alt+A)",
+      class: "dt-bell",
+      onClick: () => this.current && this.ctl.onAddAlert(this.current, { anchor: this.bellBtn }),
+    });
     this.el = h(
       "div",
       { class: "draw-toolbar", hidden: true, role: "toolbar", "aria-label": "Drawing style" },
@@ -60,7 +68,7 @@ export class StyleToolbar {
       this.dashBtn,
       this.labelBtn,
       h("div", { class: "sep" }),
-      button({ icon: "bell", title: "Add alert on this line (Alt+A)", onClick: () => this.current && this.ctl.onAddAlert(this.current) }),
+      this.bellBtn,
       button({ icon: "copy", title: "Clone", onClick: () => this.current && void this.ctl.clone(this.current.id) }),
       button({ icon: "trash", title: "Delete (Del)", onClick: () => this.current && void this.ctl.remove(this.current.id) }),
     );
@@ -75,6 +83,14 @@ export class StyleToolbar {
     this.widthBtn.querySelector("span")!.textContent = `${d.style.width}px`;
     this.dashBtn.replaceChildren(linePreview({ dash: d.style.dash, width: 2 }));
     this.labelBtn.classList.toggle("active", Boolean(d.label));
+    // The bell shows whether the line has alerts, and whether any of them is active.
+    const state = this.ctl.alertState(d.id);
+    this.bellBtn.replaceChildren(icon(state === "active" ? "bellRing" : state === "inactive" ? "bellOff" : "bell"));
+    this.bellBtn.classList.toggle("alert-on", state === "active");
+    this.bellBtn.classList.toggle("alert-off", state === "inactive");
+    const title = lineAlertTitle(this.ctl.alertsOf(d.id));
+    this.bellBtn.setAttribute("aria-label", title);
+    this.bellBtn.dataset.tip = title;
     this.el.dataset.type = TYPE_NAMES[d.type];
     this.el.hidden = false;
   }

@@ -28,6 +28,8 @@ export class AlertsPanel {
   private tabs: HTMLElement;
   /** Open the edit dialog for an alert. */
   onEdit: (alert: Alert) => void = () => {};
+  /** The alerts changed (lines show the state of theirs). */
+  onChange: () => void = () => {};
   /** Decimals for prices of an instrument. */
   decimals: (instrument: string) => number = () => 5;
 
@@ -48,6 +50,7 @@ export class AlertsPanel {
       const [alerts, events] = await Promise.all([alertsApi.list(), alertsApi.events(200)]);
       this.alerts = new Map(alerts.map((a) => [a.id, a]));
       this.events = events;
+      this.onChange();
     } catch (err) {
       this.body.replaceChildren(h("div", { class: "panel-empty" }, `Could not load alerts: ${(err as Error).message}`));
       return;
@@ -64,12 +67,14 @@ export class AlertsPanel {
     if (op === "delete") this.alerts.delete(alert.id);
     else this.alerts.set(alert.id, alert);
     this.render();
+    this.onChange();
   }
 
   triggered(alert: Alert, event: AlertEvent): void {
     this.alerts.set(alert.id, alert);
     this.events = [event, ...this.events.filter((e) => e.id !== event.id)].slice(0, 500);
     this.render();
+    this.onChange();
   }
 
   eventChanged(event: AlertEvent): void {

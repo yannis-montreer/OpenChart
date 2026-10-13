@@ -16,7 +16,8 @@
 
 import type { Logical } from "lightweight-charts";
 
-import { ApiError, drawingsApi, type Drawing, type DrawingPatch, type DrawingStyle } from "../api";
+import { ApiError, drawingsApi, type Alert, type Drawing, type DrawingPatch, type DrawingStyle } from "../api";
+import { lineAlertState, pointAlong, type LineAlertState } from "../ui/alertState";
 import type { ChartView } from "../chart/view";
 import { h, menuItem, showMenuAt } from "../ui/dom";
 import {
@@ -43,12 +44,26 @@ interface Hit {
 interface Shape {
   path: [number, number][]; // screen polyline (hline: two points across the pane)
   handles: [number, number][];
+  bell?: [number, number]; // centre of the alert marker, when the line has alerts
+}
+
+/** Where an alert action was asked for: next to a button, or at a point on screen. */
+export interface AlertPlace {
+  anchor?: HTMLElement;
+  at?: { x: number; y: number };
 }
 
 const HANDLE_RADIUS = 5;
 const HIT_LINE = 6;
 const HIT_HANDLE = 8;
 const DRAG_THRESHOLD = 4;
+const BELL_SIZE = 18;
+const BELL_GAP = 14; // marker centre above the line
+// Lucide "bell", drawn on the canvas at half size.
+const BELL_PATHS = [
+  "M10.268 21a2 2 0 0 0 3.464 0",
+  "M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326",
+];
 
 export const TYPE_NAMES: Record<DrawingType, string> = {
   hline: "horizontal line",
@@ -64,8 +79,12 @@ export class DrawingController {
   onToolChange: (tool: Tool) => void = () => {};
   onStyleUsed: (style: DrawingStyle) => void = () => {};
   onHiddenChange: (hidden: boolean) => void = () => {};
-  /** "Add alert on this line" (menu, style toolbar). */
-  onAddAlert: (drawing: Drawing) => void = () => {};
+  /** The line's bell, menu entry or Alt+A: edit its alert(s), or add one when it has none. */
+  onAddAlert: (drawing: Drawing, place?: AlertPlace) => void = () => {};
+  /** "Add another alert" on a line that already has some. */
+  onNewAlert: (drawing: Drawing) => void = () => {};
+  /** The alerts attached to a drawing (the line shows their state). */
+  alertsOf: (drawingId: string) => Alert[] = () => [];
   onError: (text: string) => void = (text) => console.warn(text);
 
   private drawings = new Map<string, Drawing>();
@@ -181,6 +200,17 @@ export class DrawingController {
       if (this.selectedId === d.id) this.toolbar.show(d);
     }
     this.redraw();
+  }
+
+  /** The alerts changed: refresh the bells. */
+  alertsChanged(): void {
+    const d = this.selectedId ? this.drawings.get(this.selectedId) : undefined;
+    if (d) this.toolbar.show(d);
+    this.redraw();
+  }
+
+  alertState(drawingId: string): LineAlertState | null {
+    return lineAlertState(this.alertsOf(drawingId));
   }
 
   get(id: string): Drawing | undefined {
@@ -385,6 +415,15 @@ export class DrawingController {
     return undefined;
   }
 
+  /** The drawing whose alert marker is at (x, y). */
+  bellAt(x: number, y: number): string | undefined {
+    if (this.hidden || this.tool !== "cursor") return undefined;
+    for (const [id, shape] of this.shapes) {
+      if (shape.bell && Math.abs(shape.bell[0] - x) <= BELL_SIZE / 2 && Math.abs(shape.bell[1] - y) <= BELL_SIZE / 2) return id;
+    }
+    return undefined;
+  }
+
   // Pointer handling
 
   private onDown(e: PointerEvent): void {
@@ -414,6 +453,16 @@ export class DrawingController {
       return;
     }
 
+    const bell = this.bellAt(pos.x, pos.y);
+    if (bell) {
+      this.consume = true;
+      e.stopPropagation();
+      e.preventDefault();
+      this.select(bell);
+      const r = this.host.getBoundingClientRect();
+      this.onAddAlert(this.drawings.get(bell)!, { at: { x: r.left + pos.x, y: r.top + pos.y } });
+      return;
+    }
     const hit = this.hitTest(pos.x, pos.y);
     if (!hit) {
       if (this.selectedId) this.select(undefined);
@@ -535,13 +584,26 @@ export class DrawingController {
     this.select(hit.id);
     const d = this.drawings.get(hit.id)!;
     const name = TYPE_NAMES[d.type];
+    const alerts = this.alertsOf(d.id);
+    const at = { x: e.clientX, y: e.clientY };
+    const alertItems = alerts.length
+      ? [
+          menuItem({
+            label: alerts.length === 1 ? "Edit alert…" : `Edit alert… (${alerts.length})`,
+            icon: this.alertState(d.id) === "active" ? "bellRing" : "bellOff",
+            hint: "Alt+A",
+            onClick: () => this.onAddAlert(d, { at }),
+          }),
+          menuItem({ label: "Add another alert…", icon: "bell", onClick: () => this.onNewAlert(d) }),
+        ]
+      : [menuItem({ label: `Add alert on ${name}…`, icon: "bell", hint: "Alt+A", onClick: () => this.onAddAlert(d, { at }) })];
     showMenuAt(
       e.clientX,
       e.clientY,
       h(
         "div",
         { style: "min-width:230px" },
-        menuItem({ label: `Add alert on ${name}…`, icon: "bell", hint: "Alt+A", onClick: () => this.onAddAlert(d) }),
+        ...alertItems,
         h("hr"),
         menuItem({ label: "Edit style…", icon: "palette", onClick: () => this.toolbar.openColor() }),
         menuItem({ label: d.label ? "Edit label…" : "Add label…", icon: "text", onClick: () => this.toolbar.openLabel() }),
@@ -592,7 +654,16 @@ export class DrawingController {
         for (const d of this.drawings.values()) {
           const emphasis = d.id === this.selectedId || d.id === this.hover?.id || d.id === this.drag?.id;
           const shape = this.paint(ctx, mediaSize.width, d.type, d.points, d.style, emphasis, from, to, d.label);
-          if (shape) this.shapes.set(d.id, shape);
+          if (!shape) continue;
+          const state = this.alertState(d.id);
+          if (state && shape.path.length > 1) {
+            const at = pointAlong(shape.path, d.type === "hline" ? 0.75 : 0.5);
+            if (at && at[0] > 0 && at[0] < mediaSize.width) {
+              shape.bell = [at[0], at[1] - BELL_GAP];
+              this.paintBell(ctx, shape.bell, d.style.color, state);
+            }
+          }
+          this.shapes.set(d.id, shape);
         }
       }
       const p = this.placing;
@@ -683,6 +754,34 @@ export class DrawingController {
     return { path, handles };
   }
 
+  /** The alert marker above a line: a bell in the line's colour, struck through when no alert is active. */
+  private paintBell(ctx: CanvasRenderingContext2D, [cx, cy]: [number, number], color: string, state: LineAlertState): void {
+    const s = BELL_SIZE;
+    const muted = "#8b93a1";
+    ctx.save();
+    ctx.beginPath();
+    ctx.roundRect(cx - s / 2, cy - s / 2, s, s, 4);
+    ctx.fillStyle = state === "active" ? color : this.view.chartBackground;
+    ctx.fill();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = state === "active" ? color : muted;
+    ctx.stroke();
+    ctx.translate(cx - 6, cy - 6);
+    ctx.scale(0.5, 0.5);
+    ctx.lineWidth = 2.4;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.strokeStyle = state === "active" ? this.view.chartBackground : muted;
+    for (const d of BELL_PATHS) ctx.stroke(new Path2D(d));
+    if (state === "inactive") {
+      ctx.beginPath();
+      ctx.moveTo(3, 3);
+      ctx.lineTo(21, 21);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
   private paintHandle(ctx: CanvasRenderingContext2D, p: Point, color: string): void {
     const x = this.xOf(this.index().toLogical(p.t));
     const y = this.yOf(p.p);
@@ -729,6 +828,7 @@ export class DrawingController {
 
   cursorFor(x: number, y: number): string | null {
     if (this.tool !== "cursor") return null;
+    if (this.bellAt(x, y)) return "pointer";
     const hit = this.hitTest(x, y);
     if (!hit) return null;
     return hit.part === "body" ? (this.drag ? "grabbing" : "pointer") : "move";

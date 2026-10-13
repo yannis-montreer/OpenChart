@@ -15,13 +15,13 @@ import {
   type TimeframeMeta,
 } from "./api";
 import { ChartView, type ChartContext } from "./chart/view";
-import { DrawingController, type Tool } from "./drawings/controller";
+import { DrawingController, type AlertPlace, type Tool } from "./drawings/controller";
 import { loadPrefs, resolveTimezone, savePrefs, type Prefs } from "./prefs";
 import { formatClock, offsetLabel } from "./time";
 import { openAlertDialog } from "./ui/alertDialog";
 import { AlertsPanel } from "./ui/alertsPanel";
 import { showLogin } from "./ui/auth";
-import { button, closeMenu, h, icon, installTooltips, menuItem, showMenu } from "./ui/dom";
+import { button, closeMenu, h, icon, installTooltips, menuItem, showMenu, showMenuAt } from "./ui/dom";
 import { SettingsDialog, type Section } from "./ui/settings";
 import { toast } from "./ui/toast";
 import { Watchlist } from "./ui/watchlist";
@@ -196,7 +196,9 @@ export class App {
     this.drawings.onToolChange = (tool) => {
       for (const [t, b] of this.toolButtons) b.classList.toggle("active", t === tool);
     };
-    this.drawings.onAddAlert = (d) => void this.addAlert(d);
+    this.drawings.onAddAlert = (d, place) => void this.addAlert(d, place);
+    this.drawings.onNewAlert = (d) => void this.addAlert(d, undefined, true);
+    this.drawings.alertsOf = (id) => this.alertsPanel.forDrawing(id);
     this.drawings.onStyleUsed = (style) => {
       this.prefs.drawingStyle = style;
       savePrefs(this.prefs);
@@ -266,6 +268,7 @@ export class App {
     this.watchlist = new Watchlist(this.els.wlBox, (name) => this.selectInstrument(name));
     panel.append(this.els.wlBox, this.alertsPanel.el);
     this.alertsPanel.onEdit = (a) => void this.editAlert(a);
+    this.alertsPanel.onChange = () => this.drawings.alertsChanged();
     this.alertsPanel.decimals = (name) => this.instruments.find((i) => i.instrument === name)?.decimals ?? 5;
     this.els.panelBtn = button({ icon: "list", title: "Watchlist", onClick: () => this.togglePanel("watchlist") });
     this.els.alertsBtn = button({ icon: "bell", title: "Alerts and their log", onClick: () => this.togglePanel("alerts") });
@@ -673,11 +676,18 @@ export class App {
     }
   }
 
-  /** New alert: on `drawing` (or the selected line), else at the current price. */
-  private async addAlert(drawing?: Drawing): Promise<void> {
+  /**
+   * The Alert button, Alt+A and a line's bell or menu: on `drawing` (or the selected line),
+   * else a new alert at the current price. A line that already has alerts opens its alert
+   * for editing, or a short list when it has several, unless `fresh` asks for another one.
+   */
+  private async addAlert(drawing?: Drawing, place?: AlertPlace, fresh = false): Promise<void> {
     if (!this.instrument) return;
     const selected = this.drawings.selectedId ? this.drawings.get(this.drawings.selectedId) : undefined;
     const line = drawing ?? selected;
+    const existing = line && !fresh ? this.alertsPanel.forDrawing(line.id) : [];
+    if (existing.length === 1) return this.editAlert(existing[0]);
+    if (existing.length > 1) return this.pickAlert(line!, existing, place);
     openAlertDialog({
       target: {
         instrument: this.instrument.instrument,
@@ -690,6 +700,31 @@ export class App {
       telegramReady: await this.telegramReady(),
       onSaved: (a) => this.alertsPanel.changed("update", a),
     });
+  }
+
+  /** Several alerts on one line: pick the one to edit (or add another). */
+  private pickAlert(line: Drawing, alerts: Alert[], place?: AlertPlace): void {
+    const status = { active: "Active", triggered: "Triggered", expired: "Expired", stopped: "Stopped" } as const;
+    const box = h(
+      "div",
+      { class: "select-menu", style: "min-width:260px", "aria-label": "Alerts on this line" },
+      ...alerts.map((a) =>
+        menuItem({
+          label: a.name,
+          icon: a.status === "active" ? "bellRing" : "bellOff",
+          extra: h("span", { class: "al-pick-status" }, status[a.status]),
+          onClick: () => void this.editAlert(a),
+        }),
+      ),
+      h("hr"),
+      menuItem({ label: "Add another alert…", icon: "bell", onClick: () => void this.addAlert(line, undefined, true) }),
+    );
+    if (place?.anchor) showMenu(place.anchor, box);
+    else {
+      const r = this.els.chartArea.getBoundingClientRect();
+      const at = place?.at ?? { x: r.left + r.width / 2, y: r.top + r.height / 3 };
+      showMenuAt(at.x, at.y, box);
+    }
   }
 
   private async editAlert(alert: Alert): Promise<void> {

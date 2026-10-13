@@ -259,7 +259,7 @@
 .al-actions {
   display: flex;
   gap: 2px;
-  opacity: 0.35;
+  opacity: 0.6;
 }
 .al-item:hover .al-actions,
 .al-item:focus-within .al-actions {
@@ -369,4 +369,37 @@
   .al-label {
     line-height: 1.3;
   }
+}
+
+/* The line's bell in the style toolbar: filled when an alert is active, struck through
+   when all its alerts are stopped, expired or done. */
+.draw-toolbar .dt-bell.alert-on {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.draw-toolbar .dt-bell.alert-on svg {
+  fill: currentColor;
+}
+.draw-toolbar .dt-bell.alert-off {
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
+}
+.al-pick-status {
+  margin-left: auto;
+  padding-left: 12px;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.al-expiry {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.al-expiry .check {
+  padding-top: 0;
+}
+.al-status-note {
+  color: var(--warn);
+  font-size: 12px;
 }
