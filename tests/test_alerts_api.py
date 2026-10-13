@@ -11,6 +11,7 @@ from openchart.alerts.notify import Dispatcher, NotifierUnavailable
 from openchart.alerts.watchdog import FeedView, Watchdog
 from openchart.providers.base import OHLC, Candle, Tick
 from openchart.store.alerts import AlertEvent
+from tests.ws import receive_until
 
 TELEGRAM_TOKEN = "123456:telegram-SECRET-token"
 
@@ -24,14 +25,6 @@ def settle(client, rounds: int = 3) -> None:
     for _ in range(rounds):
         client.portal.call(client.server.alerts.dispatcher.drain)
         time.sleep(0.05)
-
-
-def receive_until(ws, kind: str, limit: int = 100) -> dict:
-    for _ in range(limit):
-        message = ws.receive_json()
-        if message["type"] == kind:
-            return message
-    raise AssertionError(f"no {kind} message")
 
 
 def with_telegram(client, status: int = 200, body: dict | None = None) -> list:

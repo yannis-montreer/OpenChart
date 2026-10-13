@@ -182,12 +182,19 @@ def create_app(server: Server) -> FastAPI:
 
     @app.websocket("/ws")
     async def websocket(ws: WebSocket) -> None:
-        await ws.accept()
         allowed = same_origin(ws.headers.get("origin"), ws.headers.get("host"))
         if not allowed or not await server.auth.session_valid(ws.cookies.get(SESSION_COOKIE)):
+            await ws.accept()
             await ws.close(code=4401, reason="login required")
             return
+        # Join the broadcasts before the browser sees the socket open: it reloads drawings
+        # and alerts when it does, so a change made after that must reach this client.
         client = server.hub.connect()
+        try:
+            await ws.accept()
+        except Exception:
+            server.hub.disconnect(client)
+            raise
         sender = asyncio.create_task(_send_loop(ws, client))
         try:
             while True:

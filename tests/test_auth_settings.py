@@ -20,6 +20,7 @@ from openchart.settings import (
 )
 from openchart.store.sqlite import Database
 from tests.conftest import PASSWORD, SETUP, TOKEN, run_setup
+from tests.ws import receive
 
 TELEGRAM_TOKEN = "123456:TELEGRAM-secret-token-9876"
 
@@ -52,7 +53,7 @@ def test_everything_else_needs_a_session(fresh, path):
 
 def test_websocket_needs_a_session(fresh):
     with fresh.websocket_connect("/ws") as ws, pytest.raises(WebSocketDisconnect) as exc:
-        ws.receive_json()
+        receive(ws)
     assert exc.value.code == 4401
 
 
@@ -176,7 +177,7 @@ def test_cross_site_requests_are_refused(client):
         client.websocket_connect("/ws", headers=evil) as ws,
         pytest.raises(WebSocketDisconnect) as exc,
     ):
-        ws.receive_json()
+        receive(ws)
     assert exc.value.code == 4401
 
 
