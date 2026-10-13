@@ -21,6 +21,7 @@ dependencies = [
     "argon2-cffi>=23.1",
     "keyring>=25",
     "python-dotenv>=1.0",
+    "cryptography>=43",
     # zoneinfo data for New York session alignment (Windows has no system tz database)
     "tzdata>=2024.1",
 ]

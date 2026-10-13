@@ -1,6 +1,8 @@
 """FastAPI application: REST routes and the /ws websocket.
 
-Authentication arrives in M4. Until then the server binds to 127.0.0.1 by default.
+Every /api route except health, setup status, setup and login needs a session cookie;
+so does the websocket. Requests that change state, and websocket connections, must come
+from a page served by this server (Origin check), which blocks cross-site requests.
 """
 
 from __future__ import annotations
@@ -12,19 +14,34 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from openchart import API_VERSION, __version__
+from openchart.api.auth import SESSION_COOKIE
 from openchart.api.hub import Client
+from openchart.api.routes_account import account_routes, client_host
 from openchart.market import sessions
 from openchart.market.aggregate import PRICES
 from openchart.market.timeframes import TIMEFRAMES, parse_timeframe
 from openchart.server import Server
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+
+# Reachable without a session (SPEC section 8).
+PUBLIC = {"/api/health", "/api/setup/status", "/api/setup", "/api/login"}
+# Reachable without a session only before setup, by someone allowed to run it.
+SETUP_ONLY = {"/api/setup/defaults", "/api/settings/test/oanda", "/api/settings/test/telegram"}
+SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+def same_origin(origin: str | None, host: str | None) -> bool:
+    """No Origin header (curl, scripts) is fine; a browser page from elsewhere is not."""
+    return not origin or urlsplit(origin).netloc == host
+
 
 _NOT_BUILT = """<!doctype html><meta charset="utf-8"><title>OpenChart</title>
 <body style="font-family:system-ui;background:#0f1218;color:#d6dae3;padding:2rem">
@@ -44,6 +61,30 @@ def create_app(server: Server) -> FastAPI:
 
     app = FastAPI(title="OpenChart", version=__version__, lifespan=lifespan)
     app.state.server = server
+
+    @app.middleware("http")
+    async def guard(request: Request, call_next):
+        path = request.url.path
+        if path.startswith("/api/"):
+            if request.method not in SAFE_METHODS and not same_origin(
+                request.headers.get("origin"), request.headers.get("host")
+            ):
+                return JSONResponse({"detail": "Cross-site request refused."}, status_code=403)
+            if path not in PUBLIC and not await server.auth.session_valid(
+                request.cookies.get(SESSION_COOKIE)
+            ):
+                setup_ok = (
+                    path in SETUP_ONLY
+                    and not await server.auth.password_set()
+                    and server.auth.setup_allowed_from(
+                        client_host(request), request.headers.get("x-setup-code")
+                    )
+                )
+                if not setup_ok:
+                    return JSONResponse({"detail": "Login required."}, status_code=401)
+        return await call_next(request)
+
+    app.include_router(account_routes(server))
 
     @app.get("/api/health")
     async def health() -> dict[str, Any]:
@@ -122,6 +163,10 @@ def create_app(server: Server) -> FastAPI:
     @app.websocket("/ws")
     async def websocket(ws: WebSocket) -> None:
         await ws.accept()
+        allowed = same_origin(ws.headers.get("origin"), ws.headers.get("host"))
+        if not allowed or not await server.auth.session_valid(ws.cookies.get(SESSION_COOKIE)):
+            await ws.close(code=4401, reason="login required")
+            return
         client = server.hub.connect()
         sender = asyncio.create_task(_send_loop(ws, client))
         try:

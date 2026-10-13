@@ -1,43 +1,10 @@
 import time
-from dataclasses import replace
 
 import pytest
-from fastapi.testclient import TestClient
 
 from openchart import API_VERSION
-from openchart.api.app import create_app
-from openchart.config import Config
-from openchart.market.instruments import METAL_HOURS
-from openchart.providers.base import InstrumentInfo, Tick
-from openchart.providers.fake import FakeProvider, synthetic_m1
-from openchart.server import Server
-from openchart.store.candles import CandleStore
-from openchart.store.sqlite import Database
-
-GOLD = InstrumentInfo("XAU_USD", "XAU_USD", "Gold", 3, 0.01, "METAL")
-NOW = int(time.time()) // 60 * 60
-CANDLES = synthetic_m1(NOW - 3 * 86400, NOW)
-
-
-@pytest.fixture
-def client(tmp_path):
-    import asyncio
-
-    config = replace(Config(), data_dir=tmp_path)
-
-    async def seed():
-        async with await Database.open(config.db_path) as db:
-            store = CandleStore(db.conn)
-            await store.upsert_instrument("fake", GOLD, METAL_HOURS)
-            await store.upsert_m1("fake", "XAU_USD", CANDLES)
-
-    asyncio.run(seed())
-    # The fake stream stays silent; tests push ticks through the feed themselves.
-    provider = FakeProvider({"XAU_USD": CANDLES})
-    server = Server(config, provider=provider)
-    with TestClient(create_app(server)) as c:
-        c.server = server
-        yield c
+from openchart.providers.base import Tick
+from tests.conftest import NOW
 
 
 def push(client, tick: Tick) -> None:

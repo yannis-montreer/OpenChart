@@ -2,7 +2,29 @@
 
 All REST routes are under `/api` and return JSON. Times are UTC epoch seconds. Prices are floats.
 
-> Until M4 there is no login: the server binds to `127.0.0.1` by default. From M4 every route except `/api/health`, `/api/setup/status`, `/api/setup` and `/api/login` needs a session cookie.
+## Authentication
+
+Every route except `/api/health`, `/api/setup/status`, `/api/setup` and `/api/login` needs the session cookie (`openchart_session`, HTTP-only, SameSite=Lax, 30 days) set by `/api/login` or `/api/setup`. Without it: `401`. The websocket closes with code `4401`.
+
+Requests that change something (`POST`, `PUT`, `DELETE`) and websocket connections that carry an `Origin` header must come from the server's own origin, otherwise `403`. Scripts without an `Origin` header are fine.
+
+| Route | |
+|---|---|
+| `GET /api/setup/status` | `{setup_required, authenticated, setup_code_required, secret_store_error}` |
+| `GET /api/setup/defaults` | before setup: values already known from the environment (masked), to prefill the wizard |
+| `POST /api/setup` | `{password, oanda_environment, oanda_account_id, oanda_token, telegram_token?, telegram_chat_id?, instrument, setup_code?}`. Only once (`409` afterwards). From another computer than the server, `setup_code` (printed in the server log) is required (`403`). OANDA credentials and the instrument are checked first (`400` with OANDA's message). Logs the browser in. |
+| `POST /api/login` | `{password}`. `401` wrong, `429` with `Retry-After` after 5 failures from one address (or 30 in total) within 15 minutes |
+| `POST /api/logout` | ends this browser's session |
+| `POST /api/password` | `{current, new}`; logs out every other session |
+| `GET /api/settings` | settings; secrets only as `{set, masked: "****1234", source: "saved" \| "environment" \| null}` |
+| `PUT /api/settings` | any of `oanda_environment`, `oanda_account_id`, `oanda_token`, `telegram_token`, `telegram_chat_id`, `clear_telegram`, `store_ticks`, `timezone`, `listen_on_network`. Empty or missing tokens are kept. New OANDA credentials are checked before saving (`400`). Returns the settings plus `restart_required` |
+| `POST /api/settings/test/oanda` | `{environment?, account_id?, token?}` (missing: the saved value) → `{ok, message}` |
+| `POST /api/settings/test/telegram` | `{token?, chat_id?}` → `{ok, message}`; sends a test message |
+| `GET /api/instruments/available?q=` | instruments of the broker account, matching `q` |
+| `POST /api/instruments` | `{instrument}`: enable it; its history downloads in the background |
+| `DELETE /api/instruments/{instrument}` | disable it (stored history is kept) |
+
+Before setup, the two test routes and `/api/setup/defaults` also work without a session, for the wizard (same setup-code rule, sent as the `X-Setup-Code` header).
 
 ## Timeframes
 

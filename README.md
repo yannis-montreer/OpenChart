@@ -18,8 +18,8 @@ Self-hosted charting and alerting server for forex and metals. It runs 24/7 on y
 | M0 Scaffolding: package layout, config, SQLite migrations, tests, CI | done |
 | M1 OANDA provider, storage, backfill | done |
 | M2 Aggregation, live candles, API, websocket | done |
-| M3 Web chart | done, waiting on owner acceptance checks |
-| M4 Setup wizard, login, settings | not started |
+| M3 Web chart | done |
+| M4 Setup wizard, login, settings | done, waiting on owner acceptance checks |
 | M5 Drawings | not started |
 | M6 Alerts and Telegram | not started |
 | M7 Indicators, chart types, layouts | not started |
@@ -49,7 +49,23 @@ npm run build
 
 For frontend work, `npm run dev` serves it with live reload on http://127.0.0.1:5173 and forwards `/api` and `/ws` to a server on port 8000 (set `OPENCHART_API` to use another). `npm test` runs the frontend unit tests.
 
-Configuration is read from environment variables or a `.env` file in the working directory. Copy `.env.example` to `.env` and fill in your values. `.env` is git-ignored; never commit it.
+## First start
+
+Run `openchart run` and open http://127.0.0.1:8000. The setup wizard asks for:
+
+1. a password for the web interface,
+2. your OANDA account type, account ID and API token (with a Test connection button),
+3. optionally a Telegram bot token and chat ID for phone alerts (with a Send test message button),
+4. the first instrument (default XAU_USD).
+
+No file editing is needed. Tokens are stored in the operating system's credential store (Windows Credential Manager), never in a file or the database, and the web interface only ever shows their last four characters. Everything can be changed later in Settings (gear icon, top right): password, broker credentials, Telegram, instruments, tick storage, alert timezone, and access from other devices.
+
+- Opening the wizard from another device before setup asks for a one-time setup code printed in the server's console.
+- A login lasts 30 days per browser. Failed logins are rate limited.
+- Forgot the password? On the server run `openchart reset-password`.
+- Docker or headless Linux without a credential store: set `OPENCHART_SECRET_KEY` (a Fernet key) and tokens go to an encrypted file in the data folder instead.
+
+Configuration can still come from environment variables or a `.env` file (see `.env.example`), for headless installs. Values saved in the web interface take precedence. `.env` is git-ignored; never commit it.
 
 ## Command line
 
@@ -61,13 +77,14 @@ openchart backfill XAU_USD         # 2 years of M1 (default); add --years N to c
 openchart backfill XAU_USD --deep  # also H1 back to the broker's first candle (gold: 2006)
 openchart stats                    # rows, range, coverage, H1 depth, cached bars
 openchart rebuild-cache            # recompute cached 4h/D/W bars (never needed normally)
+openchart reset-password           # set a new web password from the server console
 openchart gaps XAU_USD             # holes not explained by weekends or the daily break
 openchart run                      # start the server: API, websocket and live feed
 ```
 
 - `backfill` is idempotent and resumable: run it again and it only fetches what is missing. A larger `--years` later extends history backwards.
 - `run` starts the server on http://127.0.0.1:8000 (change with `--host`/`--port`). It fills any gap since the last stored candle, streams ticks, builds live candles for every timeframe, saves closed M1 bars and raw ticks, and logs feed status every minute. If the link drops or goes silent for 15 s, it reconnects with backoff and gap-fills from REST. Once a minute it re-fetches the last 15 minutes of M1 from OANDA so stored history matches the broker's candles exactly.
-- There is no login until M4, so keep the default `127.0.0.1` for now.
+- By default the server only accepts connections from this computer. To reach it from your phone or another PC (over Tailscale), turn on Settings, Network, "Allow other devices to connect" and restart the server, or start it with `--host 0.0.0.0`.
 - Run **one** server per OANDA account. OANDA limits concurrent price streams per account (about two on practice); an extra stream request is left unanswered and the log says "no answer to the stream request".
 - Open http://127.0.0.1:8000 for the chart (after building the web interface, see above).
 - REST and WebSocket reference: [`docs/api.md`](docs/api.md). Try http://127.0.0.1:8000/api/candles?instrument=XAU_USD&timeframe=1h&limit=5 or the interactive docs at http://127.0.0.1:8000/docs.
@@ -82,7 +99,9 @@ Works:
 
 - Web chart (M3): live candles for every timeframe, history that loads further back as you scroll left, crosshair with OHLC legend, Bid/Ask lines with a bar-close countdown, tick volume, mid/bid/ask switch, date ranges, display timezone, dark and light theme, watchlist, connection and feed status, keyboard shortcuts, screenshot, full screen. After a dropped connection (or a server restart) it catches up without reloading, including bars that formed while it was away. Usable on a phone for reading the chart.
 
-Not yet: login and setup wizard (M4; credentials come from `.env` until then), drawings (M5), alerts (M6), indicators and other chart types (M7). Their buttons are visible but disabled.
+- Setup, login and settings (M4): first-run wizard with connection tests, single-password login (argon2, 30-day HTTP-only session cookie, rate limited), settings page, instruments added and removed from the UI (history downloads in the background), secrets in the OS credential store and never returned by the API.
+
+Not yet: drawings (M5), alerts and the Telegram notifier (M6; the Telegram test button already works), indicators and other chart types (M7). Their buttons are visible but disabled.
 
 - Deep history: 1h, 4h, daily and weekly charts go back as far as the broker has H1 (gold on OANDA: March 2006). The server downloads it in the background on first start. Complete 4h/D/W bars are cached, so these charts load in milliseconds.
 

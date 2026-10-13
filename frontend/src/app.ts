@@ -12,7 +12,9 @@ import {
 import { ChartView, type ChartContext } from "./chart/view";
 import { loadPrefs, resolveTimezone, savePrefs, type Prefs } from "./prefs";
 import { formatClock, offsetLabel } from "./time";
+import { showLogin } from "./ui/auth";
 import { button, closeMenu, h, icon, installTooltips, menuItem, showMenu } from "./ui/dom";
+import { SettingsDialog, type Section } from "./ui/settings";
 import { Watchlist } from "./ui/watchlist";
 import { LiveSocket, type ServerMessage, type SocketState, type SubKey } from "./ws";
 
@@ -55,6 +57,8 @@ export class App {
     `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${location.pathname.replace(/[^/]*$/, "")}ws`,
   );
   private chartKey?: SubKey;
+  private settingsDialog = new SettingsDialog();
+  private historyState = new Map<string, string>();
 
   chart!: ChartView;
   private watchlist!: Watchlist;
@@ -91,6 +95,10 @@ export class App {
 
     this.socket.onMessage = (m) => this.onMessage(m);
     this.socket.onState = (s) => this.onSocketState(s);
+    this.socket.onUnauthorized = () => showLogin("Your session has ended. Please log in again.");
+    this.settingsDialog.onClose = (changed) => {
+      if (changed) location.reload();
+    };
     this.socket.onOpen = (reconnect) => {
       if (reconnect) void this.chart.resync();
     };
@@ -105,9 +113,8 @@ export class App {
     void this.watchlist.loadPrevious(this.meta);
 
     if (!this.instrument) {
-      this.chartMessage(
-        "No instruments yet. Run `openchart backfill XAU_USD` on the server, then reload. (The setup wizard arrives in M4.)",
-      );
+      this.chartMessage("No instruments yet. Add one in Settings, Instruments.");
+      void this.openSettings("instruments");
       return;
     }
     await this.loadChart();
@@ -150,7 +157,7 @@ export class App {
       }),
       button({ icon: "camera", title: "Save chart image", onClick: () => this.screenshot(), class: "hide-narrow" }),
       button({ icon: "maximize", title: "Full screen", onClick: () => this.fullscreen(), class: "hide-narrow" }),
-      button({ icon: "settings", title: soon("Settings", "M4"), disabled: true, class: "hide-narrow" }),
+      button({ icon: "settings", title: "Settings", onClick: () => void this.openSettings() }),
       h("div", { class: "sep hide-narrow" }),
       this.els.conn,
     );
@@ -374,7 +381,10 @@ export class App {
         }),
       );
     }
-    box.append(h("hr"), h("p", {}, "Add instruments on the server with ", h("kbd", {}, "openchart backfill EUR_USD"), ". Adding them from here comes with the settings page (M4)."));
+    box.append(
+      h("hr"),
+      menuItem({ label: "Add or remove instruments…", icon: "plus", onClick: () => void this.openSettings("instruments") }),
+    );
     showMenu(this.els.symbol, box);
   }
 
@@ -424,6 +434,7 @@ export class App {
       case "status":
         this.status = m;
         this.updateFeedIndicators();
+        this.watchHistory();
         break;
       case "tick":
         if (m.instrument === this.instrument?.instrument) this.chart.applyTick(m.bid, m.ask);
@@ -474,6 +485,11 @@ export class App {
       cls = "dot warn";
       label = "Feed " + s.provider_state;
       detail = `Broker feed ${s.provider_state}`;
+    } else if (inst && s.instruments?.[inst]?.history?.state === "running") {
+      const h = s.instruments[inst].history!;
+      cls = "dot warn";
+      label = "Downloading";
+      detail = `Downloading ${inst} history: ${h.written.toLocaleString("en-US")} candles so far`;
     } else if (age === null || age === undefined || age > STALE_TICKS) {
       cls = "dot";
       label = "Quiet";
@@ -505,6 +521,25 @@ export class App {
   }
 
   // Actions
+
+  private openSettings(section?: Section): Promise<void> {
+    closeMenu();
+    return this.settingsDialog.open(section);
+  }
+
+  /** A history download finished for the instrument on screen: show it. */
+  private watchHistory(): void {
+    const s = this.status;
+    if (!s?.instruments) return;
+    for (const [name, info] of Object.entries(s.instruments)) {
+      const state = info.history?.state ?? "";
+      const before = this.historyState.get(name);
+      this.historyState.set(name, state);
+      if (before === "running" && state === "done" && name === this.instrument?.instrument) {
+        void this.loadChart();
+      }
+    }
+  }
 
   private toggleTheme(btn: HTMLButtonElement): void {
     this.prefs.theme = this.prefs.theme === "dark" ? "light" : "dark";

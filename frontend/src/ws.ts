@@ -42,6 +42,8 @@ export class LiveSocket {
   onState: (s: SocketState) => void = () => {};
   /** Called when a connection opens; `reconnect` is false only the first time. */
   onOpen: (reconnect: boolean) => void = () => {};
+  /** Called when the server refuses the connection because the session is gone. */
+  onUnauthorized: () => void = () => {};
 
   private ws?: WebSocket;
   private subs = new Map<string, { key: SubKey; refs: number }>();
@@ -125,8 +127,13 @@ export class LiveSocket {
         console.error("bad message", err);
       }
     };
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
       if (this.ws !== ws || this.stopped) return;
+      if (ev.code === 4401) {
+        this.stop();
+        this.onUnauthorized();
+        return;
+      }
       this.setState("reconnecting");
       const delay = Math.min(15000, 500 * 2 ** this.attempt) * (0.6 + Math.random() * 0.4);
       this.attempt += 1;

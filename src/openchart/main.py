@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -20,6 +21,13 @@ from openchart.market.gaps import find_gaps
 from openchart.market.instruments import default_hours
 from openchart.providers.base import AuthError, Provider, ProviderError
 from openchart.providers.registry import create_provider
+from openchart.settings import (
+    SecretStoreUnavailable,
+    SettingsStore,
+    effective_config,
+    load_app_settings,
+    open_secrets,
+)
 from openchart.store.candles import CandleStore
 from openchart.store.sqlite import Database
 
@@ -47,18 +55,27 @@ class Context:
     provider: Provider
 
 
+async def _saved_config(config: Config, db: Database) -> Config:
+    """Settings and secrets saved through the web UI, over the environment config."""
+    settings = SettingsStore(db.conn)
+    try:
+        secrets = open_secrets(config, await settings.instance_id())
+    except SecretStoreUnavailable as exc:
+        log.warning("secrets: %s", exc)
+        secrets = None
+    return effective_config(config, await load_app_settings(settings, config), secrets)
+
+
 @asynccontextmanager
 async def _context(config: Config, need_provider: bool = True) -> AsyncIterator[Context]:
-    # Build the provider first: if it fails, no database thread is left open
-    # (an unclosed aiosqlite connection keeps the process alive).
-    provider = create_provider(config) if need_provider else None
+    db = await Database.open(config.db_path)
+    provider = None
     try:
-        db = await Database.open(config.db_path)
-    except BaseException:
-        if provider is not None:
-            await provider.aclose()
-        raise
-    try:
+        # Any failure here must still close the database: an open aiosqlite
+        # connection keeps the process alive.
+        config = await _saved_config(config, db)
+        if need_provider:
+            provider = create_provider(config)
         yield Context(config, CandleStore(db.conn), provider)  # type: ignore[arg-type]
     finally:
         if provider is not None:
@@ -74,11 +91,8 @@ async def _cmd_migrate(config: Config, args: argparse.Namespace) -> int:
 
 
 async def _cmd_test_connection(config: Config, args: argparse.Namespace) -> int:
-    provider = create_provider(config)
-    try:
-        result = await provider.test_connection()
-    finally:
-        await provider.aclose()
+    async with _context(config) as ctx:
+        result = await ctx.provider.test_connection()
     print(("OK: " if result.ok else "FAILED: ") + result.message)
     return 0 if result.ok else 1
 
@@ -189,21 +203,49 @@ async def _cmd_run(config: Config, args: argparse.Namespace) -> int:
     from openchart.api.app import create_app
     from openchart.server import Server
 
-    host = args.host or config.host
+    if args.data_dir:
+        config = replace(config, data_dir=Path(args.data_dir))
+    async with await Database.open(config.db_path) as db:
+        app_settings = await load_app_settings(SettingsStore(db.conn), config)
+    # --host, then OPENCHART_HOST, then the "other devices" setting from the web UI.
+    host = (
+        args.host
+        or os.environ.get("OPENCHART_HOST")
+        or ("0.0.0.0" if app_settings.listen_on_network else "127.0.0.1")
+    )
     port = args.port or config.port
     if host not in ("127.0.0.1", "localhost", "::1"):
         log.warning(
-            "listening on %s: there is no login until M4, so only do this on a private "
-            "network such as Tailscale",
+            "listening on %s:%s for other devices. Keep it on a private network such as "
+            "Tailscale; never forward this port on your router.",
             host,
+            port,
         )
-    if args.data_dir:
-        config = replace(config, data_dir=Path(args.data_dir))
     app = create_app(Server(config))
     server = uvicorn.Server(
         uvicorn.Config(app, host=host, port=port, log_level=config.log_level.lower())
     )
     await server.serve()
+    return 0
+
+
+async def _cmd_reset_password(config: Config, args: argparse.Namespace) -> int:
+    """Recovery from the server's own console: set a new password, log everyone out."""
+    import getpass
+
+    from openchart.api.auth import Auth, PasswordError
+
+    first = getpass.getpass("New password: ")
+    if getpass.getpass("Repeat it: ") != first:
+        print("The two passwords differ.", file=sys.stderr)
+        return 1
+    async with await Database.open(config.db_path) as db:
+        try:
+            await Auth(db.conn, SettingsStore(db.conn)).set_password(first)
+        except PasswordError as exc:
+            print(exc, file=sys.stderr)
+            return 1
+    print("Password changed. Every browser has been logged out.")
     return 0
 
 
@@ -214,6 +256,7 @@ COMMANDS = {
     "stats": _cmd_stats,
     "gaps": _cmd_gaps,
     "rebuild-cache": _cmd_rebuild_cache,
+    "reset-password": _cmd_reset_password,
     "run": _cmd_run,
 }
 
@@ -231,6 +274,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--deep", action="store_true", help="also download H1 history as far back as available"
     )
     sub.add_parser("stats", help="row counts and coverage per instrument")
+    sub.add_parser("reset-password", help="set a new web password (if you forgot it)")
     p = sub.add_parser("rebuild-cache", help="recompute the cached 4h/D/W bars")
     p.add_argument("instrument", nargs="?", help="default: all instruments")
     p = sub.add_parser("gaps", help="list holes in stored history")
@@ -238,7 +282,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--source", default="oanda")
     p.add_argument("--min-minutes", type=int, default=10)
     p = sub.add_parser("run", help="start the server: API, websocket and live feed")
-    p.add_argument("--host", help="bind address (default 127.0.0.1, from config)")
+    p.add_argument(
+        "--host", help="bind address (default: 127.0.0.1, or 0.0.0.0 if enabled in Settings)"
+    )
     p.add_argument("--port", type=int, help="port (default 8000, from config)")
     p.add_argument("--data-dir", help="database and tick folder (default data/, from config)")
     return parser
