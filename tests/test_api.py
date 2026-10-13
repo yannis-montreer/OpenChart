@@ -148,3 +148,19 @@ def test_websocket_errors(client):
         assert "unknown instrument" in receive_until(ws, "error")["error"]
         ws.send_json({"type": "dance"})
         assert receive_until(ws, "error")
+
+
+def test_meta_describes_timeframes_and_session(client):
+    meta = client.get("/api/meta").json()
+    assert [tf["name"] for tf in meta["timeframes"]][:2] == ["1s", "5s"]
+    assert meta["session"] == {
+        "timezone": "America/New_York",
+        "day_anchor_hour": 17,
+        "week_anchor_weekday": 4,
+    }
+
+
+def test_root_serves_web_ui_or_build_hint(client):
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "OpenChart" in response.text

@@ -98,7 +98,16 @@ class ResilientTickStream:
                 except StopAsyncIteration:
                     reason = "stream closed by server"
                 except TimeoutError:
-                    reason = f"no data for {self.heartbeat_timeout:.0f}s"
+                    if up:
+                        reason = f"no data for {self.heartbeat_timeout:.0f}s"
+                    else:
+                        # Brokers cap concurrent price streams per account (OANDA practice
+                        # allows about two); an extra request is left hanging.
+                        reason = (
+                            f"no answer to the stream request within "
+                            f"{self.heartbeat_timeout:.0f}s; is another program streaming "
+                            "this account? Brokers limit concurrent price streams"
+                        )
                 except AuthError:
                     raise
                 except Exception as exc:

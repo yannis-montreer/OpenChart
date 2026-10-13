@@ -40,6 +40,8 @@ path = "src/openchart/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/openchart"]
+# The built web UI is git-ignored but must ship in the wheel.
+artifacts = ["src/openchart/web/**"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

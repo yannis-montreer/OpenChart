@@ -8,8 +8,9 @@ import logging
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from openchart import __version__
 from openchart.config import Config, ConfigError, load_config
@@ -167,6 +168,8 @@ async def _cmd_run(config: Config, args: argparse.Namespace) -> int:
             "network such as Tailscale",
             host,
         )
+    if args.data_dir:
+        config = replace(config, data_dir=Path(args.data_dir))
     app = create_app(Server(config))
     server = uvicorn.Server(
         uvicorn.Config(app, host=host, port=port, log_level=config.log_level.lower())
@@ -202,6 +205,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("run", help="start the server: API, websocket and live feed")
     p.add_argument("--host", help="bind address (default 127.0.0.1, from config)")
     p.add_argument("--port", type=int, help="port (default 8000, from config)")
+    p.add_argument("--data-dir", help="database and tick folder (default data/, from config)")
     return parser
 
 

@@ -7,17 +7,30 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
 from openchart import API_VERSION, __version__
 from openchart.api.hub import Client
+from openchart.market import sessions
 from openchart.market.aggregate import PRICES
 from openchart.market.timeframes import TIMEFRAMES, parse_timeframe
 from openchart.server import Server
+
+WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+
+_NOT_BUILT = """<!doctype html><meta charset="utf-8"><title>OpenChart</title>
+<body style="font-family:system-ui;background:#0f1218;color:#d6dae3;padding:2rem">
+<h1>OpenChart server is running</h1>
+<p>The web interface is not built. In <code>frontend/</code> run <code>npm ci</code> and
+<code>npm run build</code>, then reload. The API is at <a href="/docs">/docs</a>.</p>"""
 
 
 def create_app(server: Server) -> FastAPI:
@@ -43,6 +56,24 @@ def create_app(server: Server) -> FastAPI:
     @app.get("/api/status")
     async def status() -> dict[str, Any]:
         return server.status()
+
+    @app.get("/api/meta")
+    async def meta() -> dict[str, Any]:
+        """Timeframes and the trading-day anchor, so clients never hardcode them."""
+        return {
+            "api_version": API_VERSION,
+            "server_time": time.time(),
+            "prices": list(PRICES),
+            "timeframes": [
+                {"name": tf.name, "seconds": tf.seconds, "kind": tf.kind.value}
+                for tf in TIMEFRAMES.values()
+            ],
+            "session": {
+                "timezone": sessions.DAY_ANCHOR_TZ,
+                "day_anchor_hour": sessions.DAY_ANCHOR_HOUR,
+                "week_anchor_weekday": sessions.WEEK_ANCHOR_WEEKDAY,
+            },
+        }
 
     @app.get("/api/instruments")
     async def instruments() -> list[dict[str, Any]]:
@@ -104,6 +135,15 @@ def create_app(server: Server) -> FastAPI:
             sender.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await sender
+
+    # The built web UI, served last so /api and /ws take precedence.
+    if (WEB_DIR / "index.html").is_file():
+        app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")
+    else:
+
+        @app.get("/", include_in_schema=False)
+        async def not_built() -> HTMLResponse:
+            return HTMLResponse(_NOT_BUILT)
 
     return app
 

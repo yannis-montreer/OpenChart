@@ -28,14 +28,22 @@ dist/
 .coverage
 htmlcov/
 
-# Frontend
+# Frontend (the build lands in src/openchart/web and is produced by `npm run build`)
 node_modules/
 frontend/dist/
-src/openchart/web/*
-!src/openchart/web/.gitkeep
+src/openchart/web/
+
+# Machine-specific tool config
+.claude/launch.json
+.claude/settings.local.json
 
 # Editors / OS
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Owner's UI reference screenshots: kept locally, never published (they show a
+# third-party product's interface). Only the folder placeholder is tracked.
+reference/*
+!reference/.gitkeep
