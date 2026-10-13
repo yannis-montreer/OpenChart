@@ -3,8 +3,10 @@
 Non-secret settings live in the `settings` table (JSON values). Secrets (the OANDA and
 Telegram tokens) live in the OS credential store through `keyring` (Windows Credential
 Manager, macOS Keychain, Secret Service on Linux). Where no credential store exists
-(Docker, headless Linux) they go to an encrypted file in the data folder, with the key
-taken from the OPENCHART_SECRET_KEY environment variable.
+(Docker, headless Linux, a Windows service running as LocalSystem) they go to an
+encrypted file in the data folder, `secrets.enc`. Its key comes from the
+OPENCHART_SECRET_KEY environment variable, or from the file OPENCHART_SECRET_KEY_FILE
+names (the Windows service: a key file only SYSTEM and Administrators can read).
 
 Secrets are never written to the database, never logged and never returned by the API:
 only `mask_secret()` forms leave this module.
@@ -35,6 +37,8 @@ log = logging.getLogger(__name__)
 
 SECRET_NAMES = ("oanda_token", "telegram_token")
 SECRET_KEY_ENV = "OPENCHART_SECRET_KEY"
+SECRET_KEY_FILE_ENV = "OPENCHART_SECRET_KEY_FILE"
+SECRETS_FILE = "secrets.enc"
 
 
 class SecretStoreUnavailable(RuntimeError):
@@ -148,15 +152,72 @@ class MemorySecrets:
         self.values.pop(name, None)
 
 
+def new_secret_key() -> str:
+    from cryptography.fernet import Fernet
+
+    return Fernet.generate_key().decode()
+
+
+def secret_key_from_env() -> str | None:
+    """The encrypted-file key: OPENCHART_SECRET_KEY, else the file OPENCHART_SECRET_KEY_FILE
+    names. None when neither is set."""
+    key = os.environ.get(SECRET_KEY_ENV, "").strip()
+    if key:
+        return key
+    path = os.environ.get(SECRET_KEY_FILE_ENV, "").strip()
+    if not path:
+        return None
+    try:
+        key = Path(path).read_text(encoding="ascii").strip()
+    except OSError as exc:
+        raise SecretStoreUnavailable(
+            f"Cannot read the secret key file {path} ({SECRET_KEY_FILE_ENV}): {exc.strerror}"
+        ) from exc
+    if not key:
+        raise SecretStoreUnavailable(f"The secret key file {path} is empty")
+    return key
+
+
+@dataclass
+class MovedSecrets:
+    key_created: bool
+    copied: list[str]
+    missing: list[str]
+
+
+def secrets_to_file(data_dir: Path, key_file: Path, source: Secrets | None) -> MovedSecrets:
+    """Copy the tokens from `source` (this user's credential store) into the encrypted file
+    of `data_dir`, keyed by `key_file`, which is created if missing. For the Windows
+    service, which runs as another account and cannot read this user's Credential Manager.
+    Tokens already in the file stay unless the credential store has one."""
+    created = not key_file.is_file()
+    if created:
+        key_file.parent.mkdir(parents=True, exist_ok=True)
+        with key_file.open("x", encoding="ascii") as f:
+            f.write(new_secret_key())
+    target = EncryptedFileSecrets(data_dir / SECRETS_FILE, key_file.read_text("ascii").strip())
+    target.get(SECRET_NAMES[0])  # the key must open an existing file (else this raises)
+    copied, missing = [], []
+    for name in SECRET_NAMES:
+        value = source.get(name) if source is not None else None
+        if value:
+            target.set(name, value)
+            copied.append(name)
+        elif not target.get(name):
+            missing.append(name)
+    return MovedSecrets(created, copied, missing)
+
+
 def open_secrets(config: Config, instance_id: str) -> Secrets:
-    key = os.environ.get(SECRET_KEY_ENV)
-    if key:  # an explicit key means the user wants the file store (e.g. Docker)
-        return EncryptedFileSecrets(config.data_dir / "secrets.enc", key)
+    key = secret_key_from_env()
+    if key:  # an explicit key means the file store (Docker, the Windows service)
+        return EncryptedFileSecrets(config.data_dir / SECRETS_FILE, key)
     if KeyringSecrets.available():
         return KeyringSecrets(instance_id)
     raise SecretStoreUnavailable(
         "No OS credential store is available here. Set the environment variable "
-        f"{SECRET_KEY_ENV} to a Fernet key to store secrets in an encrypted file."
+        f"{SECRET_KEY_ENV} to a key (create one with: openchart secrets new-key), or "
+        f"{SECRET_KEY_FILE_ENV} to a file holding one, to keep secrets in an encrypted file."
     )
 
 

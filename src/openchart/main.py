@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import logging
 import os
+import sqlite3
 import sys
 import time
 from collections.abc import AsyncIterator
@@ -301,6 +302,104 @@ async def _cmd_reset_password(config: Config, args: argparse.Namespace) -> int:
     return 0
 
 
+def _data_dir(config: Config, args: argparse.Namespace) -> Config:
+    return replace(config, data_dir=Path(args.data_dir)) if args.data_dir else config
+
+
+async def _cmd_backup(config: Config, args: argparse.Namespace) -> int:
+    from openchart.backup import BackupError, backup, human_size
+
+    config = _data_dir(config, args)
+    try:
+        result = await asyncio.to_thread(
+            backup, config.data_dir, Path(args.out) if args.out else None, ticks=not args.no_ticks
+        )
+    except (BackupError, OSError, sqlite3.Error) as exc:
+        print(f"Backup failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"Backup written: {result.path}")
+    print(f"  {human_size(result.size)}, {result.files:,} files: the database (checked)", end="")
+    print(f", {result.tick_files:,} tick files" if result.tick_files else "", end="")
+    print(", your indicators and settings files.")
+    if result.has_secrets:
+        print(
+            "  secrets.enc is in it, encrypted; its key is not. Keep the key (the service's "
+            "secret.key or OPENCHART_SECRET_KEY) to restore the tokens, or enter them again."
+        )
+    if result.skipped:
+        print(f"  {len(result.skipped)} tick part file(s) were merged during the copy; skipped.")
+    print("To restore: stop the server, unzip into an empty data folder, start the server.")
+    return 0
+
+
+async def _cmd_secrets(config: Config, args: argparse.Namespace) -> int:
+    """Where the tokens are kept; move them to the encrypted file for the Windows service."""
+    from openchart.config import mask_secret
+    from openchart.settings import (
+        SECRET_NAMES,
+        SECRETS_FILE,
+        EncryptedFileSecrets,
+        KeyringSecrets,
+        new_secret_key,
+        secret_key_from_env,
+        secrets_to_file,
+    )
+
+    if args.action == "new-key":
+        print(new_secret_key())
+        return 0
+    config = _data_dir(config, args)
+    if not config.db_path.is_file():
+        print(f"No database in {config.data_dir}.", file=sys.stderr)
+        return 1
+    async with await Database.open(config.db_path) as db:
+        instance_id = await SettingsStore(db.conn).instance_id()
+
+    if args.action == "status":
+        try:
+            store = open_secrets(config, instance_id)
+        except SecretStoreUnavailable as exc:
+            print(f"Secrets: unavailable. {exc}")
+            return 1
+        where = (
+            f"encrypted file {config.data_dir / SECRETS_FILE}"
+            if isinstance(store, EncryptedFileSecrets)
+            else "the Windows Credential Manager of this user"
+            if os.name == "nt"
+            else "the system credential store"
+        )
+        print(f"Secrets are kept in: {where}")
+        for name in SECRET_NAMES:
+            try:
+                value = store.get(name)
+            except SecretStoreUnavailable as exc:
+                print(f"  {name}: cannot read ({exc})")
+                return 1
+            print(f"  {name}: {mask_secret(value) if value else 'not set'}")
+        return 0
+
+    # to-file: copy the tokens from this user's credential store into secrets.enc, with a
+    # key kept in --key-file (created if missing). The install script then locks the key
+    # file down to SYSTEM and Administrators.
+    if secret_key_from_env():
+        print("OPENCHART_SECRET_KEY(_FILE) is set in this shell; unset it first.", file=sys.stderr)
+        return 1
+    source = KeyringSecrets(instance_id) if KeyringSecrets.available() else None
+    try:
+        moved = await asyncio.to_thread(
+            secrets_to_file, config.data_dir, Path(args.key_file), source
+        )
+    except SecretStoreUnavailable as exc:
+        print(f"{exc}. Use the key file the encrypted file was made with.", file=sys.stderr)
+        return 1
+    print(f"Key file: {args.key_file} ({'created' if moved.key_created else 'existing'})")
+    print(f"Encrypted secrets: {config.data_dir / SECRETS_FILE}")
+    print(f"Copied from the Credential Manager: {', '.join(moved.copied) or 'nothing'}")
+    if moved.missing:
+        print(f"Not set yet (enter them in the web page's Settings): {', '.join(moved.missing)}")
+    return 0
+
+
 COMMANDS = {
     "migrate": _cmd_migrate,
     "test-connection": _cmd_test_connection,
@@ -311,6 +410,8 @@ COMMANDS = {
     "rebuild-cache": _cmd_rebuild_cache,
     "reset-password": _cmd_reset_password,
     "run": _cmd_run,
+    "backup": _cmd_backup,
+    "secrets": _cmd_secrets,
 }
 
 
@@ -348,11 +449,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--port", type=int, help="port (default 8000, from config)")
     p.add_argument("--data-dir", help="database and tick folder (default data/, from config)")
+    p = sub.add_parser(
+        "backup", help="copy the data folder into one zip (safe while the server runs)"
+    )
+    p.add_argument("--data-dir", help="the data folder (default data/, from config)")
+    p.add_argument("--out", help="where to put the zip (default: <data folder>/backups)")
+    p.add_argument("--no-ticks", action="store_true", help="leave out the raw tick files")
+    p = sub.add_parser("secrets", help="where the OANDA and Telegram tokens are kept")
+    p.add_argument(
+        "action",
+        choices=["status", "new-key", "to-file"],
+        help="status: where and which; new-key: print a key for OPENCHART_SECRET_KEY; "
+        "to-file: copy them from the Credential Manager into the encrypted file (for the "
+        "Windows service)",
+    )
+    p.add_argument("--data-dir", help="the data folder (default data/, from config)")
+    p.add_argument("--key-file", help="to-file: the key file to use or create")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.command == "secrets" and args.action == "to-file" and not args.key_file:
+        parser.error("secrets to-file needs --key-file")
     try:
         config = load_config()
     except ConfigError as exc:
