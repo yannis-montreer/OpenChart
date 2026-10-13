@@ -400,6 +400,97 @@ async def _cmd_secrets(config: Config, args: argparse.Namespace) -> int:
     return 0
 
 
+async def _cmd_self_test(config: Config, args: argparse.Namespace) -> int:
+    """Check, offline, that every part this install needs works (a frozen build, Docker)."""
+    import tempfile
+
+    def password() -> str:
+        from argon2 import PasswordHasher
+
+        ph = PasswordHasher()
+        assert ph.verify(ph.hash("self-test"), "self-test")
+        return "argon2"
+
+    def encryption() -> str:
+        from openchart.settings import EncryptedFileSecrets, new_secret_key
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EncryptedFileSecrets(Path(tmp) / "s.enc", new_secret_key())
+            store.set("x", "y")
+            assert store.get("x") == "y"
+        return "Fernet"
+
+    def ticks() -> str:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pq.write_table(pa.table({"ts": [1], "bid": [1.0]}), Path(tmp) / "t.parquet")
+            assert pq.read_table(Path(tmp) / "t.parquet").num_rows == 1
+        return f"pyarrow {pa.__version__}"
+
+    def credential_store() -> str:
+        from openchart.settings import KeyringSecrets
+
+        if not KeyringSecrets.available():
+            return "none (use OPENCHART_SECRET_KEY or OPENCHART_SECRET_KEY_FILE)"
+        import keyring
+
+        return type(keyring.get_keyring()).__name__
+
+    def timezones() -> str:
+        from zoneinfo import ZoneInfo
+
+        ZoneInfo("America/New_York")
+        return "America/New_York"
+
+    async def database() -> str:
+        from openchart.store.migrate import applied_versions, discover_migrations
+
+        with tempfile.TemporaryDirectory() as tmp:
+            async with await Database.open(Path(tmp) / "t.db") as db:
+                applied = await applied_versions(db.conn)
+        expected = {m.version for m in discover_migrations()}
+        assert applied == expected and expected, f"applied {applied}, expected {expected}"
+        return f"{len(applied)} migrations applied"
+
+    def indicators() -> str:
+        from openchart.indicators._registry import load_indicators
+
+        registry = load_indicators(None)
+        assert registry.indicators and not registry.errors, registry.errors
+        return ", ".join(registry.indicators)
+
+    def web() -> str:
+        from openchart.api.app import WEB_DIR
+
+        assert (WEB_DIR / "index.html").is_file(), f"no web UI in {WEB_DIR}"
+        return str(WEB_DIR)
+
+    checks = [
+        ("password hashing", password),
+        ("encrypted secrets", encryption),
+        ("tick files", ticks),
+        ("credential store", credential_store),
+        ("time zones", timezones),
+        ("database", database),
+        ("indicators", indicators),
+        ("web page", web),
+    ]
+    failed = 0
+    for name, check in checks:
+        try:
+            result = check()
+            if asyncio.iscoroutine(result):
+                result = await result
+            print(f"  ok    {name}: {result}")
+        except Exception as exc:
+            failed += 1
+            print(f"  FAIL  {name}: {type(exc).__name__}: {exc}")
+    print(f"openchart {__version__}: {'all checks passed' if not failed else f'{failed} failed'}")
+    return 1 if failed else 0
+
+
 COMMANDS = {
     "migrate": _cmd_migrate,
     "test-connection": _cmd_test_connection,
@@ -412,6 +503,7 @@ COMMANDS = {
     "run": _cmd_run,
     "backup": _cmd_backup,
     "secrets": _cmd_secrets,
+    "self-test": _cmd_self_test,
 }
 
 
@@ -465,6 +557,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--data-dir", help="the data folder (default data/, from config)")
     p.add_argument("--key-file", help="to-file: the key file to use or create")
+    sub.add_parser("self-test", help="check offline that every part of this install works")
     return parser
 
 
