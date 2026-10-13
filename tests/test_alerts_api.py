@@ -209,20 +209,21 @@ def candle(ts: int, o: float, h: float, low: float, c: float) -> Candle:
 
 def test_a_cross_during_a_freeze_fires_late_with_a_freeze_message(client):
     seen = with_telegram(client)
-    client.post("/api/alerts", json=LEVEL)
+    # Far from the test server's synthetic prices (2000 +- 10), which this test replaces.
+    client.post("/api/alerts", json={**LEVEL, "level": 1900.0})
     server = client.server
-    t0 = int(time.time()) // 60 * 60 - 3 * 3600
-    push(client, t0 + 5, 1999.0)  # last observation before the computer slept
+    wake = time.time()
+    t0 = int(wake) // 60 * 60 - 3 * 3600
+    push(client, t0 + 5, 1899.0)  # last observation before the computer slept
 
     # The repair stored the candles of the frozen period: the price crossed and came back.
-    frozen = [candle(t0 + 60 * i, 1999.0, 1999.5, 1998.5, 1999.0) for i in range(1, 60)]
-    frozen.append(candle(t0 + 3600, 1999.0, 2001.0, 1998.9, 2000.5))
-    frozen.append(candle(t0 + 3660, 2000.5, 2000.6, 1998.0, 1998.5))
+    frozen = [candle(t, 1899.0, 1899.5, 1898.5, 1899.0) for t in range(t0 + 60, int(wake), 60)]
+    frozen[59] = candle(t0 + 3600, 1899.0, 1901.0, 1898.9, 1900.5)
+    frozen[60] = candle(t0 + 3660, 1900.5, 1900.6, 1898.0, 1898.5)
     client.portal.call(server.store.upsert_m1, "fake", "XAU_USD", frozen)
 
-    wake = time.time()
     client.portal.call(server.alerts.on_wake, t0 + 6, wake)  # the feed noticed the freeze
-    push(client, wake, 1998.4)  # the first tick after waking reveals the gap
+    push(client, wake, 1898.4)  # the first tick after waking reveals the gap
     for _ in range(40):
         time.sleep(0.1)
         if not server.alerts.engine.gaps and server.alerts.freeze is None:
