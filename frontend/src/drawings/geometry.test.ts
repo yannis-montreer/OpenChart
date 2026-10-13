@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { TimeIndex, lineVertices, linePrice, nearestOhlc, segmentDistance, timeRange } from "./geometry";
+import { TimeIndex, lineVertices, linePrice, logicalX, nearestOhlc, segmentDistance, timeRange } from "./geometry";
 
 const A = { t: 1000, p: 10 };
 const B = { t: 2000, p: 20 };
@@ -91,6 +91,15 @@ describe("lineVertices", () => {
 });
 
 describe("helpers", () => {
+  it("places a point inside a bar between the bar's neighbours", () => {
+    // Like Lightweight Charts: whole indexes only, anything else maps to 0.
+    const wholeX = (i: number) => (Number.isInteger(i) ? 100 + 7 * i : 0);
+    expect(logicalX(999, wholeX)).toBe(7093);
+    expect(logicalX(999.25, wholeX)).toBeCloseTo(7094.75);
+    expect(logicalX(-2.5, wholeX)).toBeCloseTo(82.5);
+    expect(logicalX(3.5, (i) => (i > 3 ? null : 0))).toBeNull();
+  });
+
   it("measures distance to a segment", () => {
     expect(segmentDistance(5, 5, 0, 0, 10, 0)).toBe(5);
     expect(segmentDistance(-3, 4, 0, 0, 10, 0)).toBe(5);

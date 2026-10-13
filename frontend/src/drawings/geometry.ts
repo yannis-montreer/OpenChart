@@ -125,6 +125,21 @@ export function lineVertices(
   return out;
 }
 
+/**
+ * Screen x of a fractional bar index, from the chart's x of whole indexes.
+ *
+ * Lightweight Charts only maps whole bar indexes (5.2.1 returns 0 for 999.5), but a
+ * line's ends often fall inside a bar: a point placed on a lower timeframe, or the
+ * edge of the visible range. Bars are evenly spaced, so interpolate.
+ */
+export function logicalX(logical: number, wholeX: (index: number) => number | null): number | null {
+  const i = Math.floor(logical);
+  const x0 = wholeX(i);
+  if (x0 === null || logical === i) return x0;
+  const x1 = wholeX(i + 1);
+  return x1 === null ? null : x0 + (logical - i) * (x1 - x0);
+}
+
 /** Distance from (px, py) to the segment (ax, ay)-(bx, by). */
 export function segmentDistance(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
   const dx = bx - ax;

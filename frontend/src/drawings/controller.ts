@@ -22,6 +22,7 @@ import { h, menuItem, showMenuAt } from "../ui/dom";
 import {
   POINTS_NEEDED,
   lineVertices,
+  logicalX,
   nearestOhlc,
   segmentDistance,
   type DrawingType,
@@ -315,7 +316,8 @@ export class DrawingController {
   }
 
   private xOf(logical: number): number | null {
-    return this.view.chart.timeScale().logicalToCoordinate(logical as Logical);
+    const scale = this.view.chart.timeScale();
+    return logicalX(logical, (i) => scale.logicalToCoordinate(i as Logical));
   }
 
   private yOf(price: number): number | null {
