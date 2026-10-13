@@ -13,6 +13,7 @@ export interface Prefs {
   timezone: string; // IANA name, "local" or "UTC"
   favorites: string[];
   panelOpen: boolean;
+  panelView: "watchlist" | "alerts";
   drawingsHidden: boolean;
   drawingStyle: DrawingStyle; // style of the next new drawing (the last one chosen)
 }
@@ -27,6 +28,7 @@ export const DEFAULT_PREFS: Prefs = {
   timezone: "local",
   favorites: ["1m", "5m", "15m", "30m", "1h", "4h", "1D", "1W"],
   panelOpen: true,
+  panelView: "watchlist",
   drawingsHidden: false,
   drawingStyle: { color: "#4d8dff", width: 2, dash: "solid" },
 };

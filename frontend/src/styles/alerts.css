@@ -1,0 +1,372 @@
+/* Alerts: dialog, panel, toasts (M6). Uses the tokens from main.css. */
+
+/* Dialog */
+
+.modal.alert-dialog,
+.modal.confirm-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(480px, 100%);
+  height: auto;
+  max-height: calc(100dvh - 32px);
+}
+.modal.confirm-dialog {
+  width: min(400px, 100%);
+}
+.alert-dialog .modal-head,
+.confirm-dialog .modal-head {
+  min-height: 56px;
+}
+.alert-dialog .modal-head h2 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.al-chip {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  padding: 3px 9px;
+  border-radius: 6px;
+  background: var(--hover);
+}
+.al-body {
+  padding: 16px 20px 6px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.al-body hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: 4px 0;
+}
+.al-row {
+  display: grid;
+  grid-template-columns: 112px minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+}
+.al-label {
+  color: var(--muted);
+  line-height: 32px;
+}
+.al-value {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.al-value > .seg {
+  align-self: flex-start;
+}
+.al-note {
+  color: var(--faint);
+  font-size: 11.5px;
+}
+.alert-dialog .input {
+  height: 34px;
+}
+.input.readonly {
+  display: flex;
+  align-items: center;
+  background: var(--hover);
+  border-color: transparent;
+  color: var(--text);
+}
+.select-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+  cursor: pointer;
+}
+.select-btn span {
+  flex: 1;
+}
+.link-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 32px;
+  padding: 0 6px;
+  margin-left: -6px;
+  border-radius: 6px;
+  color: var(--text-strong);
+  align-self: flex-start;
+}
+.link-btn:hover,
+.link-btn.active {
+  background: var(--hover);
+}
+.checks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 7px;
+}
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+.check input {
+  accent-color: var(--accent);
+  width: 15px;
+  height: 15px;
+}
+.check small {
+  color: var(--warn);
+}
+.al-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 20px 16px;
+  border-top: 1px solid var(--line);
+}
+.al-foot .spacer {
+  flex: 1;
+}
+.btn-light {
+  height: 34px;
+  padding: 0 16px;
+  background: var(--text-strong);
+  color: var(--app);
+  font-weight: 600;
+}
+.btn-light:not(:disabled):hover {
+  background: color-mix(in srgb, var(--text-strong) 85%, var(--app));
+  color: var(--app);
+}
+.btn.danger-icon {
+  color: var(--down);
+  border: 1px solid color-mix(in srgb, var(--down) 45%, transparent);
+}
+.btn.danger-icon:hover {
+  background: color-mix(in srgb, var(--down) 14%, transparent);
+  color: var(--down);
+}
+.confirm-dialog .btn-danger {
+  height: 34px;
+  padding: 0 16px;
+  background: var(--down);
+  color: #fff;
+  font-weight: 600;
+}
+.confirm-text {
+  margin: 0;
+  padding: 16px 20px;
+  line-height: 1.5;
+}
+.confirm-backdrop {
+  z-index: 48;
+}
+.alert-dialog .result:empty,
+.confirm-dialog .result:empty {
+  display: none;
+}
+.confirm-dialog .result {
+  padding: 0 20px;
+}
+.select-menu .menu-item {
+  min-height: 34px;
+}
+.trigger-menu .menu-item {
+  flex-wrap: wrap;
+  padding: 7px 10px;
+  row-gap: 2px;
+}
+.menu-sub {
+  flex-basis: 100%;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.expiry-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 240px;
+}
+.expiry-menu .input {
+  margin-bottom: 4px;
+}
+
+/* Panel */
+
+.panel-view {
+  display: contents;
+}
+.alerts-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+.alerts-panel .panel-head {
+  justify-content: space-between;
+}
+.al-tabs .btn {
+  height: 24px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+.al-list {
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1;
+}
+.al-item,
+.al-event {
+  border-bottom: 1px solid var(--line);
+  padding: 9px 10px 9px 12px;
+}
+.al-item {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+}
+.al-item:hover {
+  background: var(--hover);
+}
+.al-dot {
+  width: 8px;
+  height: 8px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--up);
+}
+.status-stopped .al-dot {
+  background: var(--warn);
+}
+.status-triggered .al-dot,
+.status-expired .al-dot {
+  background: var(--faint);
+}
+.al-name {
+  color: var(--text-strong);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.al-facts {
+  color: var(--muted);
+  font-size: 11.5px;
+  margin-top: 2px;
+}
+.al-actions {
+  display: flex;
+  gap: 2px;
+  opacity: 0.35;
+}
+.al-item:hover .al-actions,
+.al-item:focus-within .al-actions {
+  opacity: 1;
+}
+@media (hover: none) {
+  .al-actions {
+    opacity: 1;
+  }
+}
+.al-actions .btn {
+  width: 26px;
+  height: 26px;
+}
+.al-event-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 3px;
+}
+.al-time {
+  color: var(--muted);
+  font-size: 11.5px;
+  flex: 1;
+}
+.al-cross.up {
+  color: var(--up);
+}
+.al-cross.down {
+  color: var(--down);
+}
+.al-badge {
+  display: inline-grid;
+  place-items: center;
+  color: var(--muted);
+}
+.al-badge.ok {
+  color: var(--up);
+}
+.al-badge.bad {
+  color: var(--warn);
+}
+.al-late {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 4px;
+  color: var(--warn);
+  font-size: 11.5px;
+}
+
+/* Toasts */
+
+.toasts {
+  position: absolute;
+  top: 40px;
+  right: 84px;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(340px, calc(100vw - 32px));
+}
+.toast {
+  display: flex;
+  gap: 10px;
+  padding: 12px 14px;
+  background: var(--raised);
+  border: 1px solid var(--line-strong);
+  border-left: 3px solid var(--accent);
+  border-radius: 9px;
+  box-shadow: var(--shadow);
+  cursor: pointer;
+  animation: toast-in 0.18s ease-out;
+}
+.toast > .icon {
+  color: var(--accent);
+  flex: none;
+  margin-top: 1px;
+}
+.toast-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.toast-text strong {
+  color: var(--text-strong);
+}
+.toast-text small {
+  color: var(--warn);
+}
+@keyframes toast-in {
+  from {
+    transform: translateY(-6px);
+    opacity: 0;
+  }
+}
+@media (max-width: 760px) {
+  .toasts {
+    right: 16px;
+  }
+  .al-row {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+  .al-label {
+    line-height: 1.3;
+  }
+}

@@ -60,7 +60,7 @@ export class StyleToolbar {
       this.dashBtn,
       this.labelBtn,
       h("div", { class: "sep" }),
-      button({ icon: "bell", title: "Alerts on lines: coming in M6", disabled: true }),
+      button({ icon: "bell", title: "Add alert on this line (Alt+A)", onClick: () => this.current && this.ctl.onAddAlert(this.current) }),
       button({ icon: "copy", title: "Clone", onClick: () => this.current && void this.ctl.clone(this.current.id) }),
       button({ icon: "trash", title: "Delete (Del)", onClick: () => this.current && void this.ctl.remove(this.current.id) }),
     );

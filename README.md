@@ -20,8 +20,8 @@ Self-hosted charting and alerting server for forex and metals. It runs 24/7 on y
 | M2 Aggregation, live candles, API, websocket | done |
 | M3 Web chart | done |
 | M4 Setup wizard, login, settings | done |
-| M5 Drawings | done, waiting on owner acceptance checks |
-| M6 Alerts and Telegram | not started |
+| M5 Drawings | done |
+| M6 Alerts and Telegram | done, waiting on owner acceptance checks |
 | M7 Indicators, chart types, layouts | not started |
 | M8 Packaging and deployment | not started |
 | M9 Second instrument (EURUSD) | not started |
@@ -104,7 +104,9 @@ Works:
 
 - Drawings (M5): horizontal line, trendline, ray and extended line from the left toolbar. Click point 1, click point 2 (or press, drag, release); hover shows the handles; drag a handle or the whole line; Delete removes; right-click for style, label, clone and delete; a floating toolbar sets colour, width and dash. Hold Ctrl while drawing to snap to the bar's open, high, low or close. Drawings are stored on the server and every open browser sees changes at once. The eye hides them; the bin deletes all of them on the instrument.
 
-Not yet: alerts and the Telegram notifier (M6; "Add alert" on a line is shown disabled; the Telegram test button already works), indicators and other chart types (M7). Their buttons are visible but disabled.
+- Alerts (M6): right-click a line and choose Add alert (or select it and press Alt+A, or use the Alert button; without a selected line the alert is on a price level). Crossing, crossing up or down; once, once per bar, on bar close or at most once a minute; bid, mid or ask; an expiry. Alerts run in the server whether a browser is open or not, on exactly the line drawn, and go to Telegram (set it up in Settings) and to open browsers. The bell in the right column lists them (stop, restart, edit, delete) with a log of what fired and whether Telegram got it. If the computer slept, the feed dropped or the server was off, the missed minutes are checked as soon as it is back and those alerts arrive marked as late; after sleep Telegram also tells you how long the server was frozen. Telegram also gets "engine started" and "feed stalled" / "feed recovered" messages.
+
+Not yet: indicators and other chart types (M7). Their buttons are visible but disabled.
 
 - Deep history: 1h, 4h, daily and weekly charts go back as far as the broker has H1 (gold on OANDA: March 2006). The server downloads it in the background on first start. Complete 4h/D/W bars are cached, so these charts load in milliseconds.
 

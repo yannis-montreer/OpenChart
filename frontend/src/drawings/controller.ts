@@ -64,6 +64,8 @@ export class DrawingController {
   onToolChange: (tool: Tool) => void = () => {};
   onStyleUsed: (style: DrawingStyle) => void = () => {};
   onHiddenChange: (hidden: boolean) => void = () => {};
+  /** "Add alert on this line" (menu, style toolbar). */
+  onAddAlert: (drawing: Drawing) => void = () => {};
   onError: (text: string) => void = (text) => console.warn(text);
 
   private drawings = new Map<string, Drawing>();
@@ -539,7 +541,7 @@ export class DrawingController {
       h(
         "div",
         { style: "min-width:230px" },
-        menuItem({ label: `Add alert on ${name}…`, icon: "bell", hint: "M6", disabled: true }),
+        menuItem({ label: `Add alert on ${name}…`, icon: "bell", hint: "Alt+A", onClick: () => this.onAddAlert(d) }),
         h("hr"),
         menuItem({ label: "Edit style…", icon: "palette", onClick: () => this.toolbar.openColor() }),
         menuItem({ label: d.label ? "Edit label…" : "Add label…", icon: "text", onClick: () => this.toolbar.openLabel() }),

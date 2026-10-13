@@ -67,6 +67,22 @@ Before setup, the two test routes and `/api/setup/defaults` also work without a 
 
 Errors: `400` unknown timeframe or price, `404` unknown instrument, `422` invalid parameter.
 
+## Alerts
+
+| Route | |
+|---|---|
+| `GET /api/alerts` | all alerts |
+| `POST /api/alerts` | `{instrument, type, drawing_id? , level?, direction?, trigger_price?, trigger_mode?, timeframe?, frequency?, cooldown_s?, name?, expires_at?, notify?}` → the alert |
+| `PUT /api/alerts/{id}` | any of the fields above, `status: "active" \| "stopped"`, `clear_expiry` |
+| `DELETE /api/alerts/{id}` | delete one |
+| `GET /api/alerts/events?limit=&alert_id=` | event log, newest first |
+
+- `type`: `line_cross` (needs `drawing_id`, a line on that instrument) or `level_cross` (needs `level`).
+- `direction`: `cross` (default), `up`, `down`. `trigger_price`: `bid`, `ask`, `mid` (default). `trigger_mode`: `touch` (every tick, default) or `candle_close` (the bar's close at the close time). `timeframe`: the bar for `once_per_bar` and `candle_close` (`1m` or more). `frequency`: `once` (default), `once_per_bar`, `repeating` (with `cooldown_s`). `notify`: `["telegram", "app"]` (default).
+- `status`: `active`, `triggered` (a `once` alert fired), `expired`, `stopped`. Saving an alert as `active` or changing its condition re-arms it (it needs one fresh price first).
+- An event: `{id, alert_id, ts, price, line_value, cross, message, late, detected_at, delivered, attempts, error}`. `late` is `wake`, `reconnect` or `restart` when the cross was found from stored history after missed time; `ts` is when it happened, `detected_at` when the server saw it.
+- Deleting a line deletes its alerts.
+
 ## Drawings
 
 | Route | |
@@ -105,6 +121,9 @@ On connect the server sends `hello` `{api_version, server_time}` and then `statu
 | `candle` `{instrument, timeframe, price, candle: {t, o, h, l, c, v}, closed}` | on every tick (`closed: false`, the forming bar) and once when the bar ends (`closed: true`). A subscription immediately receives the current forming bar if there is one |
 | `status` | every 5 s and on feed state changes, same body as `GET /api/status` |
 | `drawing_changed` `{op: create\|update\|delete, drawing}` | any drawing changed, from any browser |
+| `alert_changed` `{op, alert}` | an alert was created, edited, stopped, expired or deleted |
+| `alert_triggered` `{alert, event}` | an alert fired |
+| `alert_event` `{event}` | the delivery state of an event changed |
 | `closures` `{instrument, closures}` | learned market closures changed (a holiday passed): `[[start, end], ...]` in UTC epoch seconds |
 | `error` `{error}` | invalid message |
 
