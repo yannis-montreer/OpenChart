@@ -1,5 +1,6 @@
 """Setup, login, sessions, settings and secrets (SPEC sections 8 and 17)."""
 
+import asyncio
 import json
 import logging
 
@@ -17,6 +18,7 @@ from openchart.settings import (
     SettingsStore,
     open_secrets,
 )
+from openchart.store.sqlite import Database
 from tests.conftest import PASSWORD, SETUP, TOKEN, run_setup
 
 TELEGRAM_TOKEN = "123456:TELEGRAM-secret-token-9876"
@@ -228,10 +230,63 @@ def test_rotating_the_oanda_token_is_checked_first(client):
     bad = client.put("/api/settings", json={"oanda_token": "expired-token"})
     assert bad.status_code == 400
     assert client.harness.secrets.values["oanda_token"] == TOKEN  # unchanged
-    good = client.put("/api/settings", json={"oanda_token": TOKEN, "oanda_account_id": "101-2"})
+    good = client.put("/api/settings", json={"oanda_token": TOKEN})
     assert good.status_code == 200
-    assert good.json()["oanda"]["account_id"] == "101-2"
+    assert client.harness.secrets.values["oanda_token"] == TOKEN
     assert len(client.harness.factory_calls) > calls
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"oanda_environment": "live"},
+        {"oanda_account_id": "101-001-9-001"},
+        {"oanda_environment": "live", "oanda_account_id": "001-001-9-001", "oanda_token": TOKEN},
+    ],
+)
+def test_switching_oanda_account_with_stored_data_is_refused(client, change):
+    calls = len(client.harness.factory_calls)
+    out = client.put("/api/settings", json=change)
+    assert out.status_code == 409
+    assert "mix two price feeds" in out.json()["detail"]
+    assert "101-001-1-001" in out.json()["detail"]  # says which account the data is from
+    assert client.get("/api/settings").json()["oanda"]["account_id"] == "101-001-1-001"
+    assert len(client.harness.factory_calls) == calls  # refused before any broker call
+
+
+def test_switching_oanda_account_without_stored_data_is_allowed(harness):
+    from fastapi.testclient import TestClient
+
+    from openchart.api.app import create_app
+
+    harness.server.run_feed = False  # nothing gets stored
+    with TestClient(create_app(harness.server)) as c:
+        c.server = harness.server
+        assert run_setup(c).status_code == 200
+        out = c.put("/api/settings", json={"oanda_environment": "live", "oanda_token": TOKEN})
+        assert out.status_code == 200
+        assert out.json()["oanda"]["environment"] == "live"
+
+
+def test_the_wizard_refuses_another_account_for_existing_data(harness):
+    from fastapi.testclient import TestClient
+
+    from openchart.api.app import create_app
+
+    harness.seed_candles()
+
+    async def saved():
+        async with await Database.open(harness.config.db_path) as db:
+            settings = SettingsStore(db.conn)
+            await settings.set("oanda_environment", "practice")
+            await settings.set("oanda_account_id", "101-001-1-001")
+
+    asyncio.run(saved())
+    with TestClient(create_app(harness.server)) as c:  # no password yet: the wizard
+        c.server = harness.server
+        out = run_setup(c, oanda_environment="live", oanda_account_id="001-001-1-001")
+        assert out.status_code == 409 and "mix two price feeds" in out.json()["detail"]
+        assert run_setup(c).status_code == 200  # the same account is fine
 
 
 def test_clear_telegram_and_other_settings(client):
