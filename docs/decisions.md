@@ -50,3 +50,20 @@ Choices made where `SPEC.md` was open or ambiguous (SPEC section 18, rule 7). Ne
 - **`openchart run` now starts the HTTP server** (API, websocket, feed) instead of the bare feed. If the first gap-fill fails (network down at boot), the feed retries every 30 s while the API keeps serving stored data. If the credentials are rejected, the feed stops and `/api/status` shows the error.
 - **No candle cache table yet.** Daily and weekly requests resample all stored M1 (about 1.4 s for 2 years of gold); add the optional cache if the chart needs it.
 - **The derived-vs-OANDA candle check is a live test** (`pytest -m live`), so it runs with the owner's credentials and not in CI. No market-data fixtures are committed (SPEC section 14).
+
+## M3
+
+- **Frontend stack:** Vite 8 + TypeScript 7, Lightweight Charts 5.2, Lucide icons, Vitest, Node 24 (`frontend/.nvmrc`). Exact versions are pinned. No UI framework: the shell is plain DOM code.
+- **The build is not committed.** `npm run build` writes to `src/openchart/web/` (git-ignored, but included in the wheel). Without a build the server shows a one-page hint at `/`. Release packaging (M8) builds it.
+- **Look and feel:** the layout follows the owner's reference screenshots (top bar, left tool column, chart, bottom bar, right strip with a collapsible watchlist, dark navy chart on near-black chrome, compact menus). Palette, CSS, icons (Lucide) and code are original. The system UI font stack is used, so nothing loads from the internet.
+- **Lightweight Charts attribution** is its built-in logo link (`attributionLogo: true`), plus links in the About popover and `NOTICE`. Lucide's ISC licence (and MIT for its Feather-derived icons) is in `NOTICE`.
+- **`/api/meta`** gives the client the timeframes and the trading-day anchor, so the frontend hardcodes neither.
+- **Display timezone:** the chart library draws UTC, so intraday bar times are shifted by the display zone's offset at each bar. In the hour a zone repeats when leaving DST, the repeated bars are dropped from the display; for forex and metals that hour falls on a weekend. Daily bars are shown on their trading date; weekly bars on the Monday of their week.
+- **Bid/Ask and countdown labels** are drawn as an HTML stack anchored to the last-price label (Ask above, then the countdown and Bid below). The chart's own labels shift to avoid each other, so overlaying separate labels on them collided.
+- **Keeping the chart right after an outage:** on reconnect, and then once a minute while connected, the page re-fetches its last few bars and merges them. Missing bars are inserted (the chart is redrawn in place, keeping the view), and tick-built bars are replaced by the broker's once the server's refresh stores them. An incomplete bar from REST never overwrites the live forming bar, because REST builds it from stored M1 only.
+- **The client treats a socket that has been silent for 15 s as dead** (the server sends status every 5 s), which covers laptop sleep and dead Wi-Fi.
+- **Client preferences** (instrument, timeframe, price, theme, timezone, favourite timeframes, panel open) are kept in the browser's localStorage. Layouts saved on the server come in M7.
+- **Buttons for later milestones** (drawings, alerts, indicators, chart type, settings) are shown disabled with a "coming in Mx" tooltip, so the layout is already the final one.
+- **`window.openchart`** exposes the app object for debugging in the browser console.
+- **The Python wheel ships the built UI** through `artifacts` in `pyproject.toml`.
+- **The broker's limit on concurrent price streams** (practice: about two per account) surfaced during testing. The stream log now says "no answer to the stream request … Brokers limit concurrent price streams" instead of a generic timeout, and the README says to run one server per account.

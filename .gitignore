@@ -28,11 +28,14 @@ dist/
 .coverage
 htmlcov/
 
-# Frontend
+# Frontend (the build lands in src/openchart/web and is produced by `npm run build`)
 node_modules/
 frontend/dist/
-src/openchart/web/*
-!src/openchart/web/.gitkeep
+src/openchart/web/
+
+# Machine-specific tool config
+.claude/launch.json
+.claude/settings.local.json
 
 # Editors / OS
 .vscode/
