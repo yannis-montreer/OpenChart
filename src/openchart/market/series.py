@@ -1,4 +1,11 @@
-"""Historical candle series for the API: stored M1 (or ticks) resampled to a timeframe."""
+"""Historical candle series for the API.
+
+- Sub-minute bars: from stored ticks.
+- 1m to 30m: from stored M1.
+- 1h: from H1 where M1 does not reach, M1 from there.
+- 4h, D, W: complete bars from the cache (`market.cache`), the forming bar computed
+  from base data on the fly.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +17,7 @@ import numpy as np
 import pandas as pd
 
 from openchart.market.aggregate import PRICES, empty_frame, resample, ticks_frame
+from openchart.market.cache import CandleCache, is_cached
 from openchart.market.sessions import bar_bounds
 from openchart.market.timeframes import Kind, Timeframe
 from openchart.providers.base import MID_DECIMALS, Tick
@@ -33,8 +41,10 @@ class SeriesReader:
         store: CandleStore,
         ticks_root: str | Path | None = None,
         buffered_ticks=None,  # callable(instrument) -> list[Tick] not yet written to disk
+        cache: CandleCache | None = None,
     ):
         self.store = store
+        self.cache = cache
         self.ticks_root = Path(ticks_root) if ticks_root else None
         self.buffered_ticks = buffered_ticks
 
@@ -65,10 +75,12 @@ class SeriesReader:
 
         if tf.kind is Kind.TICK:
             bars = await self._from_ticks(source, instrument, tf, price, start, end, limit)
+        elif self.cache is not None and is_cached(tf):
+            bars = await self._cached(source, instrument, tf, price, start, end, limit)
         elif start is not None:
-            bars = await self._from_m1(source, instrument, tf, price, start, end)
+            bars = await self._from_base(source, instrument, tf, price, start, end)
         else:
-            bars = await self._latest_from_m1(source, instrument, tf, price, end, limit)
+            bars = await self._latest_from_base(source, instrument, tf, price, end, limit)
         bars = (bars.head(limit) if start is not None else bars.tail(limit)).reset_index(drop=True)
         if bars.empty:
             bars["complete"] = pd.Series(dtype=bool)
@@ -79,26 +91,65 @@ class SeriesReader:
         bars["complete"] = complete
         return bars
 
-    async def _from_m1(self, source, instrument, tf, price, start, end) -> pd.DataFrame:
-        # A bar that starts before `start` is excluded rather than returned cut in half.
-        lo, hi = bar_bounds(start, tf)
-        frame = await self.store.read_m1_frame(
-            source, instrument, lo if lo == start else hi, end, price
-        )
-        return resample(frame, tf)
+    @staticmethod
+    def _uses_h1(tf: Timeframe) -> bool:
+        return tf.kind is not Kind.TICK and tf.seconds >= 3600
 
-    async def _latest_from_m1(self, source, instrument, tf, price, end, limit) -> pd.DataFrame:
-        first = await self.store.first_ts(source, instrument)
+    async def _from_base(self, source, instrument, tf, price, start, end) -> pd.DataFrame:
+        # Bars are never cut: one that starts before `start` is left out, and one that
+        # starts before `end` is returned whole.
+        lo, hi = bar_bounds(start, tf)
+        read_end = bar_bounds(end - 1, tf)[1]
+        frame = await self.store.read_base_frame(
+            source, instrument, lo if lo == start else hi, read_end, price, self._uses_h1(tf)
+        )
+        bars = resample(frame, tf)
+        return bars[bars["ts"] < end].reset_index(drop=True)
+
+    async def _latest_from_base(self, source, instrument, tf, price, end, limit) -> pd.DataFrame:
+        first = await self.store.first_base_ts(source, instrument, self._uses_h1(tf))
         if first is None:
             return empty_frame()
         # Calendar span for `limit` bars, padded for weekends; doubled until enough.
         span = int(limit * tf.seconds * 1.5) + 3 * 86400
         while True:
             start = max(first, end - span)
-            bars = await self._from_m1(source, instrument, tf, price, bar_bounds(start, tf)[0], end)
+            bars = await self._from_base(
+                source, instrument, tf, price, bar_bounds(start, tf)[0], end
+            )
             if len(bars) >= limit or start <= first:
                 return bars
             span *= 2
+
+    async def _cached(self, source, instrument, tf, price, start, end, limit) -> pd.DataFrame:
+        """Cached complete bars, plus bars after the cache computed from base data."""
+        assert self.cache is not None
+        await self.cache.extend(source, instrument, tf)
+        last = await self.store.cache_last_ts(source, instrument, tf.name)
+        cached_until = bar_bounds(last, tf)[1] if last is not None else None
+        if cached_until is None:  # nothing cached: no base data, or none complete yet
+            if start is not None:
+                return await self._from_base(source, instrument, tf, price, start, end)
+            return await self._latest_from_base(source, instrument, tf, price, end, limit)
+
+        tail = empty_frame()
+        if end > cached_until:
+            tail = await self._from_base(
+                source, instrument, tf, price, max(start or 0, cached_until), end
+            )
+        if start is not None:
+            head = await self.store.read_cache(
+                source, instrument, tf.name, start, min(end, cached_until), price, limit
+            )
+        else:
+            want = max(0, limit - len(tail))
+            head = await self.store.read_cache(
+                source, instrument, tf.name, 0, min(end, cached_until), price, want, latest=True
+            )
+        parts = [p for p in (head, tail) if not p.empty]
+        if not parts:
+            return empty_frame()
+        return pd.concat(parts, ignore_index=True) if len(parts) > 1 else parts[0]
 
     async def _from_ticks(self, source, instrument, tf, price, start, end, limit) -> pd.DataFrame:
         if start is None:

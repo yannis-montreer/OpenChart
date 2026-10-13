@@ -14,7 +14,8 @@ from pathlib import Path
 
 from openchart import __version__
 from openchart.config import Config, ConfigError, load_config
-from openchart.market.backfill import backfill
+from openchart.market.backfill import backfill, deep_fill
+from openchart.market.cache import CandleCache
 from openchart.market.gaps import find_gaps
 from openchart.market.instruments import default_hours
 from openchart.providers.base import AuthError, Provider, ProviderError
@@ -112,6 +113,25 @@ async def _cmd_backfill(config: Config, args: argparse.Namespace) -> int:
             f"({result.written:,} written incl. updates), {after:,} total, "
             f"{_fmt(result.first_ts)} to {_fmt(result.last_ts)}"
         )
+        if args.deep:
+            print(f"Deep H1 history for {args.instrument}, as far back as the broker has it")
+            deep = await deep_fill(ctx.provider, ctx.store, args.instrument, progress=progress)
+            print(f"\n  H1 from {_fmt(deep.first_ts)} to {_fmt(deep.last_ts)}")
+            print("Building the 4h/D/W cache")
+            n = await CandleCache(ctx.store).extend_all(ctx.provider.name, args.instrument)
+            print(f"  {n:,} bars cached")
+    return 0
+
+
+async def _cmd_rebuild_cache(config: Config, args: argparse.Namespace) -> int:
+    async with _context(config, need_provider=False) as ctx:
+        cache = CandleCache(ctx.store)
+        rows = await ctx.store.instruments()
+        for row in rows:
+            if args.instrument and row.instrument != args.instrument:
+                continue
+            n = await cache.rebuild(row.source, row.instrument)
+            print(f"{row.source}/{row.instrument}: {n:,} 4h/D/W bars rebuilt")
     return 0
 
 
@@ -132,6 +152,15 @@ async def _cmd_stats(config: Config, args: argparse.Namespace) -> int:
                 if open_hours:
                     line += f", {n / (open_hours * 60):.1%} of expected trading minutes"
             print(line)
+            h1 = await ctx.store.count(row.source, row.instrument, "H1")
+            if h1:
+                h1_first = await ctx.store.first_ts(row.source, row.instrument, "H1")
+                h1_last = await ctx.store.last_ts(row.source, row.instrument, "H1")
+                print(f"  {h1:,} H1 candles (deep history), {_fmt(h1_first)} to {_fmt(h1_last)}")
+            for name in ("4h", "1D", "1W"):
+                cached = await ctx.store.cache_count(row.source, row.instrument, name)
+                if cached:
+                    print(f"  {cached:,} cached {name} bars")
     return 0
 
 
@@ -184,6 +213,7 @@ COMMANDS = {
     "backfill": _cmd_backfill,
     "stats": _cmd_stats,
     "gaps": _cmd_gaps,
+    "rebuild-cache": _cmd_rebuild_cache,
     "run": _cmd_run,
 }
 
@@ -197,7 +227,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("backfill", help="download M1 history (idempotent, resumable)")
     p.add_argument("instrument", help="for example XAU_USD")
     p.add_argument("--years", type=float, help="history depth (default from config: 2)")
+    p.add_argument(
+        "--deep", action="store_true", help="also download H1 history as far back as available"
+    )
     sub.add_parser("stats", help="row counts and coverage per instrument")
+    p = sub.add_parser("rebuild-cache", help="recompute the cached 4h/D/W bars")
+    p.add_argument("instrument", nargs="?", help="default: all instruments")
     p = sub.add_parser("gaps", help="list holes in stored history")
     p.add_argument("instrument")
     p.add_argument("--source", default="oanda")

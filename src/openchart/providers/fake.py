@@ -26,6 +26,29 @@ STALL = object()
 Script = list[StreamEvent | BaseException | object]
 
 
+def _merge(a: OHLC, b: OHLC) -> OHLC:
+    return OHLC(a.o, max(a.h, b.h), min(a.l, b.l), b.c)
+
+
+def aggregate_candles(candles: list[Candle], seconds: int) -> list[Candle]:
+    """Combine candles into `seconds`-long epoch-aligned candles (e.g. M1 to H1)."""
+    out: list[Candle] = []
+    for c in candles:
+        ts = c.ts - c.ts % seconds
+        if out and out[-1].ts == ts:
+            p = out[-1]
+            out[-1] = Candle(
+                ts,
+                _merge(p.bid, c.bid),
+                _merge(p.ask, c.ask),
+                _merge(p.mid, c.mid),
+                p.volume + c.volume,
+            )
+        else:
+            out.append(Candle(ts, c.bid, c.ask, c.mid, c.volume))
+    return out
+
+
 def synthetic_m1(
     start_ts: int, end_ts: int, hours: TradingHours | None = None, base: float = 2000.0
 ) -> list[Candle]:
@@ -51,8 +74,10 @@ class FakeProvider:
         candles: dict[str, Iterable[Candle]] | None = None,
         sessions: Iterable[Script] | None = None,
         instruments: list[InstrumentInfo] | None = None,
+        h1: dict[str, Iterable[Candle]] | None = None,
     ):
         self.candles = {k: sorted(v, key=lambda c: c.ts) for k, v in (candles or {}).items()}
+        self.h1 = {k: sorted(v, key=lambda c: c.ts) for k, v in (h1 or {}).items()}
         self.sessions = list(sessions or [])
         self._instruments = instruments or []
         self.fetch_calls = 0
@@ -66,7 +91,8 @@ class FakeProvider:
     ) -> AsyncIterator[Candle]:
         self.fetch_calls += 1
         start_ts, end_ts = start.timestamp(), end.timestamp()
-        for candle in self.candles.get(instrument, []):
+        series = self.h1 if granularity == "H1" else self.candles
+        for candle in series.get(instrument, []):
             if start_ts <= candle.ts < end_ts and candle.complete:
                 yield candle
 

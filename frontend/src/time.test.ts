@@ -71,5 +71,6 @@ describe("formatting", () => {
     expect(formatCountdown(299.7)).toBe("04:59");
     expect(formatCountdown(3723)).toBe("1:02:03");
     expect(formatCountdown(-5)).toBe("00:00");
+    expect(formatCountdown(84 * 3600 + 31 * 60)).toBe("3d 12h");
   });
 });

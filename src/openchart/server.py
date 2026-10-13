@@ -9,6 +9,7 @@ from typing import Any
 
 from openchart.api.hub import Hub
 from openchart.config import Config
+from openchart.market.cache import CandleCache
 from openchart.market.candle_builder import CandleBuilder
 from openchart.market.feed import Feed
 from openchart.market.series import SeriesReader
@@ -45,12 +46,14 @@ class Server:
         self.source = self.provider.name if self.provider else DEFAULT_SOURCE
 
         self.builder = CandleBuilder()
+        self.cache = CandleCache(self.store)
         self.tick_writer = TickWriter(cfg.ticks_dir, self.source) if cfg.store_ticks else None
         self.hub = Hub(self.builder, status=self.status)
         self.reader = SeriesReader(
             self.store,
             cfg.ticks_dir if cfg.store_ticks else None,
             self.tick_writer.buffered if self.tick_writer else None,
+            cache=self.cache,
         )
 
         rows = await self.store.instruments(self.source, enabled_only=True)
@@ -61,6 +64,8 @@ class Server:
                 [r.instrument for r in rows],
                 tick_writer=self.tick_writer,
                 builder=self.builder,
+                cache=self.cache,
+                deep_history=cfg.deep_history,
                 backfill_years=cfg.backfill_years,
             )
             self.feed.tick_listeners.append(self.hub.on_tick)

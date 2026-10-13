@@ -90,3 +90,39 @@ async def test_derived_candles_match_oanda(provider, tf_name, period):
                 f"{price} {tf_name} bar at {c.ts}"
             )
             assert d.v == c.volume
+
+
+@pytest.mark.parametrize("tf_name", ["1D", "4h", "1W"])
+@pytest.mark.parametrize("period", list(DST_RANGES))
+async def test_bars_from_oanda_h1_equal_bars_from_oanda_m1(provider, tf_name, period):
+    """Deep history (H1) gives exactly the bars M1 gives, where both exist (SPEC section 6)."""
+    import pandas as pd
+
+    from openchart.market.aggregate import FULL_COLUMNS, resample_full
+    from openchart.market.timeframes import TIMEFRAMES
+
+    def frame(candles):
+        return pd.DataFrame(
+            [(c.ts, *c.bid, *c.ask, *c.mid, c.volume) for c in candles], columns=FULL_COLUMNS
+        )
+
+    tf = TIMEFRAMES[tf_name]
+    start, end = DST_RANGES[period]
+    m1 = [c async for c in provider.fetch_candles(INSTRUMENT, start, end)]
+    h1 = [c async for c in provider.fetch_candles(INSTRUMENT, start, end, "H1")]
+    from_m1 = resample_full(frame(m1), tf)
+    from_h1 = resample_full(frame(h1), tf)
+    assert len(from_h1) >= 3
+    pd.testing.assert_frame_equal(from_h1, from_m1)
+
+
+async def test_deep_history_reaches_2006(provider):
+    """Probe: how far back OANDA has XAU_USD (2006-03-19 when this was written)."""
+    first = None
+    async for c in provider.fetch_candles(
+        INSTRUMENT, datetime(2000, 1, 1, tzinfo=UTC), datetime(2007, 1, 1, tzinfo=UTC), "H1"
+    ):
+        first = c
+        break
+    assert first is not None
+    assert datetime.fromtimestamp(first.ts, UTC) < datetime(2006, 12, 31, tzinfo=UTC)

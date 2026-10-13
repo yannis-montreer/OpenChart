@@ -65,6 +65,8 @@ class Config:
     oanda: OandaConfig = field(default_factory=OandaConfig)
     store_ticks: bool = True
     backfill_years: float = 2.0
+    # Download H1 history as far back as the provider has it (for 1h and above).
+    deep_history: bool = True
 
     @property
     def db_path(self) -> Path:
@@ -102,4 +104,5 @@ def load_config(env_file: str | os.PathLike[str] | None = ".env") -> Config:
         ),
         store_ticks=_bool(env.get("OPENCHART_STORE_TICKS", "true")),
         backfill_years=float(env.get("OPENCHART_BACKFILL_YEARS", "2")),
+        deep_history=_bool(env.get("OPENCHART_DEEP_HISTORY", "true")),
     )
