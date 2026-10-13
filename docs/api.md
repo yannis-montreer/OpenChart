@@ -71,7 +71,7 @@ Errors: `400` unknown timeframe or price, `404` unknown instrument, `422` invali
 
 | Route | |
 |---|---|
-| `GET /api/alerts` | all alerts |
+| `GET /api/alerts?instrument=&drawing_id=` | all alerts, or those of an instrument or a line (each with its `status`, which the line's bell shows) |
 | `POST /api/alerts` | `{instrument, type, drawing_id? , level?, direction?, trigger_price?, trigger_mode?, timeframe?, frequency?, cooldown_s?, name?, expires_at?, notify?}` → the alert |
 | `PUT /api/alerts/{id}` | any of the fields above, `status: "active" \| "stopped"`, `clear_expiry` |
 | `DELETE /api/alerts/{id}` | delete one |
@@ -81,7 +81,7 @@ Errors: `400` unknown timeframe or price, `404` unknown instrument, `422` invali
 - `direction`: `cross` (default), `up`, `down`. `trigger_price`: `bid`, `ask`, `mid` (default). `trigger_mode`: `touch` (every tick, default) or `candle_close` (the bar's close at the close time). `timeframe`: the bar for `once_per_bar` and `candle_close` (`1m` or more). `frequency`: `once` (default), `once_per_bar`, `repeating` (with `cooldown_s`). `notify`: `["telegram", "app"]` (default).
 - `status`: `active`, `triggered` (a `once` alert fired), `expired`, `stopped`. Saving an alert as `active` or changing its condition re-arms it (it needs one fresh price first).
 - An event: `{id, alert_id, ts, price, line_value, cross, message, late, detected_at, delivered, attempts, error}`. `late` is `wake`, `reconnect` or `restart` when the cross was found from stored history after missed time; `ts` is when it happened, `detected_at` when the server saw it.
-- Deleting a line deletes its alerts.
+- Deleting a line deletes its alerts; deleting an alert leaves its line.
 
 ## Drawings
 

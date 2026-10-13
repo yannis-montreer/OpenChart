@@ -88,8 +88,13 @@ def alert_routes(server: Server) -> APIRouter:
         return drawing.type if drawing else None
 
     @router.get("")
-    async def list_alerts(instrument: str | None = None) -> list[dict[str, Any]]:
-        return [a.to_json() for a in await service().store.list(instrument)]
+    async def list_alerts(
+        instrument: str | None = None, drawing_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        alerts = await service().store.list(instrument)
+        if drawing_id is not None:
+            alerts = [a for a in alerts if a.drawing_id == drawing_id]
+        return [a.to_json() for a in alerts]
 
     @router.get("/events")
     async def events(limit: int = 100, alert_id: str | None = None) -> list[dict[str, Any]]:

@@ -238,7 +238,10 @@ class AlertService:
             await self.store.save(alert, touch=False)
             self.broadcast("update", alert)
             if alert.status == "expired" and "telegram" in alert.notify:
-                self.dispatcher.system(f"⌛ Alert expired: {alert.name or alert.id}")
+                self.dispatcher.system(
+                    f"⌛ Alert expired: {alert.name or alert.id}. It no longer watches"
+                    " the price; restart it or change its expiration in OpenChart."
+                )
         for instrument in list(self.engine.gaps):
             await self.catch_up(instrument)
         await self._report_freeze(now)

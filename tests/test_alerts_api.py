@@ -138,6 +138,56 @@ def test_an_alert_on_a_line_and_deleting_the_line(client):
     assert client.get("/api/alerts").json() == []
 
 
+def test_deleting_an_alert_leaves_its_line(client):
+    hline = {"instrument": "XAU_USD", "type": "hline", "points": [{"t": 1, "p": 2000.0}]}
+    drawing = client.post("/api/drawings", json=hline).json()
+    body = {"instrument": "XAU_USD", "type": "line_cross", "drawing_id": drawing["id"]}
+    first = client.post("/api/alerts", json=body).json()
+    second = client.post("/api/alerts", json={**body, "direction": "up"}).json()
+
+    with client.websocket_connect("/ws") as ws:
+        assert client.delete(f"/api/alerts/{first['id']}").status_code == 200
+        message = receive_until(ws, "alert_changed")
+        assert message["op"] == "delete" and message["alert"]["id"] == first["id"]
+    # The line and the other alert on it are untouched.
+    [kept] = client.get("/api/drawings", params={"instrument": "XAU_USD"}).json()
+    assert kept == drawing
+    by_line = client.get("/api/alerts", params={"drawing_id": drawing["id"]}).json()
+    assert [a["id"] for a in by_line] == [second["id"]]
+    assert client.server.alerts.engine.alerts.keys() == {second["id"]}
+
+
+def test_the_alert_state_of_a_line_is_exposed(client):
+    """The line's bell (toolbar and on the chart) shows the state of its alerts."""
+    seen = with_telegram(client)
+    hline = {"instrument": "XAU_USD", "type": "hline", "points": [{"t": 1, "p": 2000.0}]}
+    line = client.post("/api/drawings", json=hline).json()
+    other = client.post("/api/drawings", json=hline).json()
+    now = int(time.time())
+    body = {"instrument": "XAU_USD", "type": "line_cross", "drawing_id": line["id"]}
+    alert = client.post("/api/alerts", json={**body, "expires_at": now + 60}).json()
+
+    def states(drawing_id):
+        found = client.get("/api/alerts", params={"drawing_id": drawing_id}).json()
+        return [(a["id"], a["drawing_id"], a["status"]) for a in found]
+
+    assert states(line["id"]) == [(alert["id"], line["id"], "active")]
+    assert states(other["id"]) == []
+    client.put(f"/api/alerts/{alert['id']}", json={"status": "stopped"})
+    assert states(line["id"]) == [(alert["id"], line["id"], "stopped")]
+    client.put(f"/api/alerts/{alert['id']}", json={"status": "active"})
+
+    # It expires: the state says so, the browsers hear it and Telegram is told.
+    with client.websocket_connect("/ws") as ws:
+        client.portal.call(client.server.alerts.step, now + 61)
+        message = receive_until(ws, "alert_changed")
+    assert message["alert"]["status"] == "expired"
+    assert states(line["id"]) == [(alert["id"], line["id"], "expired")]
+    settle(client)
+    [expired] = [t for t in seen if t.startswith("⌛")]
+    assert alert["name"] in expired and "no longer watches" in expired
+
+
 def test_without_telegram_the_event_records_why(client):
     client.post("/api/alerts", json=LEVEL)
     now = time.time()
