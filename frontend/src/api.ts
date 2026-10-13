@@ -285,3 +285,114 @@ export const alertsApi = {
   update: (id: string, body: AlertInput) => request<Alert>("PUT", `api/alerts/${id}`, { body }),
   remove: (id: string) => request<Alert>("DELETE", `api/alerts/${id}`),
 };
+
+// Indicators (docs/api.md, docs/indicators.md)
+
+export type ParamType = "int" | "float" | "bool" | "choice" | "source" | "color" | "width";
+export type ParamValue = number | string | boolean;
+export type IndicatorParams = Record<string, ParamValue>;
+
+export interface IndicatorParam {
+  name: string;
+  type: ParamType;
+  default: ParamValue;
+  label: string;
+  group: "inputs" | "style";
+  min?: number;
+  max?: number;
+  step?: number;
+  choices?: string[];
+}
+
+export interface IndicatorOutput {
+  name: string;
+  label: string;
+  color: string; // the parameter holding its colour
+  width: string; // the parameter holding its width
+}
+
+export interface IndicatorDef {
+  id: string;
+  name: string;
+  title: string;
+  overlay: boolean;
+  params: IndicatorParam[];
+  outputs: IndicatorOutput[];
+  builtin: boolean;
+}
+
+export interface IndicatorCatalog {
+  indicators: IndicatorDef[];
+  errors: { file: string; error: string }[];
+  folder: string;
+}
+
+export interface IndicatorValues {
+  id: string;
+  params: IndicatorParams;
+  t: number[];
+  values: Record<string, (number | null)[]>;
+}
+
+export const indicatorsApi = {
+  catalog: () => get<IndicatorCatalog>("api/indicators"),
+  values: (
+    id: string,
+    q: { instrument: string; timeframe: string; price: Price; params: IndicatorParams; from?: number; to?: number; limit?: number },
+  ) => {
+    const query: Record<string, string> = {
+      instrument: q.instrument,
+      timeframe: q.timeframe,
+      price: q.price,
+      params: JSON.stringify(q.params),
+    };
+    if (q.from !== undefined) query.from = String(q.from);
+    if (q.to !== undefined) query.to = String(q.to);
+    if (q.limit !== undefined) query.limit = String(q.limit);
+    return get<IndicatorValues>(`api/indicators/${encodeURIComponent(id)}`, query);
+  },
+};
+
+// Layouts
+
+export type ChartType = "candles" | "bars" | "line" | "area" | "heikin_ashi";
+
+/** One indicator on the chart, as a layout stores it. */
+export interface IndicatorEntry {
+  id: string;
+  params: IndicatorParams;
+  visible: boolean;
+  price_labels: boolean;
+  legend_values: boolean;
+}
+
+export interface LayoutState {
+  instrument: string | null;
+  timeframe: string;
+  chart_type: ChartType;
+  price: Price;
+  theme: "dark" | "light";
+  panel_open: boolean;
+  panel_view: "watchlist" | "alerts";
+  indicators: IndicatorEntry[];
+}
+
+export interface LayoutSummary {
+  id: string;
+  name: string;
+  updated_at: number;
+  default: boolean;
+}
+
+export interface Layout extends LayoutSummary {
+  layout: LayoutState;
+}
+
+export const layoutsApi = {
+  list: () => get<LayoutSummary[]>("api/layouts"),
+  get: (id: string) => get<Layout>(`api/layouts/${id}`),
+  create: (body: { name: string; layout: LayoutState; default?: boolean }) => request<Layout>("POST", "api/layouts", { body }),
+  update: (id: string, body: { name?: string; layout?: LayoutState; default?: boolean }) =>
+    request<Layout>("PUT", `api/layouts/${id}`, { body }),
+  remove: (id: string) => request<LayoutSummary>("DELETE", `api/layouts/${id}`),
+};

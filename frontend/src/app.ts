@@ -5,23 +5,32 @@ import {
   api,
   CLIENT_API_VERSION,
   drawingsApi,
+  indicatorsApi,
+  layoutsApi,
   type Alert,
   type AlertEvent,
+  type ChartType,
   type Drawing,
+  type IndicatorCatalog,
   type Instrument,
+  type Layout,
+  type LayoutState,
   type Meta,
   type Price,
   type Status,
   type TimeframeMeta,
 } from "./api";
-import { ChartView, type ChartContext } from "./chart/view";
+import { IndicatorLayer } from "./chart/indicators";
+import { CHART_TYPES, ChartView, type ChartContext } from "./chart/view";
 import { DrawingController, type AlertPlace, type Tool } from "./drawings/controller";
 import { loadPrefs, resolveTimezone, savePrefs, type Prefs } from "./prefs";
 import { formatClock, offsetLabel } from "./time";
 import { openAlertDialog } from "./ui/alertDialog";
 import { AlertsPanel } from "./ui/alertsPanel";
 import { showLogin } from "./ui/auth";
-import { button, closeMenu, h, icon, installTooltips, menuItem, showMenu, showMenuAt } from "./ui/dom";
+import { button, closeMenu, h, icon, installTooltips, menuItem, showMenu, showMenuAt, type IconName } from "./ui/dom";
+import { openIndicatorPicker, openIndicatorSettings } from "./ui/indicatorDialogs";
+import { LayoutMenu } from "./ui/layoutMenu";
 import { SettingsDialog, type Section } from "./ui/settings";
 import { toast } from "./ui/toast";
 import { Watchlist } from "./ui/watchlist";
@@ -55,6 +64,14 @@ const RANGES: { label: string; tf: string; days?: number; ytd?: boolean }[] = [
 
 const STALE_TICKS = 120; // seconds without ticks before we call the market quiet
 
+const CHART_TYPE_ICONS: Record<ChartType, IconName> = {
+  candles: "candles",
+  bars: "ohlc",
+  line: "chartLine",
+  area: "chartArea",
+  heikin_ashi: "heikinAshi",
+};
+
 export class App {
   private prefs: Prefs = loadPrefs();
   private meta!: Meta;
@@ -71,11 +88,14 @@ export class App {
 
   chart!: ChartView;
   drawings!: DrawingController;
+  indicators!: IndicatorLayer;
+  private catalog: IndicatorCatalog = { indicators: [], errors: [], folder: "" };
+  private layoutMenu = new LayoutMenu({ state: () => this.layoutState(), apply: (l) => this.applyLayout(l) });
   private toolButtons = new Map<Tool, HTMLButtonElement>();
   private watchlist!: Watchlist;
   private alertsPanel = new AlertsPanel();
   private els = {} as Record<
-    "symbol" | "tfGroup" | "conn" | "status" | "clock" | "tz" | "priceSeg" | "panel" | "panelBtn" | "alertsBtn" | "wlBox" | "chartArea" | "banner",
+    "symbol" | "tfGroup" | "conn" | "status" | "clock" | "tz" | "priceSeg" | "panel" | "panelBtn" | "alertsBtn" | "wlBox" | "chartArea" | "banner" | "typeBtn" | "themeBtn",
     HTMLElement
   >;
 
@@ -85,8 +105,16 @@ export class App {
     document.documentElement.dataset.theme = this.prefs.theme;
     installTooltips();
     this.build();
+    let defaultLayout: Layout | undefined;
     try {
       [this.meta, this.instruments] = await Promise.all([api.meta(), api.instruments()]);
+      const [catalog, layouts] = await Promise.all([
+        indicatorsApi.catalog().catch(() => this.catalog),
+        this.layoutMenu.load().catch(() => []),
+      ]);
+      this.catalog = catalog;
+      const start = layouts.find((l) => l.default);
+      if (start) defaultLayout = await layoutsApi.get(start.id).catch(() => undefined);
     } catch (err) {
       this.showBanner(`Cannot reach the OpenChart server: ${(err as Error).message}`, "bad");
       window.setTimeout(() => location.reload(), 10000);
@@ -94,6 +122,20 @@ export class App {
     }
     this.serverOffset = this.meta.server_time - Date.now() / 1000;
     this.checkVersion(this.meta.api_version);
+    this.indicators.setCatalog(this.catalog.indicators);
+    // The default layout loads on start; without one, the chart is as this browser left it.
+    if (defaultLayout) this.takeLayout(defaultLayout);
+    const known = this.layoutMenu.has(this.prefs.layoutId);
+    this.layoutMenu.setCurrent(known ? this.prefs.layoutId : null);
+    this.layoutMenu.onCurrentChange = (id) => {
+      this.prefs.layoutId = id;
+      savePrefs(this.prefs);
+    };
+    this.applyTheme();
+    this.chart.setChartType(this.prefs.chartType);
+    this.renderChartType();
+    this.showPanel();
+    this.indicators.setEntries(this.prefs.indicators, false);
     this.instrument =
       this.instruments.find((i) => i.instrument === this.prefs.instrument) ??
       this.instruments.find((i) => i.enabled) ??
@@ -116,6 +158,7 @@ export class App {
       void this.chart.resync();
       void this.drawings.reload(); // changes made while we were away
       void this.alertsPanel.load();
+      void this.layoutMenu.load().catch(() => undefined);
     };
     // Once a minute, re-check the last bars against the server. This picks up bars that
     // were forming while we (or the server) were disconnected, which the server stores
@@ -155,15 +198,17 @@ export class App {
     this.els.symbol = h("button", { class: "btn symbol-btn", type: "button", "data-tip": "Change instrument" });
     this.els.symbol.addEventListener("click", () => this.openSymbolMenu());
     this.els.tfGroup = h("div", { class: "tf-group", role: "group", "aria-label": "Timeframe" });
-    const soon = (what: string, m: string) => `${what}: coming in ${m}`;
     this.els.conn = h("div", { class: "conn", role: "status" });
+    this.els.typeBtn = button({ icon: "candles", title: "Chart type", class: "hide-narrow" });
+    this.els.typeBtn.addEventListener("click", () => this.openChartTypeMenu());
+    this.els.themeBtn = button({ icon: "sun", title: "Switch theme", onClick: () => this.setTheme(this.prefs.theme === "dark" ? "light" : "dark") });
     topbar.append(
       this.els.symbol,
       h("div", { class: "sep" }),
       this.els.tfGroup,
       h("div", { class: "sep hide-narrow" }),
-      button({ icon: "candles", title: soon("Chart type", "M7"), disabled: true, class: "hide-narrow" }),
-      button({ icon: "search", label: "Indicators", title: soon("Indicators", "M7"), disabled: true, class: "hide-narrow" }),
+      this.els.typeBtn,
+      button({ icon: "indicators", label: "Indicators", title: "Indicators (/)", class: "hide-narrow", onClick: () => this.openIndicators() }),
       button({
         icon: "bell",
         label: "Alert",
@@ -172,11 +217,8 @@ export class App {
         onClick: () => void this.addAlert(),
       }),
       h("div", { class: "spacer" }),
-      button({
-        icon: this.prefs.theme === "dark" ? "sun" : "moon",
-        title: "Switch theme",
-        onClick: (ev) => this.toggleTheme(ev.currentTarget as HTMLButtonElement),
-      }),
+      this.layoutMenu.button,
+      this.els.themeBtn,
       button({ icon: "camera", title: "Save chart image", onClick: () => this.screenshot(), class: "hide-narrow" }),
       button({ icon: "maximize", title: "Full screen", onClick: () => this.fullscreen(), class: "hide-narrow" }),
       button({ icon: "settings", title: "Settings", onClick: () => void this.openSettings() }),
@@ -193,6 +235,12 @@ export class App {
       () => this.prefs.drawingStyle,
       this.prefs.drawingsHidden,
     );
+    this.indicators = new IndicatorLayer(this.chart);
+    this.indicators.onChange = () => {
+      this.prefs.indicators = this.indicators.entries();
+      savePrefs(this.prefs);
+    };
+    this.indicators.onSettings = (uid) => this.indicatorSettings(uid);
     this.drawings.onToolChange = (tool) => {
       for (const [t, b] of this.toolButtons) b.classList.toggle("active", t === tool);
     };
@@ -520,6 +568,9 @@ export class App {
       case "alert_event":
         this.alertsPanel.eventChanged(m.event);
         break;
+      case "layouts_changed":
+        this.layoutMenu.setList(m.layouts);
+        break;
       case "closures": {
         const inst = this.instruments.find((i) => i.instrument === m.instrument);
         if (inst) inst.closures = m.closures;
@@ -639,12 +690,122 @@ export class App {
     }
   }
 
-  private toggleTheme(btn: HTMLButtonElement): void {
-    this.prefs.theme = this.prefs.theme === "dark" ? "light" : "dark";
-    document.documentElement.dataset.theme = this.prefs.theme;
-    btn.replaceChildren(icon(this.prefs.theme === "dark" ? "sun" : "moon"));
+  private setTheme(theme: Prefs["theme"]): void {
+    this.prefs.theme = theme;
     savePrefs(this.prefs);
+    this.applyTheme();
+  }
+
+  private applyTheme(): void {
+    document.documentElement.dataset.theme = this.prefs.theme;
+    this.els.themeBtn.replaceChildren(icon(this.prefs.theme === "dark" ? "sun" : "moon"));
     this.chart.setTheme();
+  }
+
+  // Chart type, indicators, layouts
+
+  private renderChartType(): void {
+    const type = CHART_TYPES.find((t) => t.id === this.prefs.chartType) ?? CHART_TYPES[0];
+    this.els.typeBtn.replaceChildren(icon(CHART_TYPE_ICONS[type.id]));
+    this.els.typeBtn.dataset.tip = `Chart type: ${type.label}`;
+    this.els.typeBtn.setAttribute("aria-label", `Chart type: ${type.label}`);
+  }
+
+  private openChartTypeMenu(): void {
+    showMenu(
+      this.els.typeBtn,
+      h(
+        "div",
+        { style: "min-width:200px" },
+        ...CHART_TYPES.map((t) =>
+          menuItem({
+            label: t.label,
+            icon: CHART_TYPE_ICONS[t.id],
+            hint: t.id === "heikin_ashi" ? "display only" : undefined,
+            selected: t.id === this.prefs.chartType,
+            onClick: () => this.selectChartType(t.id),
+          }),
+        ),
+      ),
+    );
+  }
+
+  private selectChartType(type: ChartType): void {
+    this.prefs.chartType = type;
+    savePrefs(this.prefs);
+    this.chart.setChartType(type);
+    this.renderChartType();
+  }
+
+  private openIndicators(): void {
+    closeMenu();
+    openIndicatorPicker({
+      catalog: this.catalog,
+      onPick: (def) => void this.indicators.add(def),
+    });
+  }
+
+  private indicatorSettings(uid: number): void {
+    const current = this.indicators.get(uid);
+    if (!current) return;
+    closeMenu();
+    openIndicatorSettings({
+      def: current.def,
+      entry: current.entry,
+      onPreview: (entry) => this.indicators.update(uid, entry, false),
+      onApply: (entry) => this.indicators.update(uid, entry),
+      onCancel: (entry) => this.indicators.update(uid, entry, false),
+    });
+  }
+
+  /** What a layout saves: the chart as it is now. */
+  private layoutState(): LayoutState {
+    const p = this.prefs;
+    return {
+      instrument: this.instrument?.instrument ?? p.instrument,
+      timeframe: p.timeframe,
+      chart_type: p.chartType,
+      price: p.price,
+      theme: p.theme,
+      panel_open: p.panelOpen,
+      panel_view: p.panelView,
+      indicators: this.indicators.entries(),
+    };
+  }
+
+  /** Copy a layout into the preferences (instrument, timeframe, type, price, theme, panel, indicators). */
+  private takeLayout(layout: Layout): void {
+    const s = layout.layout;
+    const p = this.prefs;
+    const inst = this.instruments.find((i) => i.instrument === s.instrument);
+    if (inst) {
+      this.instrument = inst;
+      p.instrument = inst.instrument;
+    }
+    if (this.meta.timeframes.some((t) => t.name === s.timeframe)) p.timeframe = s.timeframe;
+    p.chartType = s.chart_type;
+    p.price = s.price;
+    p.theme = s.theme;
+    p.panelOpen = s.panel_open;
+    p.panelView = s.panel_view;
+    p.indicators = s.indicators;
+    p.layoutId = layout.id;
+    savePrefs(p);
+  }
+
+  /** Load a layout chosen in the layout menu. */
+  private applyLayout(layout: Layout): void {
+    this.takeLayout(layout);
+    this.applyTheme();
+    this.renderSymbol();
+    this.renderTimeframes();
+    this.renderPriceSeg();
+    this.watchlist.setCurrent(this.prefs.instrument ?? "");
+    this.showPanel();
+    this.chart.setChartType(this.prefs.chartType);
+    this.renderChartType();
+    this.indicators.setEntries(this.prefs.indicators, false);
+    void this.loadChart();
   }
 
   /** The strip buttons: open a view, or close the panel if it already shows it. */
@@ -800,6 +961,8 @@ export class App {
         row("Ctrl (while drawing)", "Snap to the bar's open, high, low or close"),
         row("Del", "Delete the selected drawing"),
         row("Alt + A", "Alert on the selected line, or at a price level"),
+        row("/", "Indicators"),
+        row("Ctrl + S", "Save the layout"),
         row("?", "This list"),
         h("hr"),
         h("p", {}, "Mouse: wheel to zoom, drag to pan, drag the price scale to stretch it, double-click it to fit."),
@@ -843,6 +1006,11 @@ export class App {
       void this.addAlert();
       return;
     }
+    if ((ev.ctrlKey || ev.metaKey) && !ev.altKey && (ev.key === "s" || ev.key === "S")) {
+      ev.preventDefault();
+      void this.layoutMenu.save();
+      return;
+    }
     if (ev.altKey && (ev.key === "r" || ev.key === "R")) {
       ev.preventDefault();
       this.chart.resetView();
@@ -858,6 +1026,9 @@ export class App {
       const i = all.findIndex((t) => t.name === this.prefs.timeframe);
       const next = all[Math.max(0, Math.min(all.length - 1, i + (ev.key === "]" ? 1 : -1)))];
       this.selectTimeframe(next.name);
+    } else if (ev.key === "/") {
+      ev.preventDefault();
+      this.openIndicators();
     } else if (ev.key === "?") {
       this.openShortcuts(this.root.querySelector(".tools .grow + .btn") as HTMLElement);
     }

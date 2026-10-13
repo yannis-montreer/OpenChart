@@ -83,6 +83,28 @@ Errors: `400` unknown timeframe or price, `404` unknown instrument, `422` invali
 - An event: `{id, alert_id, ts, price, line_value, cross, message, late, detected_at, delivered, attempts, error}`. `late` is `wake`, `reconnect` or `restart` when the cross was found from stored history after missed time; `ts` is when it happened, `detected_at` when the server saw it.
 - Deleting a line deletes its alerts; deleting an alert leaves its line.
 
+## Indicators
+
+| Route | |
+|---|---|
+| `GET /api/indicators` | `{indicators, errors, folder}`: each indicator's `id, name, title, overlay, params, outputs, builtin`; files that did not load (`{file, error}`); the folder for your own (docs/indicators.md) |
+| `GET /api/indicators/{id}?instrument=&timeframe=&price=&params=&from=&to=&limit=` | `{id, name, instrument, timeframe, price, params, t, values}` |
+
+- A parameter: `{name, type, default, label, group, min?, max?, step?, choices?}`; `type` is `int`, `float`, `bool`, `choice`, `source`, `color` or `width`; `group` is `inputs` or `style` (the settings tabs). An output: `{name, label, color, width}`, naming the parameters that hold its colour and width.
+- Values: `params` is a JSON object (missing ones take their defaults; unknown or invalid ones are a 400). The bars are those `GET /api/candles` returns for the same `instrument, timeframe, price, from, to, limit`; `t` holds their start times and `values` one list per output, as long as `t`, `null` where there is no value. Earlier bars are read as the indicator's warm-up needs, so values do not depend on where the window starts. 404 for an unknown indicator or instrument, 422 when the indicator's own code fails.
+
+## Layouts
+
+| Route | |
+|---|---|
+| `GET /api/layouts` | `[{id, name, updated_at, default}]`, by name |
+| `GET /api/layouts/{id}` | the same plus `layout` |
+| `POST /api/layouts` | `{name, layout, default?}` → the layout |
+| `PUT /api/layouts/{id}` | any of `name`, `layout`, `default` (`true` makes it the one that loads on start, `false` unsets it) |
+| `DELETE /api/layouts/{id}` | delete it (and unset the default if it was) |
+
+- `layout`: `{instrument, timeframe, chart_type, price, theme, panel_open, panel_view, indicators}`; `chart_type` is `candles`, `bars`, `line`, `area` or `heikin_ashi`; each indicator is `{id, params, visible, price_labels, legend_values}`. Indicator parameters are validated and stored complete. At most one layout is the default.
+
 ## Drawings
 
 | Route | |
@@ -124,6 +146,7 @@ On connect the server sends `hello` `{api_version, server_time}` and then `statu
 | `alert_changed` `{op, alert}` | an alert was created, edited, stopped, expired or deleted |
 | `alert_triggered` `{alert, event}` | an alert fired |
 | `alert_event` `{event}` | the delivery state of an event changed |
+| `layouts_changed` `{layouts}` | a layout was saved, renamed, deleted or made the default: the list, as `GET /api/layouts` |
 | `closures` `{instrument, closures}` | learned market closures changed (a holiday passed): `[[start, end], ...]` in UTC epoch seconds |
 | `error` `{error}` | invalid message |
 

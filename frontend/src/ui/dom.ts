@@ -1,7 +1,13 @@
 /** Small DOM helpers, icons (Lucide), menus and tooltips. */
 
 import {
+  Activity,
   Bell,
+  ChartArea,
+  ChartLine,
+  Ellipsis,
+  LayoutTemplate,
+  Save,
   BellOff,
   BellRing,
   Clock,
@@ -56,7 +62,33 @@ import {
   type IconNode,
 } from "lucide";
 
+/** OHLC bars and Heikin Ashi candles (Lucide has neither), drawn in the same 24px grid. */
+const OhlcBars: IconNode = [
+  ["path", { d: "M7 3v18" }],
+  ["path", { d: "M4 7h3" }],
+  ["path", { d: "M7 16h3" }],
+  ["path", { d: "M17 6v14" }],
+  ["path", { d: "M14 9h3" }],
+  ["path", { d: "M17 15h3" }],
+];
+const HeikinAshi: IconNode = [
+  ["path", { d: "M7 2v4" }],
+  ["rect", { x: "4", y: "6", width: "6", height: "10", rx: "1", fill: "currentColor" }],
+  ["path", { d: "M7 16v3" }],
+  ["path", { d: "M17 5v4" }],
+  ["rect", { x: "14", y: "9", width: "6", height: "9", rx: "1" }],
+  ["path", { d: "M17 18v4" }],
+];
+
 export const icons = {
+  indicators: Activity,
+  chartLine: ChartLine,
+  chartArea: ChartArea,
+  ohlc: OhlcBars,
+  heikinAshi: HeikinAshi,
+  more: Ellipsis,
+  layout: LayoutTemplate,
+  save: Save,
   bell: Bell,
   bellOff: BellOff,
   bellRing: BellRing,

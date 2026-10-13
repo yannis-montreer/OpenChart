@@ -226,7 +226,7 @@ All routes under `/api`, JSON. Everything except `/api/health`, `/api/setup/stat
 - `POST /api/settings/test/oanda`, `POST /api/settings/test/telegram`
 - `GET /api/instruments`, `POST /api/instruments` (enable and start backfill), `DELETE /api/instruments/{instrument}`
 - `GET /api/candles?instrument=&timeframe=&from=&to=&limit=&price=`
-- `GET /api/indicators?instrument=&timeframe=&name=&params=&from=&to=`
+- `GET /api/indicators` (the catalog with parameter schemas), `GET /api/indicators/{id}?instrument=&timeframe=&price=&params=&from=&to=&limit=`
 - `GET/POST/PUT/DELETE /api/drawings`
 - `GET/POST/PUT/DELETE /api/alerts`, `GET /api/alert-events`
 - `GET/POST/PUT/DELETE /api/layouts`
@@ -246,6 +246,7 @@ Server to client:
 - `alert_changed {op, alert}`
 - `alert_triggered {alert, event}`
 - `alert_event {event}` (delivery state of an event changed)
+- `layouts_changed {layouts}`
 - `status {provider_state, instruments: {...}}`
 
 Reconnect behavior (client): on reconnect, refetch candles since the last known timestamp and resume, no full redraw.
@@ -337,7 +338,9 @@ Implement drawings in the frontend with Lightweight Charts custom primitives. Th
 ## 11. Indicators and chart types
 
 ### Indicators (milestone 7)
-Computed **server-side in Python** so the chart and the alerts use identical numbers. Sent as series aligned to candles.
+Computed **server-side in Python** so the chart and the alerts use identical numbers. Sent as series aligned to candles, in the price type the chart shows (mid, bid or ask).
+- Each indicator is one Python file (docs/indicators.md): name, parameters with defaults and types, overlay or own pane, outputs, a compute function and an optional warm-up. The server discovers the built-in files and those in `<data dir>/indicators/` at startup; never uploaded through the UI. The Indicators menu and the settings dialog (Inputs and Style tabs) are generated from the parameter schemas.
+- EMA: alpha = 2 / (length + 1), seeded with the simple average of the first `length` values (as TradingView's `ta.ema`).
 - First set: SMA, EMA, RSI, MACD, Bollinger Bands, ATR.
 - Indicators are composable functions, so indicator-on-indicator works.
 - **Multi-timeframe indicators** (for example H1 EMA shown on an M5 chart): compute on the higher timeframe, then map to the lower timeframe using only values from **closed** higher-timeframe bars. No lookahead. Add a test that proves it.
@@ -345,9 +348,10 @@ Computed **server-side in Python** so the chart and the alerts use identical num
 
 ### Chart types
 Candles (default), bars, line, area, Heikin Ashi. Renko and range bars later.
+Heikin Ashi is display only, computed in the browser from the real bars: drawings, alerts, the legend values and the last-price label keep the real prices. The bar still forming is recomputed from the real bar on every update (its open is fixed by the previous closed bar; close, high and low move) and is final when the real bar closes.
 
 ### Layouts
-Saved per user on the server: instrument, timeframe, indicators and their parameters, chart type, theme, panel visibility. A "default layout" loads on start.
+Saved per user on the server: instrument, timeframe, indicators and their parameters, chart type, price type, theme, panel visibility. A "default layout" loads on start; without one, the chart opens as the browser last left it.
 
 ---
 

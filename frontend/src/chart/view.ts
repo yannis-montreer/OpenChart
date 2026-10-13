@@ -8,10 +8,13 @@
  */
 
 import {
+  AreaSeries,
+  BarSeries,
   CandlestickSeries,
   ColorType,
   CrosshairMode,
   HistogramSeries,
+  LineSeries,
   LineStyle,
   createChart,
   type CandlestickData,
@@ -19,12 +22,15 @@ import {
   type IChartApi,
   type IPriceLine,
   type ISeriesApi,
+  type LineData,
   type MouseEventParams,
+  type SeriesType,
   type Time,
   type UTCTimestamp,
 } from "lightweight-charts";
 
-import { api, type Bar, type Instrument, type Price, type TimeframeMeta } from "../api";
+import { api, type Bar, type ChartType, type Instrument, type Price, type TimeframeMeta } from "../api";
+import { haStep, heikinAshi } from "./heikinAshi";
 import { h } from "../ui/dom";
 import { mergeBars } from "./merge";
 import { TimeIndex, wallAdvance } from "../drawings/geometry";
@@ -59,6 +65,7 @@ interface Palette {
   bid: string;
   ask: string;
   raised: string;
+  accent: string;
 }
 
 function readPalette(): Palette {
@@ -76,11 +83,20 @@ function readPalette(): Palette {
     bid: v("bid"),
     ask: v("ask"),
     raised: v("active"),
+    accent: v("accent"),
   };
 }
 
+export const CHART_TYPES: { id: ChartType; label: string }[] = [
+  { id: "candles", label: "Candles" },
+  { id: "bars", label: "Bars" },
+  { id: "line", label: "Line" },
+  { id: "area", label: "Area" },
+  { id: "heikin_ashi", label: "Heikin Ashi" },
+];
+
 /** "#rrggbb" plus alpha as rgba() (the chart library does not parse CSS color-mix). */
-function withAlpha(hex: string, alpha: number): string {
+export function withAlpha(hex: string, alpha: number): string {
   const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
   if (!m) return hex;
   const [r, g, b] = m.slice(1).map((x) => parseInt(x, 16));
@@ -89,7 +105,14 @@ function withAlpha(hex: string, alpha: number): string {
 
 export class ChartView {
   readonly chart: IChartApi;
-  private candles: ISeriesApi<"Candlestick">;
+  /** The price series; its type follows the chart type (candles, bars, line, area, Heikin Ashi). */
+  private main: ISeriesApi<SeriesType>;
+  chartType: ChartType = "candles";
+  /** Heikin Ashi bars for the bars on screen (only while that chart type is shown). */
+  private ha: Bar[] = [];
+  /** With Heikin Ashi: the real last price on the price scale (the series' own is hidden). */
+  private realLine?: IPriceLine;
+  private seriesListeners: ((before: ISeriesApi<SeriesType>, after: ISeriesApi<SeriesType>) => void)[] = [];
   private volume: ISeriesApi<"Histogram">;
   private bidLine?: IPriceLine;
   private askLine?: IPriceLine;
@@ -113,7 +136,13 @@ export class ChartView {
   private askTag: HTMLElement;
   private bidTag: HTMLElement;
   private message: HTMLElement;
+  /** Indicator rows under the legend (filled by the indicators). */
+  readonly legendIndicators: HTMLElement;
 
+  /** Bars changed: "history" (loaded, older bars added, rewritten) or "live" (one bar updated). */
+  onBars: (kind: "history" | "live") => void = () => {};
+  /** The crosshair is on the bar starting at server time `t` (undefined: it left the chart). */
+  onHover: (t: number | undefined) => void = () => {};
   /** Shown in the legend; set by the app. */
   feedDotClass = "dot";
   /** Called with a short error text when loading fails. */
@@ -127,9 +156,10 @@ export class ChartView {
     this.askTag = h("div", { class: "quote-tag ask num", hidden: true }, h("span", { class: "side" }, "Ask"), h("span"));
     this.bidTag = h("div", { class: "quote-tag bid num", hidden: true }, h("span", { class: "side" }, "Bid"), h("span"));
     this.message = h("div", { class: "chart-message", hidden: true });
+    this.legendIndicators = h("div", { class: "legend-indicators" });
     area.append(
       host,
-      h("div", { class: "legend" }, this.legendTitle, this.legendValues),
+      h("div", { class: "legend" }, this.legendTitle, this.legendValues, this.legendIndicators),
       this.countdown,
       this.askTag,
       this.bidTag,
@@ -170,14 +200,6 @@ export class ChartView {
       },
     });
 
-    this.candles = this.chart.addSeries(CandlestickSeries, {
-      upColor: this.palette.up,
-      downColor: this.palette.down,
-      wickUpColor: this.palette.up,
-      wickDownColor: this.palette.down,
-      borderVisible: false,
-      priceLineStyle: LineStyle.Dotted,
-    });
     this.volume = this.chart.addSeries(HistogramSeries, {
       priceScaleId: "volume",
       priceFormat: { type: "volume" },
@@ -185,6 +207,7 @@ export class ChartView {
       priceLineVisible: false,
     });
     this.chart.priceScale("volume").applyOptions({ scaleMargins: { top: 0.86, bottom: 0 } });
+    this.main = this.makeMain("candles");
 
     this.chart.subscribeCrosshairMove((p) => this.onCrosshair(p));
     this.chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
@@ -257,10 +280,18 @@ export class ChartView {
     const mapped = toChartTimes(bars, ctx.timeframe.name, ctx.tz, ctx.session);
     this.bars = mapped.bars;
     this.times = mapped.times;
-    this.candles.setData(this.bars.map((b, i) => this.candleData(b, this.times[i])));
-    this.volume.setData(this.bars.map((b, i) => this.volumeData(b, this.times[i])));
+    this.renderSeries();
     this.renderLegend();
     this.placeQuotes();
+    this.onBars("history");
+  }
+
+  /** Data of the price and volume series from the bars we hold. */
+  private renderSeries(): void {
+    this.ha = this.chartType === "heikin_ashi" ? heikinAshi(this.bars) : [];
+    this.main.setData(this.bars.map((_, i) => this.point(i, this.times[i])));
+    this.volume.setData(this.bars.map((b, i) => this.volumeData(b, this.times[i])));
+    this.updateRealLine();
   }
 
   private async loadOlder(): Promise<void> {
@@ -356,10 +387,14 @@ export class ChartView {
     } else {
       return; // older than what we show; history already has it
     }
-    this.candles.update(this.candleData(bar, ct));
+    const i = this.bars.length - 1;
+    if (this.chartType === "heikin_ashi") this.ha[i] = haStep(this.ha[i - 1], bar);
+    this.main.update(this.point(i, ct));
     this.volume.update(this.volumeData(bar, ct));
+    this.updateRealLine();
     if (!this.hovering) this.renderLegend();
     this.placeQuotes();
+    this.onBars("live");
   }
 
   applyTick(bid: number, ask: number): void {
@@ -368,8 +403,8 @@ export class ChartView {
     if (!this.bidLine || !this.askLine) {
       // Lines only; their labels are drawn by placeQuotes() so they never overlap.
       const common = { lineWidth: 1 as const, lineStyle: LineStyle.Dotted, axisLabelVisible: false };
-      this.askLine = this.candles.createPriceLine({ ...common, price: ask, color: this.palette.ask });
-      this.bidLine = this.candles.createPriceLine({ ...common, price: bid, color: this.palette.bid });
+      this.askLine = this.main.createPriceLine({ ...common, price: ask, color: this.palette.ask });
+      this.bidLine = this.main.createPriceLine({ ...common, price: bid, color: this.palette.bid });
     } else {
       this.askLine.applyOptions({ price: ask });
       this.bidLine.applyOptions({ price: bid });
@@ -378,9 +413,96 @@ export class ChartView {
   }
 
   private removeQuoteLines(): void {
-    if (this.bidLine) this.candles.removePriceLine(this.bidLine);
-    if (this.askLine) this.candles.removePriceLine(this.askLine);
+    if (this.bidLine) this.main.removePriceLine(this.bidLine);
+    if (this.askLine) this.main.removePriceLine(this.askLine);
     this.bidLine = this.askLine = undefined;
+  }
+
+  // Chart type
+
+  /**
+   * Show the bars as candles, bars, a line, an area or Heikin Ashi. The price series is
+   * replaced (the library cannot change a series' type); listeners move what they attached
+   * to it (the drawings) to the new one.
+   */
+  setChartType(type: ChartType): void {
+    if (type === this.chartType) return;
+    const range = this.chart.timeScale().getVisibleLogicalRange();
+    const tick = this.lastTick;
+    this.removeQuoteLines();
+    this.removeRealLine();
+    const before = this.main;
+    this.chartType = type;
+    this.main = this.makeMain(type);
+    for (const listener of this.seriesListeners) listener(before, this.main);
+    this.chart.removeSeries(before);
+    if (this.ctx) {
+      this.applyFormat();
+      this.renderSeries();
+      this.renderLegend();
+      if (range) this.chart.timeScale().setVisibleLogicalRange(range);
+    }
+    if (tick) this.applyTick(tick.bid, tick.ask);
+    this.placeQuotes();
+  }
+
+  /** Called with the old and the new price series when the chart type changes. */
+  onSeriesChange(listener: (before: ISeriesApi<SeriesType>, after: ISeriesApi<SeriesType>) => void): void {
+    this.seriesListeners.push(listener);
+  }
+
+  private makeMain(type: ChartType): ISeriesApi<SeriesType> {
+    const series =
+      type === "bars"
+        ? this.chart.addSeries(BarSeries)
+        : type === "line"
+          ? this.chart.addSeries(LineSeries)
+          : type === "area"
+            ? this.chart.addSeries(AreaSeries)
+            : this.chart.addSeries(CandlestickSeries);
+    series.applyOptions(this.mainOptions(type));
+    series.setSeriesOrder(1); // above the volume, below the indicators
+    return series;
+  }
+
+  private mainOptions(type: ChartType): Record<string, unknown> {
+    const p = this.palette;
+    const common = { priceLineStyle: LineStyle.Dotted };
+    switch (type) {
+      case "bars":
+        return { ...common, upColor: p.up, downColor: p.down, thinBars: false };
+      case "line":
+        return { ...common, color: p.accent, lineWidth: 2 };
+      case "area":
+        return { ...common, lineColor: p.accent, lineWidth: 2, topColor: withAlpha(p.accent, 0.3), bottomColor: withAlpha(p.accent, 0.02) };
+      default: {
+        const candles = { ...common, upColor: p.up, downColor: p.down, wickUpColor: p.up, wickDownColor: p.down, borderVisible: false };
+        // Heikin Ashi prices are not real: the real last price gets its own label.
+        return type === "heikin_ashi" ? { ...candles, lastValueVisible: false, priceLineVisible: false } : candles;
+      }
+    }
+  }
+
+  /** The series point for bar `i`: OHLC, the close (line, area) or the Heikin Ashi bar. */
+  private point(i: number, ct: number): CandlestickData | LineData {
+    const time = ct as UTCTimestamp;
+    if (this.chartType === "line" || this.chartType === "area") return { time, value: this.bars[i].c };
+    const b = this.chartType === "heikin_ashi" ? this.ha[i] : this.bars[i];
+    return { time, open: b.o, high: b.h, low: b.l, close: b.c };
+  }
+
+  private updateRealLine(): void {
+    const last = this.bars[this.bars.length - 1];
+    if (this.chartType !== "heikin_ashi" || !last) return this.removeRealLine();
+    const color = last.c >= last.o ? this.palette.up : this.palette.down;
+    const options = { price: last.c, color, lineWidth: 1 as const, lineStyle: LineStyle.Dotted, axisLabelVisible: true, title: "" };
+    if (this.realLine) this.realLine.applyOptions(options);
+    else this.realLine = this.main.createPriceLine(options);
+  }
+
+  private removeRealLine(): void {
+    if (this.realLine) this.main.removePriceLine(this.realLine);
+    this.realLine = undefined;
   }
 
   // View
@@ -402,7 +524,8 @@ export class ChartView {
         horzLine: { color: p.crosshair, labelBackgroundColor: p.raised },
       },
     });
-    this.candles.applyOptions({ upColor: p.up, downColor: p.down, wickUpColor: p.up, wickDownColor: p.down });
+    this.main.applyOptions(this.mainOptions(this.chartType));
+    this.updateRealLine();
     this.askLine?.applyOptions({ color: p.ask });
     this.bidLine?.applyOptions({ color: p.bid });
     if (this.ctx) this.volume.setData(this.bars.map((b, i) => this.volumeData(b, this.times[i])));
@@ -410,8 +533,30 @@ export class ChartView {
 
   // Access for the drawing layer
 
-  get candleSeries(): ISeriesApi<"Candlestick"> {
-    return this.candles;
+  /** The price series (it changes with the chart type: see onSeriesChange). */
+  get priceSeries(): ISeriesApi<SeriesType> {
+    return this.main;
+  }
+
+  /** Chart time of the bar that starts at server time `t`, if we hold it. */
+  chartTimeOf(t: number): number | undefined {
+    let lo = 0;
+    let hi = this.bars.length - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const x = this.bars[mid].t;
+      if (x === t) return this.times[mid];
+      if (x < t) lo = mid + 1;
+      else hi = mid - 1;
+    }
+    return undefined;
+  }
+
+  /** Server times of the first and last bars held (and the one before the last). */
+  span(): { first: number; last: number; count: number; beforeLast?: number } | undefined {
+    const n = this.bars.length;
+    if (!n) return undefined;
+    return { first: this.bars[0].t, last: this.bars[n - 1].t, count: n, beforeLast: this.bars[n - 2]?.t };
   }
 
   private indexCache?: { key: string; clock?: Clock; index: TimeIndex };
@@ -476,12 +621,8 @@ export class ChartView {
     const d = this.ctx!.instrument.decimals;
     const nf = new Intl.NumberFormat("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
     this.formatPrice = (x) => nf.format(x);
-    this.candles.applyOptions({ priceFormat: { type: "price", precision: d, minMove: 10 ** -d } });
+    this.main.applyOptions({ priceFormat: { type: "price", precision: d, minMove: 10 ** -d } });
     this.chart.applyOptions({ localization: { priceFormatter: this.formatPrice } });
-  }
-
-  private candleData(b: Bar, ct: number): CandlestickData {
-    return { time: ct as UTCTimestamp, open: b.o, high: b.h, low: b.l, close: b.c };
   }
 
   private volumeData(b: Bar, ct: number): HistogramData {
@@ -500,11 +641,13 @@ export class ChartView {
     if (p.time === undefined || !p.point) {
       this.hovering = false;
       this.renderLegend();
+      this.onHover(undefined);
       return;
     }
     this.hovering = true;
     const i = this.indexOfChartTime(p.time as number);
     this.renderLegend(i);
+    this.onHover(this.bars[i]?.t);
   }
 
   private indexOfChartTime(ct: number): number {
@@ -529,7 +672,8 @@ export class ChartView {
       h(
         "span",
         { class: "meta" },
-        `${ctx.instrument.instrument} · ${ctx.timeframe.name} · ${source}${ctx.price === "mid" ? "" : " · " + ctx.price}`,
+        `${ctx.instrument.instrument} · ${ctx.timeframe.name} · ${source}${ctx.price === "mid" ? "" : " · " + ctx.price}` +
+          (this.chartType === "heikin_ashi" ? " · Heikin Ashi" : ""),
       ),
     );
     const bar = this.bars[index];
@@ -561,7 +705,7 @@ export class ChartView {
   private placeQuotes(): void {
     const ctx = this.ctx;
     const last = this.bars[this.bars.length - 1];
-    const y = last ? this.candles.priceToCoordinate(last.c) : null;
+    const y = last ? this.main.priceToCoordinate(last.c) : null;
     const hideAll = () => {
       this.countdown.hidden = this.askTag.hidden = this.bidTag.hidden = true;
     };
