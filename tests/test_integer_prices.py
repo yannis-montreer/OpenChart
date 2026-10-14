@@ -257,3 +257,34 @@ def test_a_backup_from_before_the_migration_restores_and_migrates(tmp_path, caps
             ("XAU_USD",),
         ]
         assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+
+
+async def test_the_migration_checks_free_disk_space_first(tmp_path, monkeypatch):
+    """The rewrite and VACUUM need room (1.4 times the database on the owner's data):
+    without 1.5 times its size free, nothing starts and the message says why."""
+    from collections import namedtuple
+
+    from openchart.store import migrate as migrate_module
+
+    path = tmp_path / "t.db"
+    await old_database(path)
+    before = all_old_rows(path)
+    size = path.stat().st_size
+    usage = namedtuple("usage", "total used free")
+    monkeypatch.setattr(
+        migrate_module.shutil, "disk_usage", lambda p: usage(10**12, 0, int(size * 1.2))
+    )
+    with pytest.raises(migrate_module.MigrationError) as raised:
+        async with await Database.open(path):
+            pass
+    message = str(raised.value)
+    assert "Not enough free disk space" in message and "Nothing was changed" in message
+    assert f"{size * 1.5 / 1e6:,.0f} MB free" in message
+    assert all_old_rows(path) == before
+    with closing(sqlite3.connect(path)) as conn:
+        assert conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 6
+
+    monkeypatch.undo()  # the real free space again
+    async with await Database.open(path) as db:  # with room, it runs
+        rows = await db.conn.execute_fetchall("SELECT MAX(version) FROM schema_migrations")
+        assert rows[0][0] >= 7

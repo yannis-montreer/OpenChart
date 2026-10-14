@@ -6,19 +6,31 @@ migrations are never edited; schema changes go in a new file.
 
 A migration containing the line `-- vacuum-after` (one that rewrites big tables) is
 followed by VACUUM, outside its transaction, so the space it freed goes back to the disk.
+Such a migration first checks that the disk has room for it: the rewritten tables, the
+write-ahead log and VACUUM's temporary copy took up to 1.4 times the database on the
+owner's data, so it asks for 1.5 times the database (and its WAL) free, and otherwise
+stops before changing anything.
 """
 
 from __future__ import annotations
 
 import re
+import shutil
 import time
 from dataclasses import dataclass
 from importlib import resources
+from pathlib import Path
 
 import aiosqlite
 
 _NAME_RE = re.compile(r"^(\d{4})_([a-z0-9_]+)\.sql$")
 VACUUM_AFTER = "-- vacuum-after"
+# Free disk needed by a vacuum-after migration, as a multiple of the database's size.
+SPACE_FACTOR = 1.5
+
+
+class MigrationError(RuntimeError):
+    """A migration cannot run; nothing was changed."""
 
 
 @dataclass(frozen=True)
@@ -58,6 +70,9 @@ async def migrate(
         migrations = discover_migrations()
     done = await applied_versions(conn)
     await conn.commit()
+    pending = [m for m in migrations if m.version not in done]
+    if any(VACUUM_AFTER in m.sql for m in pending):
+        await check_free_space(conn, [m.version for m in pending if VACUUM_AFTER in m.sql])
     newly: list[int] = []
     for m in migrations:
         if m.version in done:
@@ -78,3 +93,22 @@ async def migrate(
     if any(VACUUM_AFTER in m.sql for m in migrations if m.version in newly):
         await conn.execute("VACUUM")
     return newly
+
+
+async def check_free_space(conn: aiosqlite.Connection, versions: list[int]) -> None:
+    """Refuse to start a big rewrite without room for it on the database's disk."""
+    async with conn.execute("PRAGMA database_list") as cur:
+        files = [row[2] for row in await cur.fetchall() if row[1] == "main"]
+    if not files or not files[0]:
+        return  # an in-memory database
+    db = Path(files[0])
+    size = sum(p.stat().st_size for p in (db, Path(f"{db}-wal")) if p.exists())
+    need = int(size * SPACE_FACTOR)
+    free = shutil.disk_usage(db.parent).free
+    if free < need:
+        raise MigrationError(
+            f"Not enough free disk space to upgrade the database (migration "
+            f"{', '.join(map(str, versions))}): it needs about {need / 1e6:,.0f} MB free on "
+            f"the disk of {db.parent}, and {free / 1e6:,.0f} MB are free. Nothing was "
+            "changed. Free some space and start OpenChart again."
+        )
