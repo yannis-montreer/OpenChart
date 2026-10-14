@@ -14,6 +14,7 @@ stops before changing anything.
 
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 import time
@@ -22,6 +23,8 @@ from importlib import resources
 from pathlib import Path
 
 import aiosqlite
+
+log = logging.getLogger(__name__)
 
 _NAME_RE = re.compile(r"^(\d{4})_([a-z0-9_]+)\.sql$")
 VACUUM_AFTER = "-- vacuum-after"
@@ -77,6 +80,9 @@ async def migrate(
     for m in migrations:
         if m.version in done:
             continue
+        started = time.monotonic()
+        if VACUUM_AFTER in m.sql:
+            log.info("upgrading the database: %04d %s (this can take a minute)", m.version, m.name)
         script = (
             "BEGIN;\n"
             f"{m.sql}\n;\n"
@@ -90,8 +96,12 @@ async def migrate(
             await conn.rollback()
             raise
         newly.append(m.version)
+        elapsed = time.monotonic() - started
+        log.info("database migration %04d %s applied in %.1f s", m.version, m.name, elapsed)
     if any(VACUUM_AFTER in m.sql for m in migrations if m.version in newly):
+        started = time.monotonic()
         await conn.execute("VACUUM")
+        log.info("database compacted (VACUUM) in %.1f s", time.monotonic() - started)
     return newly
 
 
