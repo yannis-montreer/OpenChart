@@ -2,7 +2,10 @@
 
 On start (and after every reconnect) it gap-fills M1 from REST and repairs holes in the
 last few days, then streams ticks. When the process was paused (the computer slept), the
-repair also runs as soon as it wakes up.
+repair also runs as soon as it wakes up. An instrument without any stored history (just
+added, or its download was interrupted) downloads it in the background, newest first,
+so the instruments already there keep streaming; all instruments share the one price
+stream.
 Each tick goes to the candle builder, the tick store and any listeners (the websocket
 hub). Closed M1 bars are written in small batches, and once a minute the last few
 minutes are re-fetched from the provider so stored M1 matches the broker's candles.
@@ -15,14 +18,14 @@ import contextlib
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from openchart.market.backfill import (
     CLOSURE_MINUTES,
+    DEEP_HISTORY_START,
     RepairResult,
-    backfill,
     deep_fill,
+    download_backward,
     gap_fill,
     refresh_recent,
     repair,
@@ -44,6 +47,21 @@ WakeListener = Callable[[float, float], None]  # frozen from, to (wall clock)
 
 # A once-a-second loop that took this long means the process was paused (sleep, hibernate).
 WAKE_SECONDS = 30.0
+# A failed history download is tried again after this long.
+DOWNLOAD_RETRY_SECONDS = 60.0
+
+
+def _history() -> dict[str, Any]:
+    """An instrument's download status, as shown in the page."""
+    return {
+        "state": "done",  # pending | running | failed | done
+        "phase": None,  # h1 | m1 while running
+        "written": 0,
+        "oldest": None,  # oldest candle reached so far
+        "target": None,  # where the M1 download stops
+        "progress": None,  # 0..1 of the current phase
+        "error": None,
+    }
 
 
 class Feed:
@@ -87,56 +105,103 @@ class Feed:
         self.on_wake: WakeListener | None = None
         self.last_tick: dict[str, Tick] = {}
         self.tick_count = 0
-        self.history: dict[str, dict[str, Any]] = {
-            name: {"state": "pending", "written": 0, "at": None, "deep": None, "deep_from": None}
-            for name in instruments
-        }
+        self.history: dict[str, dict[str, Any]] = {name: _history() for name in instruments}
         self._pending_m1: list[tuple[str, Candle]] = []
+        # Instruments whose download (H1 or M1) is not finished, from the stored marks.
+        self.downloading: set[str] = set()
+        self.download_retry = DOWNLOAD_RETRY_SECONDS
 
     # History
 
-    async def fill_history(self) -> None:
+    async def find_downloads(self) -> None:
         for instrument in self.instruments:
-            info = self.history[instrument]
+            h1_from, m1_from = await self.store.download_marks(self.source, instrument)
+            if m1_from is None or (self.deep_history and h1_from is None):
+                self.downloading.add(instrument)
+                self.history[instrument]["state"] = "pending"
 
-            def progress(written: int, ts: int, direction: str, info=info) -> None:
-                info.update(written=written, at=ts)
-
-            info["state"] = "running"
-            try:
-                if await self.store.last_ts(self.source, instrument) is None:
-                    start = datetime.now(UTC) - timedelta(days=365.25 * self.backfill_years)
-                    log.info("no history for %s, backfilling from %s", instrument, start.date())
-                    result = await backfill(
-                        self.provider, self.store, instrument, start, progress=progress
-                    )
-                else:
-                    result = await gap_fill(self.provider, self.store, instrument)
-                    await self._repaired(
-                        await repair_recent(
-                            self.provider, self.store, instrument, self.hours.get(instrument)
-                        )
-                    )
-            except Exception:
-                info["state"] = "failed"
-                raise
-            info.update(state="done", at=result.last_ts)
+    async def fill_history(self) -> None:
+        """Bring stored M1 up to the present and repair recent holes: a few requests.
+        An instrument without any M1 yet is left to its download."""
+        for instrument in self.instruments:
+            if await self.store.last_ts(self.source, instrument) is None:
+                continue
+            result = await gap_fill(self.provider, self.store, instrument)
+            await self._repaired(
+                await repair_recent(
+                    self.provider, self.store, instrument, self.hours.get(instrument)
+                )
+            )
             log.info("%s: history up to %s (%d new)", instrument, result.last_ts, result.written)
 
-    async def fill_deep_history_and_cache(self) -> None:
-        """Deep H1 history (first run: everything the provider has), then the bar cache.
+    async def download(self, instrument: str) -> None:
+        """An instrument's history, newest first: all of H1 (1h and higher charts are
+        complete within seconds), then M1 back to `backfill_years`. Resumes from the
+        oldest stored candle; a failure is retried without stopping anything else."""
+        info = self.history[instrument]
+        now = time.time()
+        target = int(now - 365.25 * 86400 * self.backfill_years)
 
-        Runs in the background so live ticks start flowing straight away.
-        """
-        for instrument in self.instruments:
-            info = self.history[instrument]
-            if self.deep_history:
-                info["deep"] = "running"
+        def progress_for(phase: str, floor: float):
+            def progress(written: int, ts: int, direction: str) -> None:
+                done = (now - ts) / max(1.0, now - floor)
+                info.update(phase=phase, written=written, oldest=ts, progress=min(1.0, done))
+
+            return progress
+
+        while True:
+            info.update(state="running", error=None)
+            try:
+                if self.deep_history:
+                    info.update(phase="h1", written=0, target=None, progress=0.0, oldest=None)
+                    await deep_fill(
+                        self.provider,
+                        self.store,
+                        instrument,
+                        progress=progress_for("h1", DEEP_HISTORY_START.timestamp()),
+                    )
+                _, m1_from = await self.store.download_marks(self.source, instrument)
+                if m1_from is None:
+                    log.info("downloading %s M1 back to %s, newest first", instrument, target)
+                    first = await self.store.first_ts(self.source, instrument)
+                    info.update(
+                        phase="m1",
+                        written=0,
+                        target=target,
+                        oldest=first,
+                        progress=0.0 if first is None else (now - first) / (now - target),
+                    )
+                    await download_backward(
+                        self.provider,
+                        self.store,
+                        instrument,
+                        target,
+                        progress=progress_for("m1", target),
+                    )
+                break
+            except Exception as exc:
+                info.update(state="failed", error=f"{type(exc).__name__}: {exc}")
+                log.warning(
+                    "downloading %s history failed (%s), retrying in %.0fs",
+                    instrument,
+                    exc,
+                    self.download_retry,
+                )
+                await asyncio.sleep(self.download_retry)
+        self.downloading.discard(instrument)
+        info.update(_history(), oldest=await self.store.first_ts(self.source, instrument))
+        log.info("%s: history downloaded", instrument)
+
+    async def fill_deep_history_and_cache(self) -> None:
+        """Downloads, closures scan and bar cache, in the background so live ticks flow
+        straight away. Instruments with complete history go first: theirs is quick."""
+        for instrument in sorted(self.instruments, key=lambda i: i in self.downloading):
+            if instrument in self.downloading:
+                await self.download(instrument)
+            elif self.deep_history:
                 try:
-                    result = await deep_fill(self.provider, self.store, instrument)
-                    info.update(deep="done", deep_from=result.first_ts)
+                    await deep_fill(self.provider, self.store, instrument)
                 except Exception as exc:
-                    info["deep"] = "failed"
                     log.warning("deep history for %s failed: %s", instrument, exc)
             await self.scan_closures(instrument)
             await self.extend_cache(instrument)
@@ -209,6 +274,8 @@ class Feed:
         """Once per instrument: learn closures over all stored M1 (about one request per
         holiday). Later ones are learned by the recent repair as they happen."""
         hours = self.hours.get(instrument)
+        if instrument in self.downloading:
+            return  # over all of M1, so once it is downloaded
         if hours is None or await self.store.closures_scanned(self.source, instrument):
             return
         try:
@@ -309,6 +376,7 @@ class Feed:
         )
 
     async def run(self) -> None:
+        await self.find_downloads()
         await self.fill_history()
         if self.tick_writer:
             await asyncio.to_thread(self.tick_writer.compact_closed_days)

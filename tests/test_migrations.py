@@ -58,3 +58,38 @@ async def test_failed_migration_rolls_back(tmp_path):
         assert "ok_part" not in await _tables(conn)
         async with conn.execute("SELECT COUNT(*) FROM schema_migrations") as cur:
             assert (await cur.fetchone())[0] == 0
+
+
+async def test_0006_marks_existing_history_complete_and_adds_the_rollover(tmp_path):
+    """Upgrading a database from before M9's newest-first downloads."""
+    from openchart.market.instruments import FX_HOURS, METAL_HOURS
+
+    old_fx = (
+        '{"tz": "America/New_York", "open": {"day": "sun", "time": "17:00"}, '
+        '"close": {"day": "fri", "time": "17:00"}, "daily_breaks": []}'
+    )
+    async with aiosqlite.connect(tmp_path / "t.db") as conn:
+        await migrate(conn, [m for m in discover_migrations() if m.version <= 5])
+        for name, hours in (("EUR_USD", old_fx), ("XAU_USD", METAL_HOURS.to_json())):
+            await conn.execute(
+                "INSERT INTO instruments (instrument, source, provider_symbol, display_name,"
+                " decimals, pip_size, enabled, hours_json) VALUES (?, 'oanda', ?, ?, 5, 1, 1, ?)",
+                (name, name, name, hours),
+            )
+        for table, ts in (("candles_m1", 600), ("candles_h1", 0)):
+            await conn.execute(
+                f"INSERT INTO {table} (source, instrument, ts, volume)"
+                " VALUES ('oanda', 'XAU_USD', ?, 1)",
+                (ts,),
+            )
+        await conn.commit()
+        assert await migrate(conn) == [m.version for m in discover_migrations() if m.version > 5]
+        async with conn.execute(
+            "SELECT instrument, h1_complete_from, m1_complete_from, hours_json FROM instruments"
+            " ORDER BY instrument"
+        ) as cur:
+            rows = await cur.fetchall()
+    assert rows == [
+        ("EUR_USD", None, None, FX_HOURS.to_json()),  # no history: downloads; break added
+        ("XAU_USD", 0, 600, METAL_HOURS.to_json()),  # complete; gold's hours unchanged
+    ]

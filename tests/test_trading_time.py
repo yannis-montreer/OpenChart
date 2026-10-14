@@ -9,6 +9,7 @@ import pytest
 from openchart.alerts.geometry import line_price, time_range
 from openchart.market.instruments import FX_HOURS, METAL_HOURS
 from openchart.market.sessions import TradingClock, trading_clock
+from tests.conftest import ODD_HOURS
 
 FIXTURE = Path(__file__).resolve().parent.parent / "frontend/src/drawings/trading-time.fixture.json"
 
@@ -42,6 +43,8 @@ def fixture_data() -> dict:
         ("metal", METAL_HOURS, []),
         ("fx", FX_HOURS, []),
         ("metal_closures", METAL_HOURS, CLOSURES),
+        # The made-up third instrument of the M9 tests: Berlin time, a break over midnight.
+        ("odd", ODD_HOURS, []),
     )
     for name, hours, closures in cases:
         clock = TradingClock(hours, closures)
@@ -62,13 +65,15 @@ def test_frontend_fixture_is_current():
 
 
 def write_fixture() -> None:
-    FIXTURE.write_text(json.dumps(fixture_data(), separators=(",", ":")) + "\n")
+    text = json.dumps(fixture_data(), separators=(",", ":")) + "\n"
+    FIXTURE.write_text(text, encoding="utf-8", newline="\n")
 
 
 def test_clock_runs_only_while_open():
     gold = TradingClock(METAL_HOURS)
     assert gold.week_open_seconds == 115 * 3600  # 5 days x 23 hours
-    assert TradingClock(FX_HOURS).week_open_seconds == 120 * 3600
+    # 5 days x 24 hours less five 5-minute rollover breaks (Sunday to Thursday).
+    assert TradingClock(FX_HOURS).week_open_seconds == 120 * 3600 - 5 * 5 * 60
     # Friday 16:00 New York to Sunday 18:00: one trading hour (16:00-17:00).
     assert gold(utc(2024, 7, 14, 22)) - gold(utc(2024, 7, 12, 20)) == 3600
     # The daily break (17:00-18:00 New York) does not count.

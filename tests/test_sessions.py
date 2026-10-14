@@ -29,9 +29,20 @@ def test_gold_weekly_close_and_daily_break():
     assert METAL_HOURS.is_open(ts(2024, 1, 10, 23, 0))
 
 
-def test_fx_has_no_daily_break():
+def test_fx_pauses_five_minutes_for_the_daily_rollover():
+    # Wednesday in winter: 17:00-17:05 New York = 22:00-22:05 UTC; gold's hour is open.
+    assert FX_HOURS.is_open(ts(2024, 1, 10, 21, 59))
+    assert not FX_HOURS.is_open(ts(2024, 1, 10, 22, 0))
+    assert not FX_HOURS.is_open(ts(2024, 1, 10, 22, 4))
+    assert FX_HOURS.is_open(ts(2024, 1, 10, 22, 5))
     assert FX_HOURS.is_open(ts(2024, 1, 10, 22, 30))
-    assert FX_HOURS.is_open(ts(2024, 1, 7, 22, 0))  # Sunday 17:00 NY winter
+    # Summer (EDT): 20:59 UTC open, 21:00-21:04 closed, 21:05 open.
+    assert FX_HOURS.is_open(ts(2024, 7, 10, 20, 59))
+    assert not FX_HOURS.is_open(ts(2024, 7, 10, 21, 4))
+    assert FX_HOURS.is_open(ts(2024, 7, 10, 21, 5))
+    # The week opens at 17:05 New York on Sunday.
+    assert not FX_HOURS.is_open(ts(2024, 1, 7, 22, 0))
+    assert FX_HOURS.is_open(ts(2024, 1, 7, 22, 5))
 
 
 def test_dst_change_weekend():

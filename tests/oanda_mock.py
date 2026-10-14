@@ -18,10 +18,12 @@ def raw_candle(ts: int, complete: bool = True) -> dict:
 
 
 class CandleServer:
-    """Mimics OANDA's `from` + `count` pagination over a fixed candle list.
+    """Mimics OANDA's `from` + `count` and `to` + `count` pagination over a fixed list.
 
     Like the real API, `includeFirst=false` drops the candle at `from` but it still
-    counts toward `count`, so such a page holds `count - 1` candles.
+    counts toward `count`, so such a page holds `count - 1` candles. Going backward,
+    the candle at `to` is returned and counted too (the worst case for the client),
+    and without `from` or `to` the page ends with the latest, possibly forming candle.
     """
 
     def __init__(self, stamps: list[int], incomplete_last: bool = False):
@@ -34,10 +36,16 @@ class CandleServer:
         assert request.headers["Authorization"] == f"Bearer {TOKEN}"
         assert request.headers["Accept-Datetime-Format"] == "UNIX"
         q = request.url.params
-        start, count = int(q["from"]), int(q["count"])
-        sel = [t for t in self.stamps if t >= start][:count]
-        if q.get("includeFirst", "true") == "false" and sel and sel[0] == start:
-            sel = sel[1:]
+        count = int(q["count"])
+        if "from" in q:
+            start = int(q["from"])
+            sel = [t for t in self.stamps if t >= start][:count]
+            if q.get("includeFirst", "true") == "false" and sel and sel[0] == start:
+                sel = sel[1:]
+        elif "to" in q:
+            sel = [t for t in self.stamps if t <= int(q["to"])][-count:]
+        else:
+            sel = self.stamps[-count:]
         last = self.stamps[-1]
         body = [raw_candle(t, not (self.incomplete_last and t == last)) for t in sel]
         return httpx.Response(200, json={"instrument": "XAU_USD", "candles": body})

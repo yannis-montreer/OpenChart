@@ -211,13 +211,33 @@ describe("a line in the empty area", () => {
     for (const s of slopes) expect(s).toBeCloseTo(slopes[0], 6);
   });
 
-  it("keeps a constant slope on 4h across weekends (FX: no daily break)", () => {
+  it("on EUR/USD 4h, only the 17:00 bar moves a little less (the 5-minute rollover)", () => {
     const last = at(7, 10, 13);
     const step = 4 * 3600;
     const { path } = screen(FX, last, step, last - 10 * step, last + 6 * step);
     const future = path.filter(([px]) => px > chartX(49));
     const slopes = future.slice(1).map(([px, py], i) => (py - future[i][1]) / (px - future[i][0]));
     expect(slopes.length).toBeGreaterThan(60);
+    const full = Math.max(...slopes);
+    expect(slopes.filter((d) => Math.abs(d / full - 235 / 240) < 1e-6).length).toBeGreaterThan(5);
+    for (const d of slopes) expect([1, 235 / 240].some((r) => Math.abs(d / full - r) < 1e-6)).toBe(true);
+  });
+
+  it("on EUR/USD 1m, a ray runs straight across the 17:00 New York rollover", () => {
+    // Last bar 16:50 New York (20:50 UTC, summer); future minute slots skip 17:00-17:04.
+    const fx = tradingClock(FX);
+    const last = Date.UTC(2024, 6, 10, 20, 50) / 1000;
+    const index = new TimeIndex(bars(last, 60), 60, fx);
+    expect(index.toTime(49 + 9)).toBe(Date.UTC(2024, 6, 10, 20, 59) / 1000);
+    expect(index.toTime(49 + 10)).toBe(Date.UTC(2024, 6, 10, 21, 5) / 1000); // not 17:00
+    const pts = [
+      { t: last - 30 * 60, p: 100 },
+      { t: last, p: 97 },
+    ];
+    const path = linePath("ray", pts, index, 30.4, 80.2, fx, x, y);
+    const future = path.filter(([px]) => px > chartX(49));
+    const slopes = future.slice(1).map(([px, py], i) => (py - future[i][1]) / (px - future[i][0]));
+    expect(slopes.length).toBeGreaterThan(20);
     for (const s of slopes) expect(s).toBeCloseTo(slopes[0], 6);
   });
 

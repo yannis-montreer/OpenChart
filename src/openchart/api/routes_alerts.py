@@ -103,7 +103,8 @@ def alert_routes(server: Server) -> APIRouter:
 
     @router.post("")
     async def create(body: AlertCreate) -> dict[str, Any]:
-        if await server.store.instrument(server.source, body.instrument) is None:
+        row = await server.store.instrument(server.source, body.instrument)
+        if row is None:
             raise HTTPException(404, f"unknown instrument {body.instrument!r}")
         alert = Alert(id="", instrument=body.instrument, type=body.type)
         if body.type == "line_cross":
@@ -117,7 +118,7 @@ def alert_routes(server: Server) -> APIRouter:
         if alert.expires_at is not None and alert.expires_at <= time.time():
             raise HTTPException(400, "the expiration is in the past")
         if not alert.name:
-            alert.name = default_name(alert, await line_type(alert))
+            alert.name = default_name(alert, await line_type(alert), row.decimals)
         alert = await service().store.create(alert)
         service().put(alert)
         return alert.to_json()

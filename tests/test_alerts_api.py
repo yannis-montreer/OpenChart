@@ -50,7 +50,7 @@ def test_create_list_update_delete(client):
         created = client.post("/api/alerts", json=LEVEL).json()
         assert receive_until(ws, "alert_changed")["alert"]["id"] == created["id"]
     assert created["status"] == "active" and created["notify"] == ["telegram", "app"]
-    assert created["name"] == "XAU_USD, 1m Crossing 2000"
+    assert created["name"] == "XAU_USD, 1m Crossing 2000.000"  # gold: 3 decimals
     assert [a["id"] for a in client.get("/api/alerts").json()] == [created["id"]]
 
     stopped = client.put(f"/api/alerts/{created['id']}", json={"status": "stopped"}).json()

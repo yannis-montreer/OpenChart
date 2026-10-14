@@ -14,7 +14,10 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime
-from typing import NamedTuple, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, NamedTuple, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from openchart.market.sessions import TradingHours
 
 MID_DECIMALS = 9
 
@@ -68,6 +71,9 @@ class InstrumentInfo:
     decimals: int
     pip_size: float
     kind: str = ""  # provider category, e.g. CURRENCY, METAL, CFD
+    # Trading hours, for a provider that reports them. Otherwise they come from
+    # `openchart.market.instruments.default_hours` (by category or by name).
+    hours: TradingHours | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +110,16 @@ class Provider(Protocol):
         """Complete candles with `start <= ts < end`, in ascending order.
 
         Implementations paginate and retry transient errors internally.
+        """
+        ...
+
+    async def fetch_page_before(
+        self, instrument: str, end: datetime | None, granularity: str = "M1"
+    ) -> list[Candle]:
+        """The newest page of complete candles with `ts < end` (`end` None: the present),
+        in ascending order. An empty list means there is nothing older.
+
+        Downloads walk backward with it, so the newest history arrives first.
         """
         ...
 

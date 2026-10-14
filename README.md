@@ -24,7 +24,7 @@ Self-hosted charting and alerting server for forex and metals. It runs 24/7 on y
 | M6 Alerts and Telegram | done |
 | M7 Indicators, chart types, layouts | done (reduced scope: EMA only) |
 | M8 Packaging and deployment | not started |
-| M9 Second instrument (EURUSD) | not started |
+| M9 Second instrument (EURUSD) | done with a fake broker, waiting on the owner's real EUR_USD run |
 
 ## Development setup
 
@@ -80,10 +80,12 @@ openchart rebuild-cache            # recompute cached 4h/D/W bars (never needed 
 openchart reset-password           # set a new web password from the server console
 openchart gaps XAU_USD             # holes not explained by weekends or the daily break
 openchart repair XAU_USD           # refetch those holes from the broker (fills what it has)
+openchart purge EUR_USD --yes      # delete an instrument and its stored prices (server stopped)
 openchart run                      # start the server: API, websocket and live feed
 ```
 
-- `backfill` is idempotent and resumable: run it again and it only fetches what is missing. A larger `--years` later extends history backwards.
+- `backfill` downloads newest first, is idempotent and resumable: run it again and it only fetches what is missing. A larger `--years` later extends history backwards.
+- `purge` deletes one instrument with its candles, cached bars, learned closures and tick files, so it can be added again and downloaded afresh. Without `--yes` it only shows what it would delete; drawings and alerts are kept unless you add `--drawings-and-alerts`. It refuses while a server runs on the data folder.
 - `run` starts the server on http://127.0.0.1:8000 (change with `--host`/`--port`). It fills any gap since the last stored candle, streams ticks, builds live candles for every timeframe, saves closed M1 bars and raw ticks, and logs feed status every minute. If the link drops or goes silent for 15 s, it reconnects with backoff and gap-fills from REST. Once a minute it re-fetches the last 15 minutes of M1 from OANDA so stored history matches the broker's candles exactly.
 - By default the server only accepts connections from this computer. To reach it from your phone or another PC (over Tailscale), turn on Settings, Network, "Allow other devices to connect" and restart the server, or start it with `--host 0.0.0.0`.
 - Run **one** server per OANDA account. OANDA limits concurrent price streams per account (about two on practice); an extra stream request is left unanswered and the log says "no answer to the stream request".
@@ -109,6 +111,8 @@ Works:
 - Indicators (M7): the Indicators button (or `/`) lists them; for now EMA. Each one gets a legend row (hide, settings, remove) and a settings dialog with Inputs and Style tabs. Values are computed by the server on the chart's bars and price type. You can add your own: a Python file in `data/indicators/`, picked up when the server starts (see [docs/indicators.md](docs/indicators.md)).
 - Chart types (M7): candles, bars, line, area and Heikin Ashi (display only: drawings, alerts and price labels use real prices).
 - Layouts (M7): the layout menu in the top bar saves the chart (instrument, timeframe, chart type, price type, theme, panel, indicators) under a name on the server and loads it back; the starred one loads on start. Ctrl+S saves.
+
+- Several instruments (M9): add one in Settings, Instruments (search, Add). Its history downloads in the background, newest first (hourly candles within seconds, then minute candles), while the others keep streaming, all through the one price stream. A panel on the chart, the watchlist and Settings show the progress. Prices, the magnet, axis, legend, watchlist, alerts and Telegram use each instrument's own decimals; lines and alerts use its own trading hours and learned closures. Drawings and alerts belong to their instrument; indicators and the chart settings stay when you switch, as in TradingView.
 
 Not yet: multi-timeframe indicators, indicator alerts and the other indicators of the first set (deferred, see docs/decisions.md).
 

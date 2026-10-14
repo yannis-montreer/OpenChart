@@ -48,7 +48,7 @@ class CandleCache:
     async def extend(self, source: str, instrument: str, tf: Timeframe) -> int:
         """Cache every complete `tf` bar after the newest cached one. Returns bars written."""
         async with self._locks[(source, instrument, tf.name)]:
-            written = 0
+            written = await self._refill(source, instrument, tf)
             retries = 0
             start = await self._resume_point(source, instrument, tf)
             done = bar_start(self.clock(), tf)  # bars starting before this are complete
@@ -75,6 +75,22 @@ class CandleCache:
                 written += await self.store.write_cache(source, instrument, tf.name, bars)
                 start = end
             return written
+
+    async def _refill(self, source: str, instrument: str, tf: Timeframe) -> int:
+        """Recompute the ranges dropped from inside the cache (`cache_dirty`), for example
+        while a download extends the history backward. A range whose data changes while
+        it is computed stays dirty and is done on the next call."""
+        written = 0
+        for start, end in await self.store.cache_dirty(source, instrument, tf.name):
+            epoch = self.store.epoch(source, instrument)
+            frame = await self.store.read_base_frame(source, instrument, start, end, None)
+            bars = resample_full(frame, tf)
+            if self.store.epoch(source, instrument) != epoch:
+                continue
+            written += await self.store.write_cache(
+                source, instrument, tf.name, bars, refilled=(start, end)
+            )
+        return written
 
     async def _resume_point(self, source: str, instrument: str, tf: Timeframe) -> int | None:
         last = await self.store.cache_last_ts(source, instrument, tf.name)

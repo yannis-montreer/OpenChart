@@ -1,5 +1,11 @@
 """History backfill and gap-fill for M1 candles, and deep H1 history.
 
+Downloads run newest to oldest (`download_backward`): H1 first, as far back as the
+provider has it (a few dozen requests, then 1h and higher charts are complete), then
+M1 back to the configured start. What is stored is always one block ending at the
+present, and an interrupted download continues backward from its oldest candle. Where
+each download finished is recorded per instrument (`CandleStore.download_marks`).
+
 Invariant: stored candles of one granularity for a `(source, instrument)` cover one contiguous range
 `[first_ts, last_ts]` (apart from market closures and minutes without ticks). The tail
 is extended forward and the head backward, each batch committed in order, so a run
@@ -19,13 +25,14 @@ early close). `repair` records those, and the trading clock stops during them.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 from openchart.market.gaps import Gap, find_gaps
 from openchart.market.sessions import TradingHours
-from openchart.providers.base import Candle, Provider
+from openchart.providers.base import Candle, Provider, ProviderError
 from openchart.store.candles import STEP_SECONDS, CandleStore
 
 log = logging.getLogger(__name__)
@@ -268,6 +275,60 @@ async def repair_recent(
     return result
 
 
+@dataclass
+class DownloadResult:
+    instrument: str
+    granularity: str
+    written: int
+    oldest: int | None  # oldest stored candle after the download
+    complete: bool  # reached `start`, or the provider has nothing older
+
+
+async def download_backward(
+    provider: Provider,
+    store: CandleStore,
+    instrument: str,
+    start: int | None,
+    *,
+    source: str | None = None,
+    granularity: str = "M1",
+    progress: Progress | None = None,
+    max_pages: int | None = None,
+) -> DownloadResult:
+    """Extend stored history backward, page by page, from the oldest stored candle (or
+    from the present when nothing is stored) to `start` (None: as far as the provider
+    goes). Each page is committed on its own, so stopping at any point loses nothing.
+
+    Stored history must reach the present first (`gap_fill`), so that the result is
+    one contiguous block. `max_pages` stops early (not complete) after that many pages.
+    """
+    source = source or provider.name
+    g = granularity
+    cursor = await store.first_ts(source, instrument, g)
+    written = pages = 0
+    while start is None or cursor is None or cursor > start:
+        if max_pages is not None and pages >= max_pages:
+            return DownloadResult(instrument, g, written, cursor, False)
+        pages += 1
+        end = None if cursor is None else _dt(cursor)
+        page = await provider.fetch_page_before(instrument, end, g)
+        page = [c for c in page if cursor is None or c.ts < cursor]
+        if not page:  # the provider has nothing older (nothing at all: done as of now)
+            mark = cursor if cursor is not None else int(time.time())
+            await store.mark_download_complete(source, instrument, g, mark)
+            return DownloadResult(instrument, g, written, cursor, True)
+        oldest = page[0].ts
+        keep = [c for c in page if start is None or c.ts >= start]
+        written += await store.upsert(source, instrument, keep, g)
+        if cursor is not None and oldest >= cursor:
+            raise ProviderError(f"{g} download of {instrument} stalled at {cursor}")
+        cursor = oldest
+        if progress:
+            progress(written, max(oldest, start or oldest), "backward")
+    await store.mark_download_complete(source, instrument, g, start)
+    return DownloadResult(instrument, g, written, await store.first_ts(source, instrument, g), True)
+
+
 async def deep_fill(
     provider: Provider,
     store: CandleStore,
@@ -275,25 +336,27 @@ async def deep_fill(
     *,
     source: str | None = None,
     progress: Progress | None = None,
-) -> BackfillResult:
-    """H1 history as far back as the provider has it, then kept up to date.
+) -> DownloadResult:
+    """H1 history as far back as the provider has it, kept up to date.
 
-    The first run downloads everything (OANDA XAU_USD: about 20 years, ~30 requests);
-    later runs only fetch what is new.
+    The first run downloads everything newest to oldest (OANDA XAU_USD: about 20 years,
+    ~30 requests); later runs fetch what is new, and finish an interrupted download.
     """
     source = source or provider.name
+    new = 0
     if await store.last_ts(source, instrument, "H1") is not None:
-        return await gap_fill(provider, store, instrument, source=source, granularity="H1")
-    log.info("downloading deep H1 history for %s", instrument)
-    return await backfill(
-        provider,
-        store,
-        instrument,
-        DEEP_HISTORY_START,
-        source=source,
-        granularity="H1",
-        progress=progress,
+        tail = await gap_fill(provider, store, instrument, source=source, granularity="H1")
+        new = tail.written
+    h1_from, _ = await store.download_marks(source, instrument)
+    if h1_from is not None:
+        first = await store.first_ts(source, instrument, "H1")
+        return DownloadResult(instrument, "H1", new, first, True)
+    log.info("downloading deep H1 history for %s, newest first", instrument)
+    result = await download_backward(
+        provider, store, instrument, None, source=source, granularity="H1", progress=progress
     )
+    result.written += new
+    return result
 
 
 async def refresh_recent(
