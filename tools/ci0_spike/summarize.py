@@ -26,6 +26,7 @@ for row in rows:
     print(f"| {row} | " + " | ".join(cells) + " |")
 for key in (
     "start",
+    "desktop",
     "start_s",
     "import_s",
     "python",

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import ctypes as C
+import itertools
 import msvcrt
 import os
 import subprocess
@@ -336,6 +337,69 @@ def restricted_token(disable: list[str], *, low: bool = True, max_privilege: boo
     return new
 
 
+# A private window station and desktop ----------------------------------------------------
+# A service's own desktop (session 0) only admits SYSTEM and Administrators, so a worker
+# whose token has those deny-only, or an AppContainer, cannot attach to it and dies while
+# loading user32 (STATUS_DLL_INIT_FAILED). The worker gets a desktop of its own instead:
+# empty, and open to the identities it runs as.
+
+u32 = C.WinDLL("user32", use_last_error=True)
+_desktops = itertools.count(1)
+GetProcessWindowStation = _sig(u32, "GetProcessWindowStation", HANDLE)
+SetProcessWindowStation = _sig(u32, "SetProcessWindowStation", BOOL, HANDLE)
+CreateWindowStationW = _sig(u32, "CreateWindowStationW", HANDLE, W.LPCWSTR, DWORD, DWORD, PVOID)
+CreateDesktopW = _sig(u32, "CreateDesktopW", HANDLE, W.LPCWSTR, PVOID, PVOID, DWORD, DWORD, PVOID)
+CloseWindowStation = _sig(u32, "CloseWindowStation", BOOL, HANDLE)
+CloseDesktop = _sig(u32, "CloseDesktop", BOOL, HANDLE)
+GetUserObjectInformationW = _sig(
+    u32, "GetUserObjectInformationW", BOOL, HANDLE, C.c_int, PVOID, DWORD, PVOID
+)
+ConvertSddl = _sig(
+    adv,
+    "ConvertStringSecurityDescriptorToSecurityDescriptorW",
+    BOOL,
+    W.LPCWSTR,
+    DWORD,
+    C.POINTER(PVOID),
+    PVOID,
+)
+
+
+class SECURITY_ATTRIBUTES(C.Structure):
+    _fields_ = [("nLength", DWORD), ("lpSecurityDescriptor", PVOID), ("bInheritHandle", BOOL)]
+
+
+def make_private_desktop(name: str, container_sid: str | None) -> tuple[HANDLE, HANDLE, str]:
+    """Everyone, all app packages and the container: full access; a Low label so a Low
+    integrity worker may use it too. Returns the handles (keep them open) and the
+    "winstation/desktop" name (with a backslash) for STARTUPINFO.lpDesktop."""
+    aces = "(A;;GA;;;WD)(A;;GA;;;AC)(A;;GA;;;SY)" + (
+        f"(A;;GA;;;{container_sid})" if container_sid else ""
+    )
+    sd = PVOID()
+    _check(ConvertSddl(f"D:{aces}S:(ML;;NW;;;LW)", 1, C.byref(sd), None), "security descriptor")
+    sa = SECURITY_ATTRIBUTES(C.sizeof(SECURITY_ATTRIBUTES), sd, False)
+    old = GetProcessWindowStation()
+    # A named one of our own (SYSTEM may create it). A non-elevated user may not (access
+    # denied, found in CI-0); it then gets the unnamed one of its logon session, with a
+    # private desktop inside. As SYSTEM the unnamed one would be the services' shared
+    # window station, the one the worker cannot use, so the named one is what matters there.
+    winsta = CreateWindowStationW(name, 0, 0x37F, C.byref(sa))  # WINSTA_ALL_ACCESS
+    if not winsta and C.get_last_error() == 5:
+        winsta = CreateWindowStationW(None, 0, 0x37F, C.byref(sa))
+    _check(winsta, "CreateWindowStation")
+    buf = C.create_unicode_buffer(256)
+    _check(GetUserObjectInformationW(winsta, 2, buf, C.sizeof(buf), None), "window station name")
+    try:
+        _check(SetProcessWindowStation(winsta), "SetProcessWindowStation")
+        desk = CreateDesktopW(name, None, None, 0, 0x10000000, C.byref(sa))  # GENERIC_ALL
+        _check(desk, "CreateDesktop")
+    finally:
+        SetProcessWindowStation(old)
+        LocalFree(sd)
+    return winsta, desk, buf.value + "\\" + name
+
+
 # Job object ---------------------------------------------------------------------------
 
 
@@ -391,6 +455,7 @@ class Worker:
     job: HANDLE
     stdin: object  # binary file, parent -> worker
     stdout: object  # binary file, worker -> parent
+    desktop: tuple = ()  # private window station and desktop handles, if any
 
     def alive(self) -> bool:
         code = DWORD()
@@ -414,6 +479,9 @@ class Worker:
                 f.close()
         CloseHandle(self.process)
         CloseHandle(self.job)  # KILL_ON_JOB_CLOSE ends anything left
+        if self.desktop:
+            CloseDesktop(self.desktop[1])
+            CloseWindowStation(self.desktop[0])
 
 
 def start(
@@ -427,6 +495,7 @@ def start(
     disable_sids: list[str] | None = None,
     memory_mb: int = 512,
     cpu_percent_of_one_core: float = 50,
+    private_desktop: bool = False,
 ) -> Worker:
     job = make_job(memory_mb, cpu_percent_of_one_core)
     in_r, in_w = os.pipe()
@@ -441,6 +510,15 @@ def start(
     si = STARTUPINFOEXW()
     si.StartupInfo.cb = C.sizeof(si)
     si.StartupInfo.dwFlags = STARTF_USESTDHANDLES
+    desktop_handles = ()
+    if private_desktop:
+        sid_text = sid_to_string(container_sid) if identity == "appcontainer" else None
+        winsta, desk, desk_name = make_private_desktop(
+            f"OpenChartWorker{next(_desktops)}", sid_text
+        )
+        desktop_handles = (winsta, desk, desk_name)
+        desktop_buf = C.create_unicode_buffer(desk_name)
+        si.StartupInfo.lpDesktop = C.cast(desktop_buf, W.LPWSTR)
     si.StartupInfo.hStdInput, si.StartupInfo.hStdOutput, si.StartupInfo.hStdError = child
     count = 2 if identity == "appcontainer" else 1
     size = C.c_size_t()
@@ -540,6 +618,7 @@ def start(
         job,
         os.fdopen(in_w, "wb", buffering=0),
         os.fdopen(out_r, "rb", buffering=0),
+        desktop_handles,
     )
 
 

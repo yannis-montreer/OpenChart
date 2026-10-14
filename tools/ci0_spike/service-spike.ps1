@@ -77,15 +77,16 @@ try {
     Nssm set $Name AppEnvironmentExtra "PYTHONUNBUFFERED=1" "PYTHONIOENCODING=utf-8" | Out-Null
     Nssm set $Name Start SERVICE_DEMAND_START | Out-Null
 
-    Section "the run: plain, restricted and AppContainer workers, started by SYSTEM"
+    Section "the run: plain, AppContainer and restricted workers, started by SYSTEM, on the service desktop and on a private one"
     $exe = "$Work\rt-frozen\ocw_spike.exe"
     $driver = @(
         "`"$Spike\run_spike.py`"", "--work", "`"$Work`"", "--report", "`"$Work\report-system.json`"",
         "--decoy-data", "`"$Data`"", "--decoy-key", "`"$Key`"", "--grant", "`"$Work\rt-frozen`"",
         "--mode", "`"plain-system=plain:frozen:$exe`"",
-        "--mode", "`"restricted-system=restricted:frozen:$exe`"",
-        "--mode", "`"restricted-nolow-system=restricted-nolow:frozen:$exe`"",
-        "--mode", "`"appcontainer-system=appcontainer:frozen:$exe`""
+        "--mode", "`"appcontainer-system=appcontainer:frozen:$exe`"",
+        "--mode", "`"appcontainer-desktop-system=appcontainer+desktop:frozen:$exe`"",
+        "--mode", "`"restricted-nolow-desktop-system=restricted-nolow+desktop:frozen:$exe`"",
+        "--mode", "`"restricted-desktop-system=restricted+desktop:frozen:$exe`""
     ) -join " "
     RunOnce $driver 600
 } catch {

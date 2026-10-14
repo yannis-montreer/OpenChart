@@ -172,6 +172,34 @@ The open questions it answers:
 - Does the restricted token, as SYSTEM, still start the worker? (It needs the release
   folder to be readable without SYSTEM.)
 
+### LocalSystem, runs 1 and 2 (2026-10-15)
+
+- **Run 1:** a bug in the driver. When given a decoy data folder, it did not create its
+  own decoy folder, so it died before starting any worker. The cleanup was complete.
+- **Run 2, as SYSTEM:**
+  - the plain worker ran normally, at System integrity: it read and wrote everything, and
+    the secret key was in its environment;
+  - the restricted worker, the restricted worker without Low integrity, and the
+    AppContainer worker all died at start with nothing on stderr. Their exit codes were
+    not recorded yet.
+  - The cleanup was complete, proven by the proof list.
+- **Hypothesis:** the session-0 window station and desktop of a service admit only SYSTEM
+  and Administrators. A worker with those SIDs deny-only, or an AppContainer, cannot attach
+  to them, and dies loading user32 (`STATUS_DLL_INIT_FAILED`, 0xC0000142).
+- **Changes for run 3:**
+  - the exit code of a worker that dies before it is ready is now recorded;
+  - a `+desktop` option gives the worker a window station and desktop of its own, open to
+    Everyone, ALL APPLICATION PACKAGES and the container, with a Low label.
+  - As the user, all three sandboxed modes start on such a desktop with unchanged probe
+    results.
+  - As a non-elevated user only the logon session's unnamed window station can be created
+    (a named one is refused). As SYSTEM the named one is needed, because the unnamed one is
+    the services' own.
+- **Also found in the rehearsal:** PyInstaller's loader cannot open its archive at Low
+  integrity ("Could not load PyInstaller's embedded PKG archive"). It works inside an
+  AppContainer, which is also Low but has an explicit grant. Hence the
+  `restricted-nolow` mode.
+
 ### Docker: done locally (2026-10-15, Docker Desktop 29.8.2, WSL2, cgroup v2)
 
 The owner chose to run it locally instead of pushing. The image was built from

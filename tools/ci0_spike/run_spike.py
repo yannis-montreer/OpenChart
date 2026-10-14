@@ -167,6 +167,7 @@ def clean_env(runtime_dir: str) -> dict[str, str]:
 
 
 def launch(identity: str, argv: list[str], cwd: str, work: Path, sid, env_mode: str):
+    identity, _, option = identity.partition("+")  # "appcontainer+desktop": a private desktop
     env = None if env_mode == "inherit" else clean_env(str(Path(argv[0]).parent))
     if env is not None and identity == "appcontainer":
         # CreateProcess fails with error 203 without it (it maps the container's own folder)
@@ -182,9 +183,19 @@ def launch(identity: str, argv: list[str], cwd: str, work: Path, sid, env_mode: 
         stderr_path=str(work / f"worker-{identity}.err"),
         container_sid=sid,
         disable_sids=[ADMINS, SYSTEM],
+        private_desktop=option == "desktop",
     )
     ch = Channel(w)
-    hello, _ = ch.get(60)
+    try:
+        hello, _ = ch.get(60)
+    except (EOFError, queue.Empty) as exc:
+        w.wait(5000)
+        code = w.exit_code()
+        known = {0xC0000142: "STATUS_DLL_INIT_FAILED", 0xC0000022: "STATUS_ACCESS_DENIED"}
+        w.close()
+        raise RuntimeError(
+            f"the worker ended before it was ready: exit code {code:#010x} {known.get(code, '')}"
+        ) from exc
     return w, ch, (time.perf_counter() - t), hello
 
 
@@ -224,6 +235,7 @@ def run_mode(
             out["stderr"] = err.read_text(errors="replace")[-2000:]
         return out
     out["start_s"] = round(start_s, 3)
+    out["desktop"] = w.desktop[2] if w.desktop else "the parent's"
     out["import_s"] = round(hello["import_s"], 3)
     out["python"] = hello["python"] + (" (frozen)" if hello["frozen"] else "")
 
@@ -308,7 +320,7 @@ def orphan_test(mode_arg: str, work: Path) -> str:
 def orphan_child(mode_arg: str, work: Path) -> None:
     _name, rest = mode_arg.split("=", 1)
     identity, kind, path = rest.split(":", 2)
-    sid = sb.appcontainer_sid(CONTAINER) if identity == "appcontainer" else None
+    sid = sb.appcontainer_sid(CONTAINER) if identity.startswith("appcontainer") else None
     argv, cwd = runtime_argv(kind, path)
     w, _ch, *_ = launch(identity, argv, cwd, work, sid, "clean")
     print(f"worker pid {w.pid}", flush=True)
@@ -375,7 +387,7 @@ def main() -> None:
         Path(a.decoy_key) if a.decoy_key else None,
     )
     try:
-        if any("=appcontainer:" in m for m in a.mode):
+        if any("=appcontainer" in m for m in a.mode):
             sid = sb.appcontainer_sid(CONTAINER)
             report["container_sid"] = sb.sid_to_string(sid)
             for folder in a.grant:
