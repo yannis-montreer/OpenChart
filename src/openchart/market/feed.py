@@ -2,7 +2,9 @@
 
 On start (and after every reconnect) it gap-fills M1 from REST and repairs holes in the
 last few days, then streams ticks. When the process was paused (the computer slept), the
-repair also runs as soon as it wakes up.
+repair also runs as soon as it wakes up. An instrument without any stored history (just
+added) downloads it in the background, so the instruments already there keep streaming;
+all instruments share the one price stream.
 Each tick goes to the candle builder, the tick store and any listeners (the websocket
 hub). Closed M1 bars are written in small batches, and once a minute the last few
 minutes are re-fetched from the provider so stored M1 matches the broker's candles.
@@ -44,6 +46,8 @@ WakeListener = Callable[[float, float], None]  # frozen from, to (wall clock)
 
 # A once-a-second loop that took this long means the process was paused (sleep, hibernate).
 WAKE_SECONDS = 30.0
+# A failed first download of an instrument's history is tried again after this long.
+INITIAL_RETRY_SECONDS = 60.0
 
 
 class Feed:
@@ -92,44 +96,82 @@ class Feed:
             for name in instruments
         }
         self._pending_m1: list[tuple[str, Candle]] = []
+        # Instruments whose first history download has not finished (no stored M1 when
+        # the feed started). They are left out of the gap-fill and the bar cache until then.
+        self.initial: set[str] = set()
+        self.initial_retry = INITIAL_RETRY_SECONDS
 
     # History
 
-    async def fill_history(self) -> None:
+    async def find_new_instruments(self) -> None:
         for instrument in self.instruments:
+            if await self.store.last_ts(self.source, instrument) is None:
+                self.initial.add(instrument)
+
+    async def fill_history(self) -> None:
+        """Gap-fill and repair the instruments that have history. Fast: a few requests."""
+        for instrument in self.instruments:
+            if instrument in self.initial:
+                continue  # its first download runs in the background
             info = self.history[instrument]
-
-            def progress(written: int, ts: int, direction: str, info=info) -> None:
-                info.update(written=written, at=ts)
-
             info["state"] = "running"
             try:
-                if await self.store.last_ts(self.source, instrument) is None:
-                    start = datetime.now(UTC) - timedelta(days=365.25 * self.backfill_years)
-                    log.info("no history for %s, backfilling from %s", instrument, start.date())
-                    result = await backfill(
-                        self.provider, self.store, instrument, start, progress=progress
+                result = await gap_fill(self.provider, self.store, instrument)
+                await self._repaired(
+                    await repair_recent(
+                        self.provider, self.store, instrument, self.hours.get(instrument)
                     )
-                else:
-                    result = await gap_fill(self.provider, self.store, instrument)
-                    await self._repaired(
-                        await repair_recent(
-                            self.provider, self.store, instrument, self.hours.get(instrument)
-                        )
-                    )
+                )
             except Exception:
                 info["state"] = "failed"
                 raise
             info.update(state="done", at=result.last_ts)
             log.info("%s: history up to %s (%d new)", instrument, result.last_ts, result.written)
 
-    async def fill_deep_history_and_cache(self) -> None:
-        """Deep H1 history (first run: everything the provider has), then the bar cache.
+    async def initial_backfill(self, instrument: str) -> None:
+        """The first `backfill_years` of M1 of a new instrument, retried until it works.
 
-        Runs in the background so live ticks start flowing straight away.
+        Live candles from the stream may already be stored: the download then extends the
+        history backward from the oldest of them.
         """
-        for instrument in self.instruments:
+        info = self.history[instrument]
+
+        def progress(written: int, ts: int, direction: str) -> None:
+            info.update(written=written, at=ts)
+
+        start = datetime.now(UTC) - timedelta(days=365.25 * self.backfill_years)
+        while True:
+            info["state"] = "running"
+            log.info("no history for %s, backfilling from %s", instrument, start.date())
+            try:
+                result = await backfill(
+                    self.provider, self.store, instrument, start, progress=progress
+                )
+                break
+            except Exception as exc:
+                info["state"] = "failed"
+                log.warning(
+                    "downloading %s history failed (%s), retrying in %.0fs",
+                    instrument,
+                    exc,
+                    self.initial_retry,
+                )
+                await asyncio.sleep(self.initial_retry)
+        self.initial.discard(instrument)
+        info.update(state="done", at=result.last_ts)
+        log.info("%s: history up to %s (%d new)", instrument, result.last_ts, result.written)
+
+    async def fill_deep_history_and_cache(self) -> None:
+        """New instruments' first download, deep H1 history (first run: everything the
+        provider has), then the bar cache.
+
+        Runs in the background so live ticks start flowing straight away. Instruments
+        that already have history go first: theirs is quick.
+        """
+        for instrument in sorted(self.instruments, key=lambda i: i in self.initial):
             info = self.history[instrument]
+            if instrument in self.initial:
+                await self.initial_backfill(instrument)
             if self.deep_history:
                 info["deep"] = "running"
                 try:
@@ -142,7 +184,7 @@ class Feed:
             await self.extend_cache(instrument)
 
     async def extend_cache(self, instrument: str) -> None:
-        if self.cache is None:
+        if self.cache is None or instrument in self.initial:
             return
         try:
             written = await self.cache.extend_all(self.source, instrument)
@@ -189,6 +231,8 @@ class Feed:
     async def repair(self) -> None:
         """Refill holes in the last few days of M1."""
         for instrument in self.instruments:
+            if instrument in self.initial:
+                continue
             try:
                 await self._repaired(
                     await repair_recent(
@@ -309,6 +353,7 @@ class Feed:
         )
 
     async def run(self) -> None:
+        await self.find_new_instruments()
         await self.fill_history()
         if self.tick_writer:
             await asyncio.to_thread(self.tick_writer.compact_closed_days)

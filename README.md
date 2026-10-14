@@ -24,7 +24,7 @@ Self-hosted charting and alerting server for forex and metals. It runs 24/7 on y
 | M6 Alerts and Telegram | done |
 | M7 Indicators, chart types, layouts | done (reduced scope: EMA only) |
 | M8 Packaging and deployment | not started |
-| M9 Second instrument (EURUSD) | not started |
+| M9 Second instrument (EURUSD) | done with a fake broker, waiting on the owner's real EUR_USD run |
 
 ## Development setup
 
@@ -109,6 +109,8 @@ Works:
 - Indicators (M7): the Indicators button (or `/`) lists them; for now EMA. Each one gets a legend row (hide, settings, remove) and a settings dialog with Inputs and Style tabs. Values are computed by the server on the chart's bars and price type. You can add your own: a Python file in `data/indicators/`, picked up when the server starts (see [docs/indicators.md](docs/indicators.md)).
 - Chart types (M7): candles, bars, line, area and Heikin Ashi (display only: drawings, alerts and price labels use real prices).
 - Layouts (M7): the layout menu in the top bar saves the chart (instrument, timeframe, chart type, price type, theme, panel, indicators) under a name on the server and loads it back; the starred one loads on start. Ctrl+S saves.
+
+- Several instruments (M9): add one in Settings, Instruments (search, Add). Its history downloads in the background while the others keep streaming, all through the one price stream. Prices, the magnet, axis, legend, watchlist, alerts and Telegram use each instrument's own decimals; lines and alerts use its own trading hours and learned closures. Drawings and alerts belong to their instrument; indicators and the chart settings stay when you switch, as in TradingView.
 
 Not yet: multi-timeframe indicators, indicator alerts and the other indicators of the first set (deferred, see docs/decisions.md).
 

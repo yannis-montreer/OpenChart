@@ -66,14 +66,14 @@ def fmt_price(value: float | None, decimals: int) -> str:
     return "-" if value is None else f"{value:,.{decimals}f}"
 
 
-def default_name(alert: Alert, line_type: str | None) -> str:
+def default_name(alert: Alert, line_type: str | None, decimals: int) -> str:
     what = {"up": "Crossing Up", "down": "Crossing Down"}.get(alert.direction, "Crossing")
     target = (
         {"hline": "horizontal line", "trendline": "trend line", "extended": "extended line"}.get(
             line_type or "", line_type or "line"
         )
         if alert.type == "line_cross"
-        else f"{alert.level:g}"
+        else f"{alert.level:.{decimals}f}"
     )
     return f"{alert.instrument}, {alert.timeframe} {what} {target}"
 

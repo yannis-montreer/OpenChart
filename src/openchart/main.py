@@ -19,7 +19,7 @@ from openchart.config import Config, ConfigError, load_config
 from openchart.market.backfill import CLOSURE_MINUTES, backfill, deep_fill, repair
 from openchart.market.cache import CandleCache
 from openchart.market.gaps import find_gaps
-from openchart.market.instruments import default_hours
+from openchart.market.instruments import instrument_hours
 from openchart.providers.base import AuthError, Provider, ProviderError
 from openchart.providers.registry import create_provider
 from openchart.settings import (
@@ -106,7 +106,7 @@ async def _ensure_instrument(ctx: Context, instrument: str) -> None:
             "(OANDA names use an underscore, e.g. XAU_USD)."
         )
     info = known[instrument]
-    await ctx.store.upsert_instrument(ctx.provider.name, info, default_hours(instrument, info.kind))
+    await ctx.store.upsert_instrument(ctx.provider.name, info, instrument_hours(info))
 
 
 async def _cmd_backfill(config: Config, args: argparse.Namespace) -> int:

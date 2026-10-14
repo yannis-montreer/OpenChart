@@ -52,14 +52,18 @@ def aggregate_candles(candles: list[Candle], seconds: int) -> list[Candle]:
 def synthetic_m1(
     start_ts: int, end_ts: int, hours: TradingHours | None = None, base: float = 2000.0
 ) -> list[Candle]:
-    """Plausible M1 candles for every open minute in `[start_ts, end_ts)`."""
+    """Plausible M1 candles for every open minute in `[start_ts, end_ts)`.
+
+    Moves scale with `base` (at 2000: a swing of 10, bars 1 high, a spread of 0.2), so
+    any instrument's prices look like its own.
+    """
     out = []
+    swing, bar, spread = base / 200, base / 4000, base / 10000
     for ts in range((start_ts // 60) * 60, end_ts, 60):
         if hours is not None and not hours.is_open(ts):
             continue
-        mid = base + 10 * math.sin(ts / 3600)
-        spread = 0.2
-        m = OHLC(mid, mid + 0.5, mid - 0.5, mid + 0.1)
+        mid = base + swing * math.sin(ts / 3600)
+        m = OHLC(mid, mid + bar, mid - bar, mid + bar / 5)
         b = OHLC(*(p - spread / 2 for p in m))
         a = OHLC(*(p + spread / 2 for p in m))
         out.append(Candle(ts, b, a, m, volume=10))

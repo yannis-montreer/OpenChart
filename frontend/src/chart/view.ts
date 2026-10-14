@@ -221,6 +221,11 @@ export class ChartView {
 
   async load(ctx: ChartContext, opts: { from?: number; visible?: [number, number] } = {}): Promise<void> {
     const gen = ++this.generation;
+    // Another instrument has its own price range: a price scale the user dragged on
+    // gold (around 2650) would show nothing of EUR/USD (around 1.08).
+    if (this.ctx && this.ctx.instrument.instrument !== ctx.instrument.instrument) {
+      this.chart.priceScale("right").applyOptions({ autoScale: true });
+    }
     this.ctx = ctx;
     this.exhausted = false;
     this.lastTick = undefined;

@@ -8,6 +8,7 @@ need an entry here or a matching provider category; no code changes elsewhere.
 from __future__ import annotations
 
 from openchart.market.sessions import NEW_YORK, TradingHours
+from openchart.providers.base import InstrumentInfo
 
 # Typical retail forex/metals hours in New York time. Brokers differ by a few minutes;
 # these feed the gap report and the feed watchdog, so being close is enough.
@@ -27,3 +28,8 @@ HOURS_BY_INSTRUMENT: dict[str, TradingHours] = {}
 
 def default_hours(instrument: str, kind: str) -> TradingHours | None:
     return HOURS_BY_INSTRUMENT.get(instrument) or HOURS_BY_KIND.get(kind.upper())
+
+
+def instrument_hours(info: InstrumentInfo) -> TradingHours | None:
+    """Hours for a newly enabled instrument: the provider's own, else the defaults."""
+    return info.hours or default_hours(info.instrument, info.kind)

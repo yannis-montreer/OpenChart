@@ -9,6 +9,7 @@ import pytest
 from openchart.alerts.geometry import line_price, time_range
 from openchart.market.instruments import FX_HOURS, METAL_HOURS
 from openchart.market.sessions import TradingClock, trading_clock
+from tests.conftest import ODD_HOURS
 
 FIXTURE = Path(__file__).resolve().parent.parent / "frontend/src/drawings/trading-time.fixture.json"
 
@@ -42,6 +43,8 @@ def fixture_data() -> dict:
         ("metal", METAL_HOURS, []),
         ("fx", FX_HOURS, []),
         ("metal_closures", METAL_HOURS, CLOSURES),
+        # The made-up third instrument of the M9 tests: Berlin time, a break over midnight.
+        ("odd", ODD_HOURS, []),
     )
     for name, hours, closures in cases:
         clock = TradingClock(hours, closures)
