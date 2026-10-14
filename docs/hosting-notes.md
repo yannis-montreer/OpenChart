@@ -16,8 +16,8 @@ retention, M1 depth per instrument, log limits); "today" is the current format.
 | Ticks, per trading day kept | 0.8-1.0 MB, kept forever | 0.4-0.5 MB, 30 days by default |
 
 Plus per instance: logs (today without limit, about 15 MB a day while a browser shows
-a chart with an indicator; proposed at most about 60 MB), backups (each about 40% of
-the database when zipped; keep a few), and SQLite's WAL (about 4 MB).
+a chart with an indicator; proposed at most about 60 MB), backups (each about 25% of
+the database when zipped: 276 MB gave 69 MB; keep a few), and SQLite's WAL (about 4 MB).
 
 Examples for one instance:
 
