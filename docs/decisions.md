@@ -206,3 +206,36 @@ The code was searched for gold assumptions (names, decimals, pip size, price siz
 - **A partly downloaded range:** gaps and repair only look between stored candles, so the part not downloaded yet is never a hole (tested after every page), and the closure scan waits for the download.
 - **Progress is visible:** a panel on the chart with a progress bar and the oldest date reached (step 1 fills the first tenth, step 2 the rest), a marker in the watchlist's change column, a line in Settings, and "Loading older history…" at the left edge when scrolling past what has arrived (it loads more as it comes). The legend hides the change when the previous bar is further back than a bar and a quiet stretch of trading time (a hole).
 - **`openchart purge <INSTRUMENT>`** deletes an instrument with its candles, cache, closures and tick files (drawings and alerts only with `--drawings-and-alerts`). It shows what it would delete unless given `--yes`. The server now holds a lock file in its data folder (`server.lock`, released by the operating system when the process ends), and purge refuses while it is held, whatever port the server uses. A server already running from an older version does not hold it, so stop the server first anyway.
+
+## Storage step 1: integer prices (layout A+C)
+
+From the storage review (owner's choice A+C over B+C: simpler, exact for any provider's
+decimals, easier for contributors).
+
+- **Format:** candle rows hold a small integer `series` id (one row of `series` per
+  source and instrument) instead of the two names, and the twelve prices as integers,
+  `price * scale`, with `scale = 10^(decimals + 1)`: one digit more than the display
+  precision, because OANDA's mid prices have it (EUR/USD's half-pips). A series without
+  instrument metadata (tests, tools) uses 10^6. Applies to `candles_m1`, `candles_h1`
+  and `candles_cache`.
+- **Exact by construction:** reading divides by the scale in SQL; an integer divided by
+  a power of ten is the double nearest to the decimal value, which is exactly what
+  parsing the broker's decimal gave. Everything above `CandleStore` still sees floats.
+  A written price with more digits than the scale holds is rounded and logged (never
+  seen with OANDA's data).
+- **Migration 0007 checks itself:** it converts the three tables, then compares every
+  converted value with the original in SQL; one difference, or one row lost, fails a
+  CHECK constraint and the whole migration rolls back with "candle prices did not
+  convert exactly; nothing was changed". Then VACUUM (new `-- vacuum-after` marker in
+  migration files), so the file really shrinks.
+- **On a copy of the owner's data** (3 instruments, 2.47 million candle rows;
+  `tools/check_candle_migration.py`): every M1, H1 and cached 4h/D/W row bit for bit
+  identical after the migration; 1h bars derived from M1 equal OANDA's own H1 candles
+  in 36,728 of 36,729 hours, before and after alike. The one exception (XAU_USD,
+  2026-10-13 18:00 UTC) is in the data, not the format: one stored minute's high is the
+  tick-built one, not OANDA's (the once-a-minute refresh did not replace it). File
+  379.8 to 163.3 MB (57% smaller, VACUUM included), migration 16 s, reads as fast as
+  before.
+- **Test data** (`synthetic_m1`) now has realistic decimals (bid and ask rounded to the
+  instrument's, mid one more), as every broker's prices do.
+

@@ -3,6 +3,9 @@
 Each file in `store/migrations/` is named `NNNN_description.sql`. Files are applied in
 order, each in its own transaction, and recorded in `schema_migrations`. Applied
 migrations are never edited; schema changes go in a new file.
+
+A migration containing the line `-- vacuum-after` (one that rewrites big tables) is
+followed by VACUUM, outside its transaction, so the space it freed goes back to the disk.
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ from importlib import resources
 import aiosqlite
 
 _NAME_RE = re.compile(r"^(\d{4})_([a-z0-9_]+)\.sql$")
+VACUUM_AFTER = "-- vacuum-after"
 
 
 @dataclass(frozen=True)
@@ -71,4 +75,6 @@ async def migrate(
             await conn.rollback()
             raise
         newly.append(m.version)
+    if any(VACUUM_AFTER in m.sql for m in migrations if m.version in newly):
+        await conn.execute("VACUUM")
     return newly

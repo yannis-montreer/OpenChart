@@ -34,7 +34,7 @@ def euro_candles():
 
 def odd_candles():
     """FAKE_IDX in its own hours, with a holiday: no data on a weekday 2 weeks ago."""
-    candles = synthetic_m1(NOW - DAYS * 86400, NOW, ODD_HOURS, base=18000.0)
+    candles = synthetic_m1(NOW - DAYS * 86400, NOW, ODD_HOURS, base=18000.0, decimals=1)
     day = datetime.fromtimestamp(NOW - 14 * 86400, BERLIN).date()
     while day.weekday() >= 5:
         day = day.replace(day=day.day - 1)
