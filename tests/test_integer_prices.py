@@ -4,6 +4,7 @@ stored price bit for bit, or change nothing."""
 
 import logging
 import sqlite3
+from contextlib import closing
 
 import aiosqlite
 import pytest
@@ -69,7 +70,7 @@ async def old_database(path) -> None:
 
 
 def all_old_rows(path) -> dict:
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn:
         out = {}
         for table in ("candles_m1", "candles_h1", "candles_cache"):
             out[table] = conn.execute(
@@ -128,17 +129,18 @@ async def test_the_migration_gives_back_every_price_bit_for_bit(tmp_path):
 async def test_a_price_that_does_not_convert_exactly_stops_the_migration(tmp_path):
     path = tmp_path / "t.db"
     await old_database(path)
-    with sqlite3.connect(path) as conn:  # gold with more decimals than its scale holds
+    with closing(sqlite3.connect(path)) as conn:  # gold with more decimals than its scale holds
         conn.execute(
             "UPDATE candles_m1 SET bid_c = 2650.123456 WHERE instrument='XAU_USD' AND ts=1700000060"
         )
+        conn.commit()
     before = all_old_rows(path)
 
     with pytest.raises(Exception, match="did not convert exactly"):
         async with await Database.open(path):
             pass
     assert all_old_rows(path) == before  # nothing changed
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn:
         assert conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 6
         assert conn.execute("SELECT name FROM sqlite_master WHERE name='series'").fetchone() is None
 
@@ -165,3 +167,93 @@ async def test_writes_round_trip_and_extra_digits_are_logged(tmp_path, caplog):
         assert counts["series"] == 1 and counts["candles_m1"] == len(GOLD)
         assert await store.series("fake", "XAU_USD") is None
         assert await store.read("fake", "XAU_USD", 0, 2**40) == []
+
+
+# The migration on real installs: identity, backups, the command line
+
+
+async def test_the_database_identity_and_the_tokens_survive_the_migration(tmp_path, monkeypatch):
+    """Credential Manager entries are found by the database's instance_id (service
+    `OpenChart/<instance_id>`), and the service's secrets.enc sits next to the database;
+    both must still work after the migration and its VACUUM."""
+    from openchart.settings import (
+        SECRET_KEY_ENV,
+        SECRET_KEY_FILE_ENV,
+        EncryptedFileSecrets,
+        KeyringSecrets,
+        SettingsStore,
+        new_secret_key,
+        open_secrets,
+    )
+    from tests.conftest import Harness
+
+    path = tmp_path / "openchart.db"
+    await old_database(path)
+    with closing(sqlite3.connect(path)) as conn:
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('instance_id', '\"5eed1234abcd5678\"')"
+        )
+        conn.commit()
+    key = new_secret_key()
+    EncryptedFileSecrets(tmp_path / "secrets.enc", key).set("oanda_token", "token-SECRET")
+
+    async with await Database.open(path) as db:
+        instance = await SettingsStore(db.conn).instance_id()
+    assert instance == "5eed1234abcd5678"
+    assert KeyringSecrets(instance).service == "OpenChart/5eed1234abcd5678"
+    monkeypatch.delenv(SECRET_KEY_FILE_ENV, raising=False)
+    monkeypatch.setenv(SECRET_KEY_ENV, key)
+    store = open_secrets(Harness(tmp_path).config, instance)
+    assert isinstance(store, EncryptedFileSecrets)
+    assert store.get("oanda_token") == "token-SECRET"
+
+
+def test_a_backup_from_before_the_migration_restores_and_migrates(tmp_path, capsys):
+    import asyncio
+
+    from openchart.backup import backup
+    from openchart.main import main
+
+    data = tmp_path / "data"
+    data.mkdir()
+    asyncio.run(old_database(data / "openchart.db"))
+    before = all_old_rows(data / "openchart.db")
+    old_zip = backup(data, tmp_path / "zips").path  # taken before the upgrade
+
+    # Restored as the README says (unzip into an empty folder), then opened by a new
+    # server: the migration runs on the restored database.
+    import zipfile
+
+    restored = tmp_path / "restored"
+    with zipfile.ZipFile(old_zip) as zf:
+        zf.extractall(restored)
+
+    async def read_back():
+        async with await Database.open(restored / "openchart.db") as db:
+            store = CandleStore(db.conn)
+            return [
+                ("oanda", name, c.ts, *c.bid, *c.ask, *c.mid, c.volume)
+                for name in ("EUR_USD", "TOOL_X", "XAU_USD")
+                for c in await store.read("oanda", name, 0, 2**40)
+            ]
+
+    got = asyncio.run(read_back())
+    assert got == before["candles_m1"]
+
+    # The command line on the migrated database, pointed at it with --data-dir.
+    assert main(["stats", "--data-dir", str(restored)]) == 0
+    out = capsys.readouterr().out
+    assert "oanda/XAU_USD: 500 M1 candles" in out and "oanda/EUR_USD: 500 M1 candles" in out
+    assert main(["backup", "--data-dir", str(restored), "--out", str(tmp_path / "zips2")]) == 0
+    assert "Backup written" in capsys.readouterr().out
+    assert main(["purge", "EUR_USD", "--yes", "--data-dir", str(restored)]) == 0
+    capsys.readouterr()
+    assert main(["stats", "--data-dir", str(restored)]) == 0
+    out = capsys.readouterr().out
+    assert "EUR_USD" not in out and "oanda/XAU_USD: 500 M1 candles" in out
+    with closing(sqlite3.connect(restored / "openchart.db")) as conn:
+        assert conn.execute("SELECT instrument FROM series ORDER BY 1").fetchall() == [
+            ("TOOL_X",),
+            ("XAU_USD",),
+        ]
+        assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
