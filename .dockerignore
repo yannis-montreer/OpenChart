@@ -1,0 +1,27 @@
+# Only the sources the image needs; never data, secrets or reference material.
+.git
+.github
+.claude
+.venv
+venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.ruff_cache
+data
+dist
+build
+reference
+tests
+packaging
+docs
+.env
+.env.*
+*.key
+*.db
+*.db-wal
+*.db-shm
+*.parquet
+frontend/node_modules
+frontend/dist
+src/openchart/web

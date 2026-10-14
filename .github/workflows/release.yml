@@ -1,0 +1,110 @@
+# Builds the release files. Started by hand (Actions > Release > Run workflow: the files
+# are kept as workflow artifacts) or by pushing a tag v<version> (then also a DRAFT
+# GitHub release with the files; you publish it yourself). Nothing is published here.
+# Before tagging, set __version__ in src/openchart/__init__.py to the same version.
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  NSSM_URL: https://nssm.cc/release/nssm-2.24.zip
+  NSSM_SHA256: 727d1e42275c605e0f04aba98095c38a8e1e46def453cdffce42869428aa6743
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Web UI
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Build tools
+        run: python -m pip install . pyinstaller pywebview packaging build
+
+      - name: Version
+        id: version
+        shell: pwsh
+        run: |
+          $v = (python -c "import openchart; print(openchart.__version__)").Trim()
+          if ($env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME -ne "v$v") {
+            throw "The tag $env:GITHUB_REF_NAME does not match __version__ $v in src/openchart/__init__.py"
+          }
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: NSSM 2.24 (checksum verified)
+        shell: pwsh
+        run: |
+          foreach ($i in 1..5) {
+            try { Invoke-WebRequest $env:NSSM_URL -OutFile nssm.zip; break } catch { Start-Sleep 10 }
+          }
+          $hash = (Get-FileHash nssm.zip -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne $env:NSSM_SHA256) { throw "nssm.zip has SHA-256 $hash, expected $env:NSSM_SHA256" }
+          Expand-Archive nssm.zip -DestinationPath nssm
+
+      - name: WebView2 SDK licence (from the NuGet package of the DLL pywebview ships)
+        shell: pwsh
+        run: |
+          $webview = python -c "import webview, os; print(os.path.dirname(webview.__file__))"
+          $dll = Get-ChildItem "$webview\lib" -Recurse -Filter Microsoft.Web.WebView2.Core.dll | Select-Object -First 1
+          $ver = ($dll.VersionInfo.FileVersion -split " ")[0]
+          Invoke-WebRequest "https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/$ver" -OutFile webview2.zip
+          Expand-Archive webview2.zip -DestinationPath webview2
+          if (-not (Test-Path webview2\LICENSE.txt)) { throw "No LICENSE.txt in Microsoft.Web.WebView2 $ver" }
+          "WEBVIEW2_LICENCE=$((Resolve-Path webview2\LICENSE.txt).Path)" >> $env:GITHUB_ENV
+
+      - name: Build and smoke-test
+        shell: pwsh
+        run: >
+          .\packaging\build-windows.ps1 -Python python -Version ${{ steps.version.outputs.version }}
+          -Nssm nssm\nssm-2.24\win64\nssm.exe -WebView2Licence $env:WEBVIEW2_LICENCE
+
+      - name: Wheel and source archive
+        run: python -m build --outdir dist/python .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openchart-${{ steps.version.outputs.version }}
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS.txt
+            dist/python/*
+          if-no-files-found: error
+
+  draft-release:
+    if: github.ref_type == 'tag'
+    needs: windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: files
+          merge-multiple: true
+      - name: Draft release (not published)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -la files files/python || true
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft \
+            --title "OpenChart ${GITHUB_REF_NAME#v}" \
+            --notes "Windows: OpenChart-Server (service, see README Quickstart) and OpenChart-Viewer. The .exe files are not signed: Windows SmartScreen warns on first launch. SHA-256 sums in SHA256SUMS.txt." \
+            files/*.zip files/SHA256SUMS.txt files/python/*
