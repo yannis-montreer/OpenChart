@@ -49,3 +49,7 @@ Thumbs.db
 # third-party product's interface). Only the folder placeholder is tracked.
 reference/*
 !reference/.gitkeep
+
+# TradingView chart exports (the owner's, for comparison tests; never committed)
+OANDA_*.csv
+*tradingview*.csv

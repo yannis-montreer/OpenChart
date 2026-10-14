@@ -1,6 +1,27 @@
 # Custom indicators: design proposal
 
-Status: proposal for the owner's approval. Nothing here is built yet.
+Status: **approved** on 2026-10-15, with the changes below. CI-0 (the spike) is under
+way; its report is `docs/ci0-spike-report.md`.
+
+Decisions and changes:
+
+- **D1:** approved. Instances are kept per chart on the server, and the `localStorage`
+  list is migrated the first time a chart is opened.
+- **D2:** approved, with a change. The editing setting stays server-side only. The `auto`
+  rule is to be revisited, because the owner's service binds 0.0.0.0 for Tailscale; a
+  recommendation is in the spike report. Not built yet.
+- **D3 to D6:** approved.
+- **No ACL changes** to the owner's venv or base Python, ever.
+  - **Source installs** use the restricted-token worker, with a visible "weaker isolation"
+    notice.
+  - **AppContainer** is for the service install only, set up by the installer.
+  - Section 3.2's `openchart indicator-sandbox setup` for source installs is dropped.
+- **Migration numbers** are picked at merge time: the next free one. Storage step 1 (0007)
+  is not merged yet.
+- **A TradingView export** for the comparison tests is optional, belongs to the owner, and
+  is never committed.
+- **Browser editing stays off below the minimum isolation**, with no override. The
+  definition is in the spike report.
 
 Goal: you write an indicator in Python, keep it on the server, and add it to any chart
 (any instrument) from the Indicators menu, in a "Custom" section.
@@ -142,9 +163,11 @@ PARAMS = [
     Int("fast", 10, min=1, max=500),
     Int("slow", 30, min=2, max=2000),
     Source("source", "close"),
-    Color("fast_color", "#2962ff"), Color("slow_color", "#ff6d00"),
+    Color("fast_color", "#2962ff"),
+    Color("slow_color", "#ff6d00"),
     Width("width", 1),
-    Color("up_color", "#26a69a"), Color("down_color", "#ef5350"),
+    Color("up_color", "#26a69a"),
+    Color("down_color", "#ef5350"),
 ]
 OUTPUTS = [
     Line("fast", "Fast", color="fast_color", width="width"),
@@ -161,8 +184,12 @@ def warmup(params):
 def compute(bars, params, info):
     src = source(bars, params["source"])
     fast, slow = ta.sma(src, params["fast"]), ta.sma(src, params["slow"])
-    return {"fast": fast, "slow": slow,
-            "up": ta.crossover(fast, slow), "down": ta.crossunder(fast, slow)}
+    return {
+        "fast": fast,
+        "slow": slow,
+        "up": ta.crossover(fast, slow),
+        "down": ta.crossunder(fast, slow),
+    }
 ```
 
 ### 2.1 Inputs
