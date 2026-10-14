@@ -22,6 +22,12 @@ Decisions and changes:
   is never committed.
 - **Browser editing stays off below the minimum isolation**, with no override. The
   definition is in the spike report.
+- **D7 (a)**, 2026-10-15: if the AppContainer cannot be set up on a service install,
+  custom indicators do not run at all, folder files included. The Custom section says why
+  and to rerun the installer, and built-in indicators keep working.
+- **CI-1** is approved as a plan (`docs/ci1-plan.md`): findings 1 to 10, plus the D2
+  request-origin rule with the header check, the settings command and the behind-proxy
+  setting. It starts after the owner's M8 tests and data move.
 
 Goal: you write an indicator in Python, keep it on the server, and add it to any chart
 (any instrument) from the Indicators menu, in a "Custom" section.
