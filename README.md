@@ -94,6 +94,39 @@ It needs the **Microsoft Edge WebView2 Runtime**, which Windows 11 and up-to-dat
 - **Back up:** `C:\OpenChart\openchart\openchart.exe backup --data-dir C:\ProgramData\OpenChart\data` writes one zip (safe while the server runs) and prints where. Keep `C:\ProgramData\OpenChart\secret.key` somewhere safe too: the tokens in a backup can only be read with it (or you enter them again).
 - **Remove:** `uninstall-service.cmd` removes the service and its firewall rule and keeps the data and key.
 
+### Moving an existing install into the service
+
+If you ran OpenChart yourself before (for example `openchart run` in a source checkout, with its `data` folder), this moves everything into the service. That means history, ticks, drawings, alerts with their state and log, layouts, settings, your indicator files and your password. The original folder is not changed, so it stays your way back. About 10 minutes.
+
+How the tokens move: the source install keeps them in your Windows Credential Manager, under the name of its database (`OpenChart/<instance id>`). The service keeps them in `secrets.enc` in its data folder. The installer copies them from the first to the second, for the database it finds in the service's data folder. So copy the database first, then run the installer again, from your own Windows account.
+
+1. **Note what you have.** In the source checkout, while it still runs, look at the Alerts panel. Then stop it and run `.venv\Scripts\openchart.exe stats`. Keep the output: the candle counts and the line `Drawings: N, alerts: N (N active), layouts: N` are what you compare at the end.
+2. **Stop the source server:** Ctrl+C in its window, or close it. `Get-NetTCPConnection -LocalPort 8000 -State Listen` must print nothing: one server per OANDA account.
+3. **Back it up:** `.venv\Scripts\openchart.exe backup --data-dir .\data --out C:\OpenChart-move`. It prints the zip's path.
+4. **In PowerShell as administrator, stop the service and put its current data aside.** Keep it as a folder: never mix files of two databases, because an old `openchart.db-wal` next to a new `openchart.db` would damage it.
+   ```powershell
+   Stop-Service OpenChart
+   Rename-Item C:\ProgramData\OpenChart\data data.before-move
+   New-Item -ItemType Directory C:\ProgramData\OpenChart\data | Out-Null
+   Get-Acl C:\ProgramData\OpenChart\data.before-move | Set-Acl C:\ProgramData\OpenChart\data
+   ```
+   The last line gives the new folder the same restricted access as the old one.
+5. **Unpack the backup into it** (the zip step 3 printed):
+   ```powershell
+   Expand-Archive C:\OpenChart-move\openchart-backup-<date>-<time>.zip -DestinationPath C:\ProgramData\OpenChart\data
+   Remove-Item C:\ProgramData\OpenChart\data\backup.json
+   ```
+6. **Run `install-service.cmd` again**, from your own Windows account, and accept the administrator prompt. Use the same options as before if you changed any, such as `-Port`. It reuses the key file, copies your tokens from the Credential Manager into the new `secrets.enc`, and starts the service. Its output must say `Copied from the Credential Manager: oanda_token, telegram_token`. If it says `nothing`, the tokens were only in a `.env` file: enter them in Settings after step 7.
+7. **Check:**
+   - `C:\ProgramData\OpenChart\data\logs\service.log`, near the end: `secrets: encrypted file ...; oanda_token set, telegram_token set`, then the feed connecting.
+   - Telegram: `OpenChart alert engine started: watching N active alerts`, with your N from step 1.
+   - http://localhost:8000: log in with your usual password (browsers that were logged in stay logged in). Your drawings and their bells are there, and the Alerts panel lists your alerts as Active with their log. The layout menu has your layouts, and the starred one loads.
+   - `C:\OpenChart\openchart\openchart.exe stats --data-dir C:\ProgramData\OpenChart\data` prints the same counts as step 1, with more candles if the market moved meanwhile.
+   - Any alert that would have fired while both were stopped arrives late, marked "after a restart": the service replays the missed minutes when it starts.
+8. **Afterwards:** do not start the source server again: it would be a second price stream on your OANDA account and would send the same alerts twice. When you are happy, delete `C:\ProgramData\OpenChart\data.before-move` and `C:\OpenChart-move`. Keep the source `data` folder as long as you want a way back.
+
+**Going back:** `Stop-Service OpenChart`, then start the source server again. It continues from where it stopped. Anything done in the service since then (new drawings, fired alerts) is not in it, and alerts the service already sent may be sent again when the source server catches up on the missed minutes.
+
 ### If something does not work
 
 - The log: `C:\ProgramData\OpenChart\data\logs\service.log`. Its first lines say where the tokens come from and whether they are set.

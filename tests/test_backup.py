@@ -112,6 +112,22 @@ def test_backup_options_and_errors(tmp_path, capsys):
     assert "No database" in capsys.readouterr().err
 
 
+def test_stats_counts_what_a_move_must_keep(client, capsys):
+    """`openchart stats` before and after moving a data folder: the same counts."""
+    hline = {"instrument": "XAU_USD", "type": "hline", "points": [{"t": 1, "p": 2000.0}]}
+    line = client.post("/api/drawings", json=hline).json()
+    body = {"instrument": "XAU_USD", "type": "line_cross", "drawing_id": line["id"]}
+    client.post("/api/alerts", json=body)
+    stopped = client.post("/api/alerts", json=body).json()
+    client.put(f"/api/alerts/{stopped['id']}", json={"status": "stopped"})
+    client.post("/api/layouts", json={"name": "Gold", "layout": {}})
+    data = str(client.harness.config.data_dir)
+    assert main(["stats", "--data-dir", data]) == 0
+    printed = capsys.readouterr().out
+    assert "fake/XAU_USD:" in printed
+    assert "Drawings: 1, alerts: 2 (1 active), layouts: 1" in printed
+
+
 # Secrets for the Windows service
 
 

@@ -152,11 +152,11 @@ async def _cmd_rebuild_cache(config: Config, args: argparse.Namespace) -> int:
 
 
 async def _cmd_stats(config: Config, args: argparse.Namespace) -> int:
+    config = _data_dir(config, args)
     async with _context(config, need_provider=False) as ctx:
         rows = await ctx.store.instruments()
         if not rows:
             print("No instruments yet. Run `openchart backfill <INSTRUMENT>` first.")
-            return 0
         for row in rows:
             n = await ctx.store.count(row.source, row.instrument)
             first = await ctx.store.first_ts(row.source, row.instrument)
@@ -177,6 +177,17 @@ async def _cmd_stats(config: Config, args: argparse.Namespace) -> int:
                 cached = await ctx.store.cache_count(row.source, row.instrument, name)
                 if cached:
                     print(f"  {cached:,} cached {name} bars")
+
+        async def count(sql: str) -> int:
+            async with ctx.store.conn.execute(sql) as cur:
+                return (await cur.fetchone())[0]
+
+        # To compare two installs (for example after moving the data folder).
+        drawings = await count("SELECT COUNT(*) FROM drawings")
+        alerts = await count("SELECT COUNT(*) FROM alerts")
+        active = await count("SELECT COUNT(*) FROM alerts WHERE status = 'active'")
+        layouts = await count("SELECT COUNT(*) FROM layouts")
+        print(f"Drawings: {drawings}, alerts: {alerts} ({active} active), layouts: {layouts}")
     return 0
 
 
@@ -519,7 +530,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--deep", action="store_true", help="also download H1 history as far back as available"
     )
-    sub.add_parser("stats", help="row counts and coverage per instrument")
+    p = sub.add_parser("stats", help="row counts and coverage, drawings, alerts and layouts")
+    p.add_argument("--data-dir", help="the data folder (default data/, from config)")
     sub.add_parser("reset-password", help="set a new web password (if you forgot it)")
     p = sub.add_parser("rebuild-cache", help="recompute the cached 4h/D/W bars")
     p.add_argument("instrument", nargs="?", help="default: all instruments")
