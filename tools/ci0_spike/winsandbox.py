@@ -301,7 +301,7 @@ def grant_folder(folder: str, sid_text: str) -> None:
 # Restricted token ---------------------------------------------------------------------
 
 
-def restricted_token(disable: list[str]) -> HANDLE:
+def restricted_token(disable: list[str], *, low: bool = True, max_privilege: bool = True) -> HANDLE:
     """The parent's token minus its privileges, with `disable` SIDs deny-only, at Low
     integrity."""
     mine = HANDLE()
@@ -312,11 +312,21 @@ def restricted_token(disable: list[str]) -> HANDLE:
     new = HANDLE()
     _check(
         CreateRestrictedToken(
-            mine, 0x1, len(disable), C.byref(sids), 0, None, 0, None, C.byref(new)
+            mine,
+            1 if max_privilege else 0,
+            len(disable),
+            C.byref(sids),
+            0,
+            None,
+            0,
+            None,
+            C.byref(new),
         ),
         "CreateRestrictedToken",
     )
     CloseHandle(mine)
+    if not low:
+        return new
     low = sid_from_string("S-1-16-4096")
     label = SID_AND_ATTRIBUTES(low, 0x20)  # SE_GROUP_INTEGRITY
     _check(
@@ -482,8 +492,10 @@ def start(
     cmd = C.create_unicode_buffer(subprocess.list2cmdline(argv))
     pi = PROCESS_INFORMATION()
     try:
-        if identity == "restricted":
-            token = restricted_token(disable_sids or [])
+        if identity in ("restricted", "restricted-nolow"):
+            # "restricted-nolow" keeps the parent's integrity level: PyInstaller's loader
+            # cannot open its own archive at Low integrity (found in CI-0)
+            token = restricted_token(disable_sids or [], low=identity == "restricted")
             try:
                 _check(
                     CreateProcessAsUserW(

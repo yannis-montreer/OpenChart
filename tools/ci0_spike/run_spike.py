@@ -68,6 +68,7 @@ class CREDENTIALW(C.Structure):
 def make_decoys(work: Path, data: Path | None, key: Path | None) -> dict:
     root = work / "decoys"
     data = data or root / "data"
+    root.mkdir(parents=True, exist_ok=True)  # also when the data folder is given elsewhere
     data.mkdir(parents=True, exist_ok=True)
     (root / ".env").write_text("DECOY_TOKEN=this-is-not-a-real-token\n")
     (data / "openchart.db").write_bytes(os.urandom(4096))
@@ -102,9 +103,8 @@ def make_decoys(work: Path, data: Path | None, key: Path | None) -> dict:
 def remove_decoys(work: Path) -> list[str]:
     done = []
     C.windll.advapi32.CredDeleteW.argtypes = [W.LPCWSTR, W.DWORD, W.DWORD]
-    done.append(
-        f"credential {CREDENTIAL} deleted: {bool(C.windll.advapi32.CredDeleteW(CREDENTIAL, 1, 0))}"
-    )
+    deleted = bool(C.windll.advapi32.CredDeleteW(CREDENTIAL, 1, 0))
+    done.append(f"credential {CREDENTIAL} deleted now: {deleted} (False: it was not there)")
     try:
         winreg.DeleteKey(winreg.HKEY_CURRENT_USER, REGISTRY)
         done.append(f"registry key HKCU\\{REGISTRY} deleted")
@@ -344,10 +344,19 @@ def main() -> None:
     ap.add_argument("--report")
     ap.add_argument("--orphan-child")
     ap.add_argument("--keep-container", action="store_true")
+    ap.add_argument("--cleanup-only", action="store_true", help="remove decoys and the profile")
     a = ap.parse_args()
     work = Path(a.work)
     if a.orphan_child:
         return orphan_child(a.orphan_child, work)
+    if a.cleanup_only:  # idempotent: also after a run that died half way
+        done = remove_decoys(work)
+        hr = sb.delete_appcontainer(CONTAINER)
+        done.append(
+            f"AppContainer profile {CONTAINER} deleted or absent: HRESULT {hr & 0xFFFFFFFF:#x}"
+        )
+        print(json.dumps(done, indent=1), flush=True)
+        return None
 
     os.environ["OPENCHART_SECRET_KEY"] = "decoy-not-a-key"  # the "plain" mode shows it leaking
     report: dict = {
