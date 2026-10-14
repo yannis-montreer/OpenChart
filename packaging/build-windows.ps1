@@ -54,7 +54,18 @@ New-Item -ItemType Directory -Force -Path $Work | Out-Null
 Step "Licences of the bundled software"
 $serverLic = Join-Path $Work "licenses\server"
 $viewerLic = Join-Path $Work "licenses\viewer"
-Run $Python (Join-Path $PSScriptRoot "third_party_licenses.py") --root openchart --out (Join-Path $serverLic "THIRD-PARTY-LICENSES.txt")
+$serverArgs = @((Join-Path $PSScriptRoot "third_party_licenses.py"), "--root", "openchart", "--out", (Join-Path $serverLic "THIRD-PARTY-LICENSES.txt"))
+if ($Nssm) {
+    # NSSM states its licence in its README: keep that section.
+    $readme = Join-Path (Split-Path (Split-Path $Nssm)) "README.txt"
+    if (-not (Test-Path $readme)) { throw "NSSM's README.txt (its licence) was not found next to $Nssm" }
+    $lines = Get-Content $readme
+    $at = [array]::IndexOf($lines, ($lines | Where-Object { $_ -match "^Licen[cs]e\s*$" } | Select-Object -First 1))
+    $nssmLicence = Join-Path $Work "nssm-licence.txt"
+    $lines[$at..([math]::Min($at + 8, $lines.Count - 1))] | Set-Content -Encoding ascii $nssmLicence
+    $serverArgs += @("--add", "NSSM (nssm.exe, the service manager)|2.24|Public domain|$nssmLicence")
+}
+Run $Python @serverArgs
 $viewerArgs = @((Join-Path $PSScriptRoot "third_party_licenses.py"), "--root", "pywebview", "--no-frontend", "--out", (Join-Path $viewerLic "THIRD-PARTY-LICENSES.txt"))
 if ($WebView2Licence) {
     $viewerArgs += @("--add", "Microsoft Edge WebView2 SDK (WebView2Loader.dll, Microsoft.Web.WebView2.*.dll, bundled by pywebview)|see licence|BSD-3-Clause (Microsoft)|$WebView2Licence")

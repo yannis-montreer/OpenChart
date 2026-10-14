@@ -105,6 +105,7 @@ def test_setup_completes_once_and_logs_in(fresh):
         "setup_required": False,
         "authenticated": True,
         "setup_code_required": False,
+        "secret_store": "memory",
         "secret_store_error": None,
     }
     assert fresh.harness.secrets.values == {"oanda_token": TOKEN, "telegram_token": TELEGRAM_TOKEN}

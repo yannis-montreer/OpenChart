@@ -151,6 +151,7 @@ export interface SetupStatus {
   setup_required: boolean;
   authenticated: boolean;
   setup_code_required: boolean;
+  secret_store: string | null;
   secret_store_error: string | null;
 }
 

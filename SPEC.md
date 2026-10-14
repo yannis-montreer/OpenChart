@@ -415,7 +415,7 @@ Design the data layer so these slot in without refactoring, but do not build the
 ## 15. Deployment
 
 ### Server (Windows 10, always on)
-- Install as a Windows service with NSSM (script in `packaging/`), auto-start on boot, restart on failure.
+- Install as a Windows service with NSSM (`packaging/windows/install-service.ps1`), auto-start on boot, restart on failure. The service runs as LocalSystem and reads the tokens from the encrypted file (`secrets.enc`), keyed by `C:\ProgramData\OpenChart\secret.key` (SYSTEM and Administrators only); the installer copies tokens saved in the owner's Credential Manager into it (docs/decisions.md, M8). `openchart backup` copies the data folder safely while the server runs.
 - Disable sleep. Expect Windows Update reboots, so the service must come back on its own and the watchdog message tells the user it happened.
 - Windows Firewall: allow inbound on the app port only from the Tailscale range (100.64.0.0/10).
 
@@ -427,9 +427,11 @@ Design the data layer so these slot in without refactoring, but do not build the
 
 ### Packaging
 - **Web:** the server serves the built frontend, so any browser works with no install.
-- **.exe viewer:** PyInstaller + pywebview wrapper that opens the server URL in a native window. Server address is configurable on first launch. Note that unsigned executables trigger SmartScreen warnings, mention it in the README.
+- **Server for Windows:** the server as a PyInstaller folder (`openchart\openchart.exe`) in a zip with the service scripts and NSSM, so no Python is needed.
+- **.exe viewer:** PyInstaller + pywebview wrapper that opens the server URL in a native window. Server address is configurable on first launch. Needs the WebView2 runtime (explained to the user if missing). Note that unsigned executables trigger SmartScreen warnings, mention it in the README.
 - **Docker:** `Dockerfile` and `docker-compose.yml` for the server, data in a mounted volume.
-- **GitHub Actions:** `ci.yml` runs lint and tests on every push. `release.yml` builds the `.exe` and attaches it to a tagged release.
+- **GitHub Actions:** `ci.yml` runs lint and tests on every push, builds the Windows package and the Docker image and smoke-tests both. `release.yml` (manual run or a `v*` tag) builds the zips, wheel and sdist and, for a tag, a draft release the owner publishes.
+- Every artifact carries LICENSE and NOTICE; the Windows zips also THIRD-PARTY-LICENSES.txt.
 
 ---
 

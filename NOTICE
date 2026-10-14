@@ -19,6 +19,16 @@ Apache License, Version 2.0.
 As required by its license, the chart page displays a link to
 https://www.tradingview.com/ as attribution.
 
+This product includes fancy-canvas (https://www.npmjs.com/package/fancy-canvas),
+a dependency of Lightweight Charts by TradingView (author as declared by the
+package: smakarov@tradingview.com). The package declares the MIT License and
+ships no licence file; the MIT License terms are reproduced below with the
+Feather icons notice.
+
+The Windows downloads also contain Python and the Python packages the server
+and the viewer use, and NSSM (public domain); their licences are listed in
+THIRD-PARTY-LICENSES.txt next to the programs.
+
 This product includes Lucide icons (https://lucide.dev/), licensed under the
 ISC License, some of which derive from Feather (https://feathericons.com/),
 licensed under the MIT License:
