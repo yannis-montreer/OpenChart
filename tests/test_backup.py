@@ -43,6 +43,7 @@ def make_data(folder):
     (folder / "logs").mkdir()
     (folder / "logs" / "service.log").write_text("log\n")
     (folder / "openchart.db.tmp").write_text("leftover")
+    (folder / "server.lock").write_text("")  # a running server's lock
 
 
 def test_a_backup_while_the_database_is_written_is_consistent(tmp_path):

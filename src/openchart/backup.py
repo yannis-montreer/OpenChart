@@ -24,6 +24,7 @@ from pathlib import Path
 from openchart import __version__
 
 DB_NAME = "openchart.db"
+LOCK_NAME = "server.lock"  # held by a running server (openchart.lock); never copied
 BACKUP_DIR = "backups"
 LOG_DIR = "logs"
 # Never copied: the live database files (the snapshot replaces them) and leftovers.
@@ -119,7 +120,7 @@ def _snapshot(db_path: Path, dest: Path) -> None:
 
 
 def _skipped(rel: Path, path: Path, data_dir: Path, out_dir: Path) -> bool:
-    if rel.parts[0] in (BACKUP_DIR, LOG_DIR) or rel.as_posix() == DB_NAME:
+    if rel.parts[0] in (BACKUP_DIR, LOG_DIR) or rel.as_posix() in (DB_NAME, LOCK_NAME):
         return True
     if path.name.endswith(SKIP_SUFFIXES) or path.name.startswith(".snapshot-"):
         return True

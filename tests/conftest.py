@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from openchart.api.app import create_app
 from openchart.config import Config
 from openchart.market.instruments import METAL_HOURS
+from openchart.market.sessions import TradingHours
 from openchart.providers.base import InstrumentInfo
 from openchart.providers.fake import FakeProvider, synthetic_m1
 from openchart.server import Server
@@ -19,6 +20,13 @@ from openchart.store.sqlite import Database
 
 GOLD = InstrumentInfo("XAU_USD", "XAU_USD", "Gold", 3, 0.01, "METAL")
 EURO = InstrumentInfo("EUR_USD", "EUR_USD", "EUR/USD", 5, 0.0001, "CURRENCY")
+# A made-up third instrument unlike both: 1 decimal, a provider symbol of its own, a
+# category with no default hours, and hours on Berlin time with a daily break over
+# midnight, reported by the provider itself.
+ODD_HOURS = TradingHours(
+    "Europe/Berlin", "mon", "01:15", "fri", "22:00", daily_breaks=(("22:00", "01:15"),)
+)
+ODD = InstrumentInfo("FAKE_IDX", "FAKEIDX.cash", "Fake Index", 1, 1.0, "CFD", hours=ODD_HOURS)
 NOW = int(time.time()) // 60 * 60
 CANDLES = synthetic_m1(NOW - 3 * 86400, NOW)
 PASSWORD = "correct horse battery"

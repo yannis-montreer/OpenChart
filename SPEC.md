@@ -191,11 +191,11 @@ Use a simple migration system (numbered SQL files) from the start.
 ## 6. Candle building and timeframes
 
 ### History
-1. First run: backfill M1 from the provider (default 2 years, configurable) into `candles_m1`.
+1. First run (and every newly added instrument): download newest to oldest, in the background while the live stream runs. First H1 as far back as the provider has it (1h and higher charts are complete within seconds), then M1 back to the configured depth (default 2 years) into `candles_m1`, page by page. What is stored is always one contiguous block ending at the present. The page shows the progress on the chart, in the watchlist and in Settings.
 2. Every later start: read the last stored `ts`, fill the gap since then, then switch to the live stream.
    On every start, stream reconnect and wake-up from a pause (the computer slept), also refill holes inside the last 3 days of M1, not just the tail. `openchart repair <INSTRUMENT>` does the same over the whole stored range.
-3. Backfill must be idempotent (upsert) and resumable.
-4. **Deep history tier:** H1 candles (bid, ask, mid) as far back as the provider has them, in `candles_h1` (OANDA XAU_USD: from 2006-03-19). Downloaded once in the background on first start (or with `openchart backfill <INSTRUMENT> --deep`), then gap-filled on every start. On by default (`OPENCHART_DEEP_HISTORY`).
+3. Backfill must be idempotent (upsert) and resumable: an interrupted download continues backward from the oldest stored candle. Where each download finished is stored per instrument.
+4. **Deep history tier:** H1 candles (bid, ask, mid) as far back as the provider has them, in `candles_h1` (OANDA XAU_USD: from 2006-03-19). Downloaded once in the background on first start, before M1 (or with `openchart backfill <INSTRUMENT> --deep`), then gap-filled on every start. On by default (`OPENCHART_DEEP_HISTORY`).
 
 ### Higher timeframes
 Derived on demand with a resample:

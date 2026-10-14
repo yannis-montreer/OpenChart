@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import logging
 import os
+import shutil
 import sqlite3
 import sys
 import time
@@ -17,10 +18,17 @@ from pathlib import Path
 
 from openchart import __version__
 from openchart.config import Config, ConfigError, load_config
-from openchart.market.backfill import CLOSURE_MINUTES, backfill, deep_fill, repair
+from openchart.lock import in_use
+from openchart.market.backfill import (
+    CLOSURE_MINUTES,
+    deep_fill,
+    download_backward,
+    gap_fill,
+    repair,
+)
 from openchart.market.cache import CandleCache
 from openchart.market.gaps import find_gaps
-from openchart.market.instruments import default_hours
+from openchart.market.instruments import instrument_hours
 from openchart.providers.base import AuthError, Provider, ProviderError
 from openchart.providers.registry import create_provider
 from openchart.settings import (
@@ -107,32 +115,37 @@ async def _ensure_instrument(ctx: Context, instrument: str) -> None:
             "(OANDA names use an underscore, e.g. XAU_USD)."
         )
     info = known[instrument]
-    await ctx.store.upsert_instrument(ctx.provider.name, info, default_hours(instrument, info.kind))
+    await ctx.store.upsert_instrument(ctx.provider.name, info, instrument_hours(info))
 
 
 async def _cmd_backfill(config: Config, args: argparse.Namespace) -> int:
+    """Newest first, like the server: H1 (with --deep), then M1 back to `--years`."""
     years = args.years if args.years is not None else config.backfill_years
     start = datetime.now(UTC) - timedelta(days=365.25 * years)
     async with _context(config) as ctx:
         await _ensure_instrument(ctx, args.instrument)
         before = await ctx.store.count(ctx.provider.name, args.instrument)
-        print(f"Backfilling {args.instrument} M1 from {start:%Y-%m-%d} ({before} rows stored)")
 
         def progress(written: int, ts: int, direction: str) -> None:
-            where = "up to" if direction == "forward" else "searched back to"
+            where = "up to" if direction == "forward" else "back to"
             print(f"\r  {written:>9,} candles written, {where} {_fmt(ts)}   ", end="", flush=True)
 
-        result = await backfill(ctx.provider, ctx.store, args.instrument, start, progress=progress)
+        if args.deep:
+            print(f"Deep H1 history for {args.instrument}, newest first, as far as available")
+            deep = await deep_fill(ctx.provider, ctx.store, args.instrument, progress=progress)
+            print(f"\n  H1 from {_fmt(deep.oldest)}")
+        print(f"M1 for {args.instrument}, newest first, back to {start:%Y-%m-%d} ({before} stored)")
+        await gap_fill(ctx.provider, ctx.store, args.instrument)
+        result = await download_backward(
+            ctx.provider, ctx.store, args.instrument, int(start.timestamp()), progress=progress
+        )
         after = await ctx.store.count(ctx.provider.name, args.instrument)
+        last = await ctx.store.last_ts(ctx.provider.name, args.instrument)
         print(
-            f"\nDone: reached the latest complete candle. {after - before:,} new rows "
-            f"({result.written:,} written incl. updates), {after:,} total, "
-            f"{_fmt(result.first_ts)} to {_fmt(result.last_ts)}"
+            f"\nDone: {after - before:,} new rows, {after:,} total, "
+            f"{_fmt(result.oldest)} to {_fmt(last)}"
         )
         if args.deep:
-            print(f"Deep H1 history for {args.instrument}, as far back as the broker has it")
-            deep = await deep_fill(ctx.provider, ctx.store, args.instrument, progress=progress)
-            print(f"\n  H1 from {_fmt(deep.first_ts)} to {_fmt(deep.last_ts)}")
             print("Building the 4h/D/W cache")
             n = await CandleCache(ctx.store).extend_all(ctx.provider.name, args.instrument)
             print(f"  {n:,} bars cached")
@@ -177,6 +190,12 @@ async def _cmd_stats(config: Config, args: argparse.Namespace) -> int:
                 cached = await ctx.store.cache_count(row.source, row.instrument, name)
                 if cached:
                     print(f"  {cached:,} cached {name} bars")
+            h1_from, m1_from = await ctx.store.download_marks(row.source, row.instrument)
+            if h1_from is None or m1_from is None:
+                waiting = " and ".join(
+                    g for g, mark in (("H1", h1_from), ("M1", m1_from)) if mark is None
+                )
+                print(f"  download not finished ({waiting}): it continues when the server runs")
 
         async def count(sql: str) -> int:
             async with ctx.store.conn.execute(sql) as cur:
@@ -188,6 +207,60 @@ async def _cmd_stats(config: Config, args: argparse.Namespace) -> int:
         active = await count("SELECT COUNT(*) FROM alerts WHERE status = 'active'")
         layouts = await count("SELECT COUNT(*) FROM layouts")
         print(f"Drawings: {drawings}, alerts: {alerts} ({active} active), layouts: {layouts}")
+    return 0
+
+
+async def _cmd_purge(config: Config, args: argparse.Namespace) -> int:
+    """Delete one instrument and its stored prices, to download it again from scratch."""
+    config = _data_dir(config, args)
+    if in_use(config.data_dir):
+        print(
+            f"An OpenChart server is running on {config.data_dir}: stop it first "
+            "(it would keep the instrument in memory and download it again).",
+            file=sys.stderr,
+        )
+        return 1
+    name, source = args.instrument.strip().upper(), args.source
+    async with _context(config, need_provider=False) as ctx:
+        conn = ctx.store.conn
+        if await ctx.store.instrument(source, name) is None:
+            print(f"No instrument {source}/{name} in {config.db_path}.")
+            return 1
+
+        async def count(sql: str) -> int:
+            async with conn.execute(sql, (name,)) as cur:
+                row = await cur.fetchone()
+            return row[0] if row else 0
+
+        m1 = await ctx.store.count(source, name)
+        h1 = await ctx.store.count(source, name, "H1")
+        drawings = await count("SELECT COUNT(*) FROM drawings WHERE instrument=?")
+        alerts = await count("SELECT COUNT(*) FROM alerts WHERE instrument=?")
+        ticks = config.ticks_dir / source / name
+        print(f"{source}/{name}: {m1:,} M1 and {h1:,} H1 candles, cached bars, closures")
+        print(f"  tick files: {ticks if ticks.exists() else 'none'}")
+        keep = (
+            "deleted too"
+            if args.drawings_and_alerts
+            else "kept (--drawings-and-alerts deletes them)"
+        )
+        print(f"  {drawings} drawing(s) and {alerts} alert(s): {keep}")
+        if not args.yes:
+            print("Nothing deleted. Run again with --yes to delete.")
+            return 0
+        await ctx.store.purge_instrument(source, name)
+        if args.drawings_and_alerts:
+            await conn.execute(
+                "DELETE FROM alert_events WHERE alert_id IN"
+                " (SELECT id FROM alerts WHERE instrument=?)",
+                (name,),
+            )
+            await conn.execute("DELETE FROM alerts WHERE instrument=?", (name,))
+            await conn.execute("DELETE FROM drawings WHERE instrument=?", (name,))
+            await conn.commit()
+        if ticks.exists():
+            shutil.rmtree(ticks)
+        print(f"Deleted. Add {name} again in Settings, Instruments to download it afresh.")
     return 0
 
 
@@ -511,6 +584,7 @@ COMMANDS = {
     "repair": _cmd_repair,
     "rebuild-cache": _cmd_rebuild_cache,
     "reset-password": _cmd_reset_password,
+    "purge": _cmd_purge,
     "run": _cmd_run,
     "backup": _cmd_backup,
     "secrets": _cmd_secrets,
@@ -524,7 +598,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("migrate", help="create or upgrade the database")
     sub.add_parser("test-connection", help="check the broker credentials")
-    p = sub.add_parser("backfill", help="download M1 history (idempotent, resumable)")
+    p = sub.add_parser("backfill", help="download history, newest first (idempotent, resumable)")
     p.add_argument("instrument", help="for example XAU_USD")
     p.add_argument("--years", type=float, help="history depth (default from config: 2)")
     p.add_argument(
@@ -547,6 +621,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=5,
         help="smallest hole to refetch, in open minutes (default 5; 1 checks every minute)",
     )
+    p = sub.add_parser("purge", help="delete an instrument and its stored prices (server stopped)")
+    p.add_argument("instrument")
+    p.add_argument("--source", default="oanda")
+    p.add_argument("--yes", action="store_true", help="really delete (default: only show)")
+    p.add_argument(
+        "--drawings-and-alerts",
+        action="store_true",
+        help="also delete the instrument's drawings, alerts and alert log",
+    )
+    p.add_argument("--data-dir", help="the data folder (default data/, from config)")
     p = sub.add_parser("run", help="start the server: API, websocket and live feed")
     p.add_argument(
         "--host", help="bind address (default: 127.0.0.1, or 0.0.0.0 if enabled in Settings)"

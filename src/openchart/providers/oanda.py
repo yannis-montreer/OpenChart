@@ -192,6 +192,27 @@ class OandaProvider:
             if self.request_delay:
                 await asyncio.sleep(self.request_delay)
 
+    async def fetch_page_before(
+        self, instrument: str, end: datetime | None, granularity: str = "M1"
+    ) -> list[Candle]:
+        params: dict[str, Any] = {
+            "granularity": granularity,
+            "price": "MBA",
+            "count": MAX_CANDLES_PER_REQUEST,
+        }
+        end_ts = None if end is None else int(end.timestamp())
+        if end_ts is not None:
+            params["to"] = end_ts  # without `to`: the latest candles, up to the forming one
+        data = await self._get(f"/v3/instruments/{instrument}/candles", params)
+        if self.request_delay:
+            await asyncio.sleep(self.request_delay)
+        # The candle at `to` itself may come back and count toward `count` (as the
+        # skipped first candle does going forward), and the newest page ends with the
+        # still-forming candle: both are dropped, so a full page can hold 4999. Only an
+        # empty result means there is nothing older.
+        batch = (parse_candle(raw) for raw in data.get("candles", []))
+        return [c for c in batch if c.complete and (end_ts is None or c.ts < end_ts)]
+
     async def stream_ticks(self, instruments: list[str]) -> AsyncIterator[StreamEvent]:
         path = f"/v3/accounts/{self.config.account_id}/pricing/stream"
         params = {"instruments": ",".join(instruments)}

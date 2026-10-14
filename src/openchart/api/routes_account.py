@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from openchart.alerts.notifiers.telegram import TelegramClient
 from openchart.api.auth import SESSION_COOKIE, SESSION_SECONDS, PasswordError, check_new_password
 from openchart.config import OandaConfig
-from openchart.market.instruments import default_hours
+from openchart.market.instruments import instrument_hours
 from openchart.providers.base import InstrumentInfo, ProviderError
 from openchart.server import Server
 from openchart.settings import EncryptedFileSecrets, describe_secret
@@ -147,8 +147,7 @@ def account_routes(server: Server) -> APIRouter:
             raise HTTPException(
                 400, f"{name} is not available on this account (names look like XAU_USD)."
             )
-        hours = default_hours(info.instrument, info.kind)
-        await server.store.upsert_instrument(source, info, hours)
+        await server.store.upsert_instrument(source, info, instrument_hours(info))
         return info
 
     async def settings_payload() -> dict[str, Any]:

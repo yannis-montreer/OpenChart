@@ -34,7 +34,7 @@ import { haStep, heikinAshi } from "./heikinAshi";
 import { h } from "../ui/dom";
 import { mergeBars } from "./merge";
 import { TimeIndex, wallAdvance } from "../drawings/geometry";
-import type { Clock } from "../drawings/tradingTime";
+import { tradingClock, type Clock } from "../drawings/tradingTime";
 import {
   formatChartTime,
   formatCountdown,
@@ -124,6 +124,10 @@ export class ChartView {
   private generation = 0;
   private loadingOlder = false;
   private exhausted = false;
+  /** The server is still downloading this instrument's history (newest first). */
+  private historyGrowing = false;
+  private olderHint: HTMLElement;
+  private legendClock?: { key: Instrument; clock: Clock };
   private hovering = false;
   private formatPrice: (x: number) => string = (x) => String(x);
   /** Live updates that arrive while a load is in flight; applied after it. */
@@ -156,6 +160,7 @@ export class ChartView {
     this.askTag = h("div", { class: "quote-tag ask num", hidden: true }, h("span", { class: "side" }, "Ask"), h("span"));
     this.bidTag = h("div", { class: "quote-tag bid num", hidden: true }, h("span", { class: "side" }, "Bid"), h("span"));
     this.message = h("div", { class: "chart-message", hidden: true });
+    this.olderHint = h("div", { class: "older-hint", hidden: true }, "Loading older history…");
     this.legendIndicators = h("div", { class: "legend-indicators" });
     area.append(
       host,
@@ -164,6 +169,7 @@ export class ChartView {
       this.askTag,
       this.bidTag,
       this.message,
+      this.olderHint,
     );
 
     this.chart = createChart(host, {
@@ -212,6 +218,7 @@ export class ChartView {
     this.chart.subscribeCrosshairMove((p) => this.onCrosshair(p));
     this.chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
       if (range && range.from < 40) void this.loadOlder();
+      if (range && range.from > 5) this.olderHint.hidden = true;
       this.placeQuotes();
     });
     window.setInterval(() => this.placeQuotes(), 1000);
@@ -221,8 +228,14 @@ export class ChartView {
 
   async load(ctx: ChartContext, opts: { from?: number; visible?: [number, number] } = {}): Promise<void> {
     const gen = ++this.generation;
+    // Another instrument has its own price range: a price scale the user dragged on
+    // gold (around 2650) would show nothing of EUR/USD (around 1.08).
+    if (this.ctx && this.ctx.instrument.instrument !== ctx.instrument.instrument) {
+      this.chart.priceScale("right").applyOptions({ autoScale: true });
+    }
     this.ctx = ctx;
     this.exhausted = false;
+    this.olderHint.hidden = true;
     this.lastTick = undefined;
     this.removeQuoteLines();
     this.applyFormat();
@@ -265,6 +278,24 @@ export class ChartView {
           ? "No tick data yet for this timeframe. Second bars are built from ticks recorded while the server runs."
           : "No candles stored for this instrument yet.",
     );
+  }
+
+  barCount(): number {
+    return this.bars.length;
+  }
+
+  /** The instrument's history download is running (or finished: `false`). */
+  setHistoryGrowing(on: boolean): void {
+    this.historyGrowing = on;
+    if (!on) this.olderHint.hidden = true;
+  }
+
+  /** Older history arrived on the server: if the chart sits at its left end, load it. */
+  retryOlder(): void {
+    if (!this.exhausted) return;
+    this.exhausted = false;
+    const range = this.chart.timeScale().getVisibleLogicalRange();
+    if (range && range.from < 40) void this.loadOlder();
   }
 
   /** Re-render existing bars, for example after the display timezone changed. */
@@ -310,8 +341,11 @@ export class ChartView {
       if (gen !== this.generation) return;
       if (!older.length) {
         this.exhausted = true;
+        // Still downloading: more arrives soon (`retryOlder`). Say so at the left edge.
+        this.olderHint.hidden = !this.historyGrowing;
         return;
       }
+      this.olderHint.hidden = true;
       const range = this.chart.timeScale().getVisibleLogicalRange();
       const before = this.bars.length;
       this.setBars([...older, ...this.bars]);
@@ -688,7 +722,7 @@ export class ChartView {
     for (const [k, v] of [["O", bar.o], ["H", bar.h], ["L", bar.l], ["C", bar.c]] as const) {
       parts.push(h("span", { class: dir }, k, h("b", {}, fmt(v))));
     }
-    if (prev) {
+    if (prev && !this.isHole(prev, bar)) {
       const change = bar.c - prev.c;
       const pct = (change / prev.c) * 100;
       const cls = change >= 0 ? "up" : "down";
@@ -697,6 +731,22 @@ export class ChartView {
     }
     parts.push(h("span", { title: "Number of price updates, not traded volume" }, "Tick vol", h("b", {}, String(bar.v))));
     this.legendValues.replaceChildren(...parts);
+  }
+
+  /**
+   * Missing history between two bars on screen: more trading time between them than
+   * a bar and a quiet stretch. The change from `prev` would then mean nothing.
+   */
+  private isHole(prev: Bar, bar: Bar): boolean {
+    const ctx = this.ctx;
+    if (!ctx || ctx.timeframe.kind === "tick") return false;
+    if (this.legendClock?.key !== ctx.instrument) {
+      const inst = ctx.instrument;
+      this.legendClock = { key: inst, clock: tradingClock(inst.hours, inst.closures ?? []) };
+    }
+    const clock = this.legendClock.clock;
+    const step = ctx.timeframe.seconds;
+    return clock(bar.t) - clock(prev.t) > step + Math.max(step / 2, 600);
   }
 
   // Quote stack on the price scale, anchored to the last-price label:
