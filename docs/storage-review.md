@@ -217,6 +217,16 @@ To implement after M8 and M9 are merged, not before:
    choices, and the wording of section 4.
 4. **`purge` runs VACUUM** by default; `--no-vacuum` skips it.
 5. **All three log changes** of section 5, after M8 merges.
+6. **5s candles**: the spread/offsets layout, default retention 1 year (gold's about
+   58 MB a year is acceptable). Plain integers only if a smaller footprint is asked for.
+7. **Dukascopy**: nothing downloaded or measured now. It is an optional opt-in provider
+   for personal installs only (its terms forbid commercial use and building a
+   database), never bundled, never offered on hosted instances, and to be revisited
+   with the multi-source work.
+
+**Order of implementation**, once M8 and M9 are merged: the A+C candle migration;
+tick and M1 retention with purge and VACUUM; the log fixes; then 5s candles and replay
+as separate milestones.
 
 # Part 2: replay, 5-second candles, historical ticks, cold storage
 
@@ -351,7 +361,7 @@ if it stays under about 50 MB per instrument" gives:
 - with plain integers and delta encoding: gold about 97 MB → the default would have to
   be 6 months (gold about 49 MB).
 
-**Recommendation:** the relative layout for S5 files, default 1 year. Decision for you.
+**Decided (owner):** the relative layout for S5 files, default 1 year.
 
 With 5s candles kept for a year, **ticks can expire after 30 days**: everything from
 5s up is still there (charts, replay in 5-second steps), only 1s charts and
@@ -393,6 +403,9 @@ started recording. Dukascopy publishes free historical ticks for forex and metal
   slightly between brokers.
 - Code: medium (the downloader, the interface, a source choice in replay, a settings
   page with the terms). Risk: low technically; the legal question is the owner's.
+- **Decided (owner):** an optional opt-in provider for personal installs only, never
+  bundled, never offered on hosted instances; nothing downloaded or measured now;
+  revisit with the multi-source work.
 
 ## 11. Cold storage for old data
 
