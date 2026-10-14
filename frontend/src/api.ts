@@ -45,9 +45,23 @@ export interface Instrument {
   closures: Closure[];
 }
 
+/** An instrument's history download (newest first: hourly, then minute candles). */
+export interface HistoryStatus {
+  state: "pending" | "running" | "failed" | "done";
+  phase: "h1" | "m1" | null;
+  written: number;
+  /** Oldest candle reached so far (UTC epoch seconds). */
+  oldest: number | null;
+  /** Where the minute download stops. */
+  target: number | null;
+  /** 0..1 of the current step. */
+  progress: number | null;
+  error: string | null;
+}
+
 export interface InstrumentStatus {
   last_tick_age: number | null;
-  history: { state: string; written: number; at: number | null } | null;
+  history: HistoryStatus | null;
 }
 
 export interface Status {

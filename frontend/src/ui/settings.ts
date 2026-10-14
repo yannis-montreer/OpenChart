@@ -1,6 +1,7 @@
 /** Settings dialog (SPEC section 8.3). Each section saves on its own. */
 
 import { account, api, type Settings } from "../api";
+import { isDownloading, lineText } from "./download";
 import { field, primary, resultLine, secondary, secretInput, segmented, textInput, toggleSwitch, withBusy } from "./forms";
 import { button, h, icon, type IconName } from "./dom";
 
@@ -259,8 +260,15 @@ export class SettingsDialog {
     const result = resultLine();
     const search = textInput({ placeholder: "Search, e.g. EUR, gold, NAS…" });
 
+    let anyDownloading = false;
     const renderMine = async () => {
-      const rows = (await api.instruments()).filter((i) => i.enabled);
+      const [all, status] = await Promise.all([api.instruments(), api.status().catch(() => undefined)]);
+      const rows = all.filter((i) => i.enabled);
+      anyDownloading = rows.some((i) => isDownloading(status?.instruments?.[i.instrument]?.history));
+      const downloading = (name: string) => {
+        const history = status?.instruments?.[name]?.history;
+        return isDownloading(history) ? h("small", { class: "dl-line-small" }, lineText(history)) : null;
+      };
       list.replaceChildren(
         ...rows.map((i) => {
           const remove = h("button", { class: "btn btn-danger", type: "button" }, "Remove");
@@ -277,7 +285,12 @@ export class SettingsDialog {
               }
             }),
           );
-          return h("div", { class: "inst-row" }, h("div", { class: "name" }, h("b", {}, i.instrument), h("small", {}, i.display_name)), rows.length > 1 ? remove : null);
+          return h(
+            "div",
+            { class: "inst-row" },
+            h("div", { class: "name" }, h("b", {}, i.instrument), h("small", {}, i.display_name), downloading(i.instrument)),
+            rows.length > 1 ? remove : null,
+          );
         }),
       );
     };
@@ -301,7 +314,7 @@ export class SettingsDialog {
                     try {
                       await account.addInstrument(i.instrument);
                       this.instrumentsChanged = true;
-                      result.ok(`${i.instrument} added. Its price history downloads in the background (about a minute).`);
+                      result.ok(`${i.instrument} added. Its history downloads in the background, newest first: hourly candles within seconds, then minute candles (a few minutes).`);
                       await renderMine();
                       await runSearch();
                     } catch (err) {
@@ -322,6 +335,11 @@ export class SettingsDialog {
       timer = window.setTimeout(() => void runSearch(), 250);
     });
     void renderMine();
+    // While the section is open, keep download progress current.
+    const refresh = window.setInterval(() => {
+      if (!list.isConnected) window.clearInterval(refresh);
+      else if (anyDownloading) void renderMine().catch(() => undefined);
+    }, 3000);
     return [
       h("h3", {}, "Your instruments"),
       list,

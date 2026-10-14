@@ -18,6 +18,7 @@ from openchart.api.auth import Auth
 from openchart.api.hub import Hub
 from openchart.config import Config, OandaConfig
 from openchart.indicators._registry import Registry, load_indicators
+from openchart.lock import DataFolderLock
 from openchart.market.cache import CandleCache
 from openchart.market.candle_builder import CandleBuilder
 from openchart.market.feed import Feed
@@ -90,6 +91,13 @@ class Server:
 
     async def start(self) -> None:
         cfg = self.config
+        self.lock = DataFolderLock(cfg.data_dir)
+        if not self.lock.acquire():
+            log.warning(
+                "another OpenChart server seems to use %s: two servers on one data folder "
+                "download and alert twice",
+                cfg.data_dir,
+            )
         self.db = await Database.open(cfg.db_path)
         self.store = CandleStore(self.db.conn)
         self.settings = SettingsStore(self.db.conn)
@@ -170,6 +178,7 @@ class Server:
                 self.feed.on_closures = self.broadcast_closures
                 self.alerts.attach(self.feed)
                 self.feed.stream.on_state = self._on_stream_state
+                await self.feed.find_downloads()  # so the first status already shows them
                 if self.run_feed:
                     self._feed_task = asyncio.create_task(self._run_feed(self.feed), name="feed")
             await self.alerts.refresh_clocks()
@@ -248,3 +257,4 @@ class Server:
         if self._fixed_provider is not None:
             await self._fixed_provider.aclose()
         await self.db.close()
+        self.lock.release()

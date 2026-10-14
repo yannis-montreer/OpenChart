@@ -86,6 +86,7 @@ class FakeProvider:
         self._instruments = instruments or []
         self.fetch_calls = 0
         self.stream_calls = 0
+        self.page_size = 5000  # candles per `fetch_page_before`, like OANDA's maximum
 
     async def list_instruments(self) -> list[InstrumentInfo]:
         return list(self._instruments)
@@ -99,6 +100,15 @@ class FakeProvider:
         for candle in series.get(instrument, []):
             if start_ts <= candle.ts < end_ts and candle.complete:
                 yield candle
+
+    async def fetch_page_before(
+        self, instrument: str, end: datetime | None, granularity: str = "M1"
+    ) -> list[Candle]:
+        self.fetch_calls += 1
+        end_ts = float("inf") if end is None else end.timestamp()
+        series = self.h1 if granularity == "H1" else self.candles
+        older = [c for c in series.get(instrument, []) if c.ts < end_ts and c.complete]
+        return older[-self.page_size :]
 
     async def stream_ticks(self, instruments: list[str]) -> AsyncIterator[StreamEvent]:
         self.stream_calls += 1

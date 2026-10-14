@@ -113,6 +113,16 @@ class Provider(Protocol):
         """
         ...
 
+    async def fetch_page_before(
+        self, instrument: str, end: datetime | None, granularity: str = "M1"
+    ) -> list[Candle]:
+        """The newest page of complete candles with `ts < end` (`end` None: the present),
+        in ascending order. An empty list means there is nothing older.
+
+        Downloads walk backward with it, so the newest history arrives first.
+        """
+        ...
+
     def stream_ticks(self, instruments: list[str]) -> AsyncIterator[StreamEvent]:
         """Live ticks plus heartbeats from one connection.
 

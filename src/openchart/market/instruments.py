@@ -12,7 +12,12 @@ from openchart.providers.base import InstrumentInfo
 
 # Typical retail forex/metals hours in New York time. Brokers differ by a few minutes;
 # these feed the gap report and the feed watchdog, so being close is enough.
-FX_HOURS = TradingHours(NEW_YORK, "sun", "17:00", "fri", "17:00")
+# Currency pairs pause for the daily rollover: OANDA's EUR_USD has no candles for 4 to 5
+# minutes from 17:00 New York every weekday (and the week opens at 17:05). The holes of
+# 2 to 3 minutes that sometimes follow are not modelled.
+FX_HOURS = TradingHours(
+    NEW_YORK, "sun", "17:00", "fri", "17:00", daily_breaks=(("17:00", "17:05"),)
+)
 METAL_HOURS = TradingHours(
     NEW_YORK, "sun", "18:00", "fri", "17:00", daily_breaks=(("17:00", "18:00"),)
 )

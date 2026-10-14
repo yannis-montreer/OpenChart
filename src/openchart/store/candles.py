@@ -16,7 +16,7 @@ import aiosqlite
 import pandas as pd
 
 from openchart.market.aggregate import COLUMNS, FULL_COLUMNS, PRICES, empty_frame
-from openchart.market.sessions import TradingHours, bar_start
+from openchart.market.sessions import TradingHours, bar_bounds, bar_start
 from openchart.market.timeframes import TIMEFRAMES
 from openchart.providers.base import OHLC, Candle, InstrumentInfo
 
@@ -77,21 +77,58 @@ class CandleStore:
             return 0
         self._epoch[(source, instrument)] += 1
         await self.conn.executemany(_upsert_sql(TABLES[granularity]), rows)
-        await self._invalidate_cache(source, instrument, min(r[2] for r in rows))
+        stamps = [r[2] for r in rows]
+        await self._invalidate_cache(source, instrument, min(stamps), max(stamps))
         await self.conn.commit()
         return len(rows)
 
     async def upsert_m1(self, source: str, instrument: str, candles: Iterable[Candle]) -> int:
         return await self.upsert(source, instrument, candles, "M1")
 
-    async def _invalidate_cache(self, source: str, instrument: str, since: int) -> None:
-        """Drop cached bars that contain `since` or come after it."""
+    async def _invalidate_cache(self, source: str, instrument: str, lo: int, hi: int) -> None:
+        """Drop the cached bars that rows written in `[lo, hi]` affect.
+
+        That is every bar overlapping `[lo, hi]` plus the next hour, because writing M1
+        can move the hour where M1 takes over from H1 (`h1_boundary`). At the end of the
+        cache the bars are simply dropped (the cache grows forward again); anywhere else,
+        before or inside it (a download extending history backward), the dropped range is
+        recorded in `cache_dirty` and `CandleCache.extend` recomputes it.
+        """
         for name in CACHED_TIMEFRAMES:
+            tf = TIMEFRAMES[name]
+            start, end = bar_start(lo, tf), bar_bounds(hi + 3599, tf)[1]
+            last = await self.cache_last_ts(source, instrument, name)
+            if last is None:
+                continue  # nothing cached: the cache starts from the oldest data anyway
+            if end > last:
+                await self.conn.execute(
+                    "DELETE FROM candles_cache WHERE source=? AND instrument=? AND timeframe=?"
+                    " AND ts>=?",
+                    (source, instrument, name, start),
+                )
+                continue
             await self.conn.execute(
                 "DELETE FROM candles_cache WHERE source=? AND instrument=? AND timeframe=?"
-                " AND ts>=?",
-                (source, instrument, name, bar_start(since, TIMEFRAMES[name])),
+                " AND ts>=? AND ts<?",
+                (source, instrument, name, start, end),
             )
+            await self.conn.execute(
+                "INSERT INTO cache_dirty (source, instrument, timeframe, start_ts, end_ts)"
+                " VALUES (?, ?, ?, ?, ?) ON CONFLICT (source, instrument, timeframe, start_ts)"
+                " DO UPDATE SET end_ts=MAX(end_ts, excluded.end_ts)",
+                (source, instrument, name, start, end),
+            )
+
+    async def cache_dirty(
+        self, source: str, instrument: str, timeframe: str
+    ) -> list[tuple[int, int]]:
+        """Ranges `[start, end)` of cached bars waiting to be recomputed."""
+        async with self.conn.execute(
+            "SELECT start_ts, end_ts FROM cache_dirty WHERE source=? AND instrument=?"
+            " AND timeframe=? ORDER BY start_ts",
+            (source, instrument, timeframe),
+        ) as cur:
+            return [(r[0], r[1]) for r in await cur.fetchall()]
 
     # Reads
 
@@ -261,10 +298,23 @@ class CandleStore:
         return n or 0
 
     async def write_cache(
-        self, source: str, instrument: str, timeframe: str, bars: pd.DataFrame
+        self,
+        source: str,
+        instrument: str,
+        timeframe: str,
+        bars: pd.DataFrame,
+        refilled: tuple[int, int] | None = None,
     ) -> int:
-        """Upsert complete derived bars (a frame with FULL_COLUMNS)."""
+        """Upsert complete derived bars (a frame with FULL_COLUMNS). `refilled`: the
+        `cache_dirty` range these bars recompute, removed in the same transaction."""
+        if refilled is not None:
+            await self.conn.execute(
+                "DELETE FROM cache_dirty WHERE source=? AND instrument=? AND timeframe=?"
+                " AND start_ts=? AND end_ts=?",
+                (source, instrument, timeframe, *refilled),
+            )
         if bars.empty:
+            await self.conn.commit()
             return 0
         values = bars[FULL_COLUMNS].to_numpy(dtype=object)
         rows = [
@@ -306,11 +356,12 @@ class CandleStore:
         return frame
 
     async def clear_cache(self, source: str | None = None, instrument: str | None = None) -> None:
-        await self.conn.execute(
-            "DELETE FROM candles_cache"
-            " WHERE (? IS NULL OR source=?) AND (? IS NULL OR instrument=?)",
-            (source, source, instrument, instrument),
-        )
+        for table in ("candles_cache", "cache_dirty"):
+            await self.conn.execute(
+                f"DELETE FROM {table}"
+                " WHERE (? IS NULL OR source=?) AND (? IS NULL OR instrument=?)",
+                (source, source, instrument, instrument),
+            )
         await self.conn.commit()
 
     # Instruments
@@ -419,6 +470,49 @@ class CandleStore:
             (at, source, instrument),
         )
         await self.conn.commit()
+
+    # Downloads (newest to oldest, resumable)
+
+    async def download_marks(self, source: str, instrument: str) -> tuple[int | None, int | None]:
+        """(h1_complete_from, m1_complete_from): where each finished download ended, or
+        None while it is not finished."""
+        async with self.conn.execute(
+            "SELECT h1_complete_from, m1_complete_from FROM instruments"
+            " WHERE source=? AND instrument=?",
+            (source, instrument),
+        ) as cur:
+            row = await cur.fetchone()
+        return (row[0], row[1]) if row else (None, None)
+
+    async def mark_download_complete(
+        self, source: str, instrument: str, granularity: str, start: int | None
+    ) -> None:
+        column = {"H1": "h1_complete_from", "M1": "m1_complete_from"}[granularity]
+        await self.conn.execute(
+            f"UPDATE instruments SET {column}=? WHERE source=? AND instrument=?",
+            (start, source, instrument),
+        )
+        await self.conn.commit()
+
+    async def purge_instrument(self, source: str, instrument: str) -> dict[str, int]:
+        """Delete an instrument and everything stored for its prices (candles, cache,
+        closures). Rows deleted per table."""
+        counts: dict[str, int] = {}
+        for table in (
+            "candles_m1",
+            "candles_h1",
+            "candles_cache",
+            "cache_dirty",
+            "closures",
+            "instruments",
+        ):
+            cur = await self.conn.execute(
+                f"DELETE FROM {table} WHERE source=? AND instrument=?", (source, instrument)
+            )
+            counts[table] = cur.rowcount
+        await self.conn.commit()
+        self._epoch[(source, instrument)] += 1
+        return counts
 
     async def instrument(self, source: str, instrument: str) -> InstrumentRow | None:
         for row in await self.instruments(source):

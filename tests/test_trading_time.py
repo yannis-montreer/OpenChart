@@ -65,13 +65,15 @@ def test_frontend_fixture_is_current():
 
 
 def write_fixture() -> None:
-    FIXTURE.write_text(json.dumps(fixture_data(), separators=(",", ":")) + "\n")
+    text = json.dumps(fixture_data(), separators=(",", ":")) + "\n"
+    FIXTURE.write_text(text, encoding="utf-8", newline="\n")
 
 
 def test_clock_runs_only_while_open():
     gold = TradingClock(METAL_HOURS)
     assert gold.week_open_seconds == 115 * 3600  # 5 days x 23 hours
-    assert TradingClock(FX_HOURS).week_open_seconds == 120 * 3600
+    # 5 days x 24 hours less five 5-minute rollover breaks (Sunday to Thursday).
+    assert TradingClock(FX_HOURS).week_open_seconds == 120 * 3600 - 5 * 5 * 60
     # Friday 16:00 New York to Sunday 18:00: one trading hour (16:00-17:00).
     assert gold(utc(2024, 7, 14, 22)) - gold(utc(2024, 7, 12, 20)) == 3600
     # The daily break (17:00-18:00 New York) does not count.

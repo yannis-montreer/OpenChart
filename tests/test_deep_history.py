@@ -130,16 +130,18 @@ async def test_writes_invalidate_affected_bars(store):
     days = await full_cache(store, "1D")
     target = int(days["ts"].iloc[3])
 
-    # A corrected minute inside the 4th day: that day and later ones are dropped...
+    # A corrected minute inside the 4th day: only that day is dropped, and remembered...
     spike = next(c for c in M1 if c.ts > target + 3 * 3600)
     big = OHLC(spike.mid.o, 9999.0, spike.mid.l, spike.mid.c)
     await store.upsert("oanda", "XAU_USD", [Candle(spike.ts, big, big, big, spike.volume)], "M1")
     remaining = await full_cache(store, "1D")
-    assert remaining["ts"].max() < target
+    assert target not in set(remaining["ts"]) and len(remaining) == len(days) - 1
+    assert await store.cache_dirty("oanda", "XAU_USD", "1D") == [(target, target + 86400)]
     # ...and the next extend recomputes them with the new data.
     await cache.extend("oanda", "XAU_USD", T["1D"])
-    days = await full_cache(store, "1D")
-    assert days.loc[days["ts"] == target, "mid_h"].iloc[0] == 9999.0
+    after = await full_cache(store, "1D")
+    assert after.loc[after["ts"] == target, "mid_h"].iloc[0] == 9999.0
+    assert len(after) == len(days) and await store.cache_dirty("oanda", "XAU_USD", "1D") == []
 
 
 async def test_write_during_extend_is_not_cached_stale(store, monkeypatch):
@@ -190,7 +192,7 @@ async def test_deep_fill_downloads_once_then_gap_fills(store):
     provider = FakeProvider(h1={"XAU_USD": H1[:-48]})
     first = await deep_fill(provider, store, "XAU_USD")
     assert first.written == len(H1) - 48
-    assert first.first_ts == H1[0].ts
+    assert first.oldest == H1[0].ts and first.complete
     provider.h1["XAU_USD"] = H1
     again = await deep_fill(provider, store, "XAU_USD")
     assert again.written == 48

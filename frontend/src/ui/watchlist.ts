@@ -1,13 +1,15 @@
 /** Watchlist panel: every stored instrument with its live price and daily change. */
 
-import { api, type Bar, type Instrument, type Meta } from "../api";
+import { api, type Bar, type HistoryStatus, type Instrument, type Meta } from "../api";
 import { h } from "./dom";
+import { isDownloading, lineText, shortText } from "./download";
 
 interface Row {
   inst: Instrument;
   el: HTMLButtonElement;
   last: HTMLElement;
   change: HTMLElement;
+  badge: HTMLElement;
   prevClose?: number;
   price?: number;
 }
@@ -38,18 +40,32 @@ export class Watchlist {
     for (const inst of instruments) {
       const last = h("span", { class: "num" }, "–");
       const change = h("span", { class: "num" }, "");
+      const badge = h("span", { class: "dl-badge", hidden: true });
       const el = h(
         "button",
         { class: "wl-row", type: "button", role: "listitem" },
         h("span", { class: "sym" }, inst.instrument, h("small", {}, inst.display_name)),
         last,
-        change,
+        h("span", { class: "chg" }, change, badge),
       );
       el.addEventListener("click", () => this.onSelect(inst.instrument));
-      this.rows.set(inst.instrument, { inst, el, last, change });
+      this.rows.set(inst.instrument, { inst, el, last, change, badge });
       this.list.append(el);
     }
     this.setCurrent(current);
+  }
+
+  /** While the instrument's history downloads, a marker replaces its change column. */
+  setDownload(instrument: string, history: HistoryStatus | null | undefined): void {
+    const row = this.rows.get(instrument);
+    if (!row) return;
+    const on = isDownloading(history);
+    row.badge.hidden = !on;
+    row.change.hidden = on;
+    if (on) {
+      row.badge.textContent = shortText(history);
+      row.badge.title = lineText(history);
+    }
   }
 
   setCurrent(instrument?: string): void {

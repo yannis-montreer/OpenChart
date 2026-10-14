@@ -10,12 +10,18 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from openchart.alerts.geometry import line_price
+from openchart.market.gaps import find_gaps
 from openchart.market.instruments import FX_HOURS, METAL_HOURS
-from openchart.market.sessions import TradingClock
+from openchart.market.sessions import TradingClock, TradingHours
 from openchart.providers.base import Tick
 from openchart.providers.fake import FakeProvider, aggregate_candles, synthetic_m1
 from tests.conftest import CANDLES, EURO, GOLD, NOW, ODD, ODD_HOURS
 from tests.test_alerts_api import settle, with_telegram
+
+
+def utc(*a) -> int:
+    return int(datetime(*a, tzinfo=UTC).timestamp())
+
 
 NEW_YORK = ZoneInfo("America/New_York")
 BERLIN = ZoneInfo("Europe/Berlin")
@@ -46,7 +52,7 @@ def add(client, name: str, timeout: float = 20.0) -> None:
     while True:
         feed = client.server.feed
         background = feed._background if feed else None
-        if background is not None and background.done() and name not in feed.initial:
+        if background is not None and background.done() and name not in feed.downloading:
             return
         assert time.time() < deadline, f"{name} history did not finish downloading"
         time.sleep(0.05)
@@ -99,7 +105,8 @@ def test_eurusd_is_added_from_settings_with_its_own_metadata(market):
         "EUR/USD",
     )
     assert eur["hours"] == FX_HOURS.to_dict() != instruments(client)["XAU_USD"]["hours"]
-    assert eur["hours"]["daily_breaks"] == [] and eur["closures"] == []
+    assert eur["hours"]["daily_breaks"] == [{"start": "17:00", "end": "17:05"}]
+    assert eur["closures"] == []
 
     # Its history through the normal path: M1, H1 and the bar cache; gold untouched.
     store, feed = client.server.store, client.server.feed
@@ -117,26 +124,29 @@ def test_eurusd_is_added_from_settings_with_its_own_metadata(market):
 
 
 def test_eurusd_4h_bars_follow_its_own_hours(market):
-    """4h bars open at 17, 21, 01, 05, 09 and 13 New York time; EUR/USD opens on
-    Sunday at 17:00, so its first bar of the week is a full one (gold's opens at 18:00)."""
+    """4h bars open at 17, 21, 01, 05, 09 and 13 New York time. EUR/USD opens on
+    Sunday at 17:05 (gold at 18:00), so the weekly open is in the 17:00 bar, and its
+    17:00 bars miss only the 5-minute rollover."""
     client = market
     add(client, "EUR_USD")
     bars = client.get("/api/candles?instrument=EUR_USD&timeframe=4h&limit=200").json()["candles"]
     assert len(bars) > 60
-    first_m1 = {c.ts: c for c in market.euro}
     sundays = 0
     for bar in bars:
         local = datetime.fromtimestamp(bar["t"], NEW_YORK)
         assert local.hour in (1, 5, 9, 13, 17, 21) and local.minute == 0
         assert local.weekday() != 5  # nothing on Saturday
-        if local.weekday() == 6:  # Sunday 17:00: the weekly open, with data from 17:00
+        if local.weekday() == 6:  # Sunday 17:00: the weekly open, with data from 17:05
             sundays += 1
-            assert local.hour == 21 or bar["o"] == pytest.approx(first_m1[bar["t"]].mid.o)
+            first = next(c for c in market.euro if c.ts >= bar["t"])
+            assert datetime.fromtimestamp(first.ts, NEW_YORK).minute == 5 or local.hour == 21
+            assert local.hour == 21 or bar["o"] == pytest.approx(first.mid.o)
     assert sundays >= 2
     inside = [b for b in bars if market.euro[0].ts <= b["t"] <= NOW - 4 * 3600]
-    for bar in inside:  # each weekday bar has 4 open hours of minutes: no daily break
-        if datetime.fromtimestamp(bar["t"], NEW_YORK).weekday() in (0, 1, 2, 3):
-            assert bar["v"] == 240 * 10
+    for bar in inside:  # weekday bars: 4 open hours, less the rollover at 17:00
+        local = datetime.fromtimestamp(bar["t"], NEW_YORK)
+        if local.weekday() in (0, 1, 2, 3):
+            assert bar["v"] == (235 if local.hour == 17 else 240) * 10
 
 
 def test_switching_instruments_keeps_each_ones_drawings_and_alerts(market):
@@ -250,7 +260,7 @@ def test_a_line_is_straight_across_the_weekend_in_each_instruments_own_hours():
     berlin = lambda d, h: datetime(2024, 7, d, h, tzinfo=BERLIN).timestamp()  # noqa: E731
     cases = [
         (METAL_HOURS, ny(11, 9), ny(12, 9), ny(15, 9), 23),  # Thu, Fri, Mon 09:00 New York
-        (FX_HOURS, ny(11, 9), ny(12, 9), ny(15, 9), 24),
+        (FX_HOURS, ny(11, 9), ny(12, 9), ny(15, 9), 24 - 5 / 60),  # less the rollover
         (ODD_HOURS, berlin(11, 12), berlin(12, 12), berlin(15, 12), 20.75),
     ]
     for hours, thu, fri, monday, day_hours in cases:
@@ -262,7 +272,7 @@ def test_a_line_is_straight_across_the_weekend_in_each_instruments_own_hours():
     # Over gold's daily break the two clocks differ: the hours are per instrument.
     a, b = ny(11, 16), ny(11, 19)
     assert (TradingClock(METAL_HOURS)(b) - TradingClock(METAL_HOURS)(a)) / 3600 == 2
-    assert (TradingClock(FX_HOURS)(b) - TradingClock(FX_HOURS)(a)) / 3600 == 3
+    assert (TradingClock(FX_HOURS)(b) - TradingClock(FX_HOURS)(a)) / 60 == 3 * 60 - 5
 
 
 def test_the_weekly_open_of_each_instrument_is_its_own():
@@ -274,5 +284,47 @@ def test_the_weekly_open_of_each_instrument_is_its_own():
             t += 60
         opens[name] = t
     assert datetime.fromtimestamp(opens["gold"], NEW_YORK).strftime("%a %H:%M") == "Sun 18:00"
-    assert datetime.fromtimestamp(opens["eur"], NEW_YORK).strftime("%a %H:%M") == "Sun 17:00"
+    assert datetime.fromtimestamp(opens["eur"], NEW_YORK).strftime("%a %H:%M") == "Sun 17:05"
     assert datetime.fromtimestamp(opens["odd"], BERLIN).strftime("%a %H:%M") == "Mon 01:15"
+
+
+# The currency rollover break
+
+
+def test_a_eurusd_ray_across_17_00_new_york_stays_straight():
+    """The 17:00-17:05 rollover is not trading time: the bars on either side (16:59 and
+    17:05) are one minute apart on the chart and on the line, like any other two bars."""
+    fx = TradingClock(FX_HOURS)
+
+    def ny(h, m):
+        return datetime(2024, 7, 10, h, m, tzinfo=NEW_YORK).timestamp()
+
+    pts = [{"t": ny(15, 0), "p": 1.10000}, {"t": ny(16, 0), "p": 1.09940}]  # -0.00001/min
+
+    def at(h, m):
+        return line_price("ray", pts, ny(h, m), fx)
+
+    per_minute = at(16, 58) - at(16, 59)
+    assert per_minute == pytest.approx(0.00001)
+    assert at(16, 59) - at(17, 5) == pytest.approx(per_minute)  # one bar, one step
+    assert at(17, 0) == at(17, 3) == at(17, 5)  # flat inside the break: no bars there
+    assert at(17, 5) - at(17, 6) == pytest.approx(per_minute)
+    # 18:00 is 175 trading minutes after 15:00, not 180.
+    assert at(18, 0) == pytest.approx(1.10000 - 175 * 0.00001)
+
+
+def test_gaps_no_longer_report_the_daily_rollover():
+    """OANDA's EUR_USD minutes: nothing from 17:00 to 17:04 New York every weekday.
+    With the break in the hours, `gaps` reports none of them."""
+    candles = synthetic_m1(utc(2024, 7, 7, 21), utc(2024, 7, 13), FX_HOURS)
+    stamps = [c.ts for c in candles]
+    assert all(datetime.fromtimestamp(t, NEW_YORK).strftime("%H:%M") != "17:02" for t in stamps)
+    assert find_gaps(stamps, FX_HOURS, 2) == []
+    no_break = TradingHours("America/New_York", "sun", "17:00", "fri", "17:00")
+    rollovers = find_gaps(stamps, no_break, 2)
+    assert len(rollovers) == 4  # what `gaps` showed before: Monday to Thursday
+    # A real hole of 2+ minutes outside the break is still reported.
+    noon = int(datetime(2024, 7, 10, 12, 0, tzinfo=NEW_YORK).timestamp())
+    holed = [t for t in stamps if not noon <= t < noon + 180]
+    [gap] = find_gaps(holed, FX_HOURS, 2)
+    assert gap.open_minutes == 3

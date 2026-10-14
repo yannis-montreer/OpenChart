@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 import pytest
 
 from openchart.alerts.engine import AlertEngine
-from openchart.market.instruments import METAL_HOURS
+from openchart.market.instruments import FX_HOURS, METAL_HOURS
 from openchart.market.sessions import TradingClock
 from openchart.providers.base import OHLC, Candle, Tick
 from openchart.store.alerts import Alert
@@ -301,3 +301,19 @@ def test_after_a_restart_the_first_tick_opens_a_restart_gap():
     e.catch_up("XAU_USD", [])
     tick(e, T0 + 3601, 99.1)
     assert e.next_reason == "reconnect"
+
+
+def test_the_currency_rollover_break_is_no_gap_but_a_longer_outage_is():
+    """EUR/USD pauses 17:00-17:05 New York: no ticks then is not a missed period, so
+    the alert does not wait for a replay; a stop that also takes trading minutes is."""
+    fx = TradingClock(FX_HOURS)
+    e = engine(alert(), clock=fx, gaps=True)
+    before, after = utc(2024, 7, 10, 20, 59, 30), utc(2024, 7, 10, 21, 5, 10)  # EDT
+    walk(e, [99], start=before)
+    tick(e, after, 99.1)  # 5 min 40 s later, 40 s of it trading time
+    assert e.gaps == {}
+    e2 = engine(alert(), clock=fx, gaps=True)
+    walk(e2, [99], start=utc(2024, 7, 10, 20, 57))
+    tick(e2, utc(2024, 7, 10, 21, 8), 99.1)  # 6 trading minutes missed around the break
+    assert e2.gaps["XAU_USD"].reason == "reconnect"
+    assert e2.catch_up_range("XAU_USD") == (utc(2024, 7, 10, 20, 58), utc(2024, 7, 10, 21, 8))

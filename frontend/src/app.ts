@@ -27,6 +27,7 @@ import { loadPrefs, resolveTimezone, savePrefs, type Prefs } from "./prefs";
 import { formatClock, offsetLabel } from "./time";
 import { openAlertDialog } from "./ui/alertDialog";
 import { AlertsPanel } from "./ui/alertsPanel";
+import { DownloadPanel, isDownloading, lineText } from "./ui/download";
 import { showLogin } from "./ui/auth";
 import { button, closeMenu, h, icon, installTooltips, menuItem, showMenu, showMenuAt, type IconName } from "./ui/dom";
 import { openIndicatorPicker, openIndicatorSettings } from "./ui/indicatorDialogs";
@@ -85,6 +86,8 @@ export class App {
   private chartKey?: SubKey;
   private settingsDialog = new SettingsDialog();
   private historyState = new Map<string, string>();
+  private historyOldest = new Map<string, number | null>();
+  private download = new DownloadPanel();
 
   chart!: ChartView;
   drawings!: DrawingController;
@@ -287,7 +290,7 @@ export class App {
     );
     this.drawings.onToolChange("cursor");
     this.els.banner = h("div", { class: "banner", hidden: true });
-    chartArea.append(this.els.banner);
+    chartArea.append(this.els.banner, this.download.el);
 
     // Bottom bar
     const ranges = h("div", { class: "ranges", role: "group", "aria-label": "Date range" });
@@ -374,6 +377,9 @@ export class App {
     this.prefs.instrument = name;
     this.renderSymbol();
     this.watchlist.setCurrent(name);
+    const history = this.status?.instruments?.[name]?.history;
+    this.download.update(name, history);
+    this.chart.setHistoryGrowing(isDownloading(history));
     void this.loadChart();
   }
 
@@ -614,11 +620,10 @@ export class App {
       cls = "dot warn";
       label = "Feed " + s.provider_state;
       detail = `Broker feed ${s.provider_state}`;
-    } else if (inst && s.instruments?.[inst]?.history?.state === "running") {
-      const h = s.instruments[inst].history!;
+    } else if (inst && isDownloading(s.instruments?.[inst]?.history)) {
       cls = "dot warn";
       label = "Downloading";
-      detail = `Downloading ${inst} history: ${h.written.toLocaleString("en-US")} candles so far`;
+      detail = `${inst} history: ${lineText(s.instruments[inst].history!)}`;
     } else if (age === null || age === undefined || age > STALE_TICKS) {
       cls = "dot";
       label = "Quiet";
@@ -676,16 +681,33 @@ export class App {
     return this.settingsDialog.open(section);
   }
 
-  /** A history download finished for the instrument on screen: show it. */
+  /**
+   * History downloads (newest first): the panel on the chart, the watchlist and the
+   * chart's older history. The instrument on screen is reloaded when its first
+   * candles arrive and when its download is done; in between, scrolling left loads
+   * whatever has arrived.
+   */
   private watchHistory(): void {
     const s = this.status;
     if (!s?.instruments) return;
+    const current = this.instrument?.instrument;
     for (const [name, info] of Object.entries(s.instruments)) {
-      const state = info.history?.state ?? "";
+      const history = info.history;
+      const state = history?.state ?? "";
       const before = this.historyState.get(name);
+      const oldestBefore = this.historyOldest.get(name);
       this.historyState.set(name, state);
-      if (before === "running" && state === "done" && name === this.instrument?.instrument) {
+      this.historyOldest.set(name, history?.oldest ?? null);
+      this.watchlist.setDownload(name, history);
+      if (name !== current) continue;
+      this.download.update(name, history);
+      this.chart.setHistoryGrowing(isDownloading(history));
+      const finished = before !== undefined && before !== "done" && state === "done";
+      const firstData = !this.chart.barCount() && history?.oldest != null;
+      if (finished || firstData) {
         void this.loadChart();
+      } else if (history?.oldest != null && history.oldest !== oldestBefore) {
+        this.chart.retryOlder(); // more history arrived: fill the left edge if it shows
       }
     }
   }
