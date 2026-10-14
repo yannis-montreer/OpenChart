@@ -368,5 +368,5 @@ installer fails, or a later Windows change breaks it), there are two options:
   included. The Custom section says why and how to repair it (rerun the installer).
   Built-in indicators keep working.
 - **(b)** Run them in a plain job-limited worker as SYSTEM, with the notice. That worker can
-  read the key file and the tokens, which is worse than today's in-process files only in
-  name; it is no isolation at all.
+  read the key file and the tokens. It only adds the memory, CPU and time limits to what
+  folder files can do today inside the server; it is no isolation at all.
