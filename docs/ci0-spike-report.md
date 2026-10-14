@@ -1,11 +1,8 @@
 # CI-0 spike: running custom indicators in an isolated worker
 
-Status: **interim**. The Windows runs as the owner's user are done. Still to run:
-
-- the **LocalSystem run**, as a temporary service, at a moment the owner chooses;
-- the **Docker run**, in CI, which needs the branch pushed.
-
-The final go/no-go comes after both. Code: `tools/ci0_spike/`.
+Status: **final**, 2026-10-15. Every run is done: Windows as the owner's user, Windows as
+LocalSystem (three runs), and Docker locally. The go/no-go is at the end. Code:
+`tools/ci0_spike/`.
 
 ## Minimum acceptable isolation
 
@@ -305,9 +302,71 @@ is off in Docker. It is an extra condition only:
 - `on` and `off` stay available as overrides;
 - `on` still cannot go below the minimum isolation.
 
-## Provisional go/no-go
+### LocalSystem, run 3 (2026-10-15): the answer
 
-- **Windows service: GO**, if the LocalSystem run confirms the user results.
-- **Source install: GO for the restricted worker as a weaker mode**, with browser editing
-  off, as decided.
-- **Docker: pending CI.**
+Five workers were started by SYSTEM from a temporary service, with the installer's exact
+ACLs on the decoy data folder and key file.
+
+| Worker | Started? | Result |
+|---|---|---|
+| plain (for comparison) | yes | System integrity; read and wrote everything, including the key file; secret key in its environment |
+| AppContainer on the service's own desktop | **no**: `0xC0000142 STATUS_DLL_INIT_FAILED` | confirms the cause found in run 2 |
+| **AppContainer on a private desktop** (`OpenChartWorker1\OpenChartWorker1`, a named window station SYSTEM may create) | **yes** | **every probe denied**: `.env`, database, key file, data folder, profile, Credential Manager, registry, parent process, 127.0.0.1, outbound network, writes outside its own TEMP; programs refused |
+| restricted, without Low integrity, private desktop | no: `0xC0000142` | |
+| restricted, Low integrity, private desktop | no: `0xC0000142` | |
+
+The AppContainer worker on a private desktop, as SYSTEM:
+
+| Measure | Result |
+|---|---|
+| start | 0.97 s |
+| typical script, 5,200 bars | 3.8 ms in the worker, 4.5 ms round trip (median), max 8.9 ms |
+| CPU cap 50% of one core | 50% |
+| memory, 2 GB asked under 512 MB | `MemoryError` at 384 MB; the worker kept answering |
+| hang and `sleep` | killed 11–13 ms after the deadline; replaced in about 1 s |
+| parent killed | worker gone within 1 s |
+
+The cleanup was complete in all three runs:
+
+- `sc query` 1060;
+- the folder and key file are gone;
+- 0 firewall rules, 0 test processes, 0 nssm, 0 listening ports;
+- no AppContainer profile, folder or registry decoy left for SYSTEM;
+- the decoy credential was deleted.
+
+The restricted token as SYSTEM was not investigated further. With SYSTEM and Administrators
+deny-only, the worker still cannot initialise user32 in session 0, even on a private
+desktop; some other session object is probably closed to it. The service does not need it,
+because AppContainer works.
+
+## Findings that change CI-1 (in addition to 1 to 6)
+
+7. **A service-started worker needs a window station and desktop of its own.** Use a named
+   window station, which SYSTEM may create, with an ACL for the container and a Low
+   label. Without it, AppContainer dies with `STATUS_DLL_INIT_FAILED`.
+8. **No restricted-token fallback for the service.** If the installer cannot set up the
+   AppContainer, the service install cannot isolate custom code at all. The alternative,
+   a plain worker as SYSTEM, can read the key file. Decision D7 below.
+9. **PyInstaller's loader cannot start at Low integrity outside an AppContainer.** This does
+   not matter given 8. Source installs use the real Python interpreter, which works at Low.
+10. **Diagnostics:** when a worker dies before it is ready, CI-1 records its exit code, as
+    the spike now does, and shows it in the Custom section.
+
+## Final go/no-go
+
+| Install | Worker | Minimum isolation | Verdict |
+|---|---|---|---|
+| **Windows service** | AppContainer + job object + private desktop, set up by the installer | **met**, proven as SYSTEM | **GO** |
+| **Docker with compose** | sidecar container (no network, no data volume, its own uid, limits) | **met**, proven locally | **GO** |
+| **Source install** | restricted token (Low integrity) + job object, real Python with the venv's packages, no ACL changes | **not met**: reads files and Credential Manager, has network | **GO as a weaker mode**: browser editing always off, folder files run with the "weaker isolation" notice |
+| Docker without compose | child process, same user | not met | editing off, notice (as designed) |
+
+**D7, for the owner.** If the AppContainer cannot be set up on a service install (the
+installer fails, or a later Windows change breaks it), there are two options:
+
+- **(a) Recommended:** custom indicators do not run on that install at all, folder files
+  included. The Custom section says why and how to repair it (rerun the installer).
+  Built-in indicators keep working.
+- **(b)** Run them in a plain job-limited worker as SYSTEM, with the notice. That worker can
+  read the key file and the tokens, which is worse than today's in-process files only in
+  name; it is no isolation at all.
