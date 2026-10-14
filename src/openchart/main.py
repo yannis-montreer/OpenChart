@@ -7,6 +7,7 @@ import asyncio
 import logging
 import os
 import shutil
+import sqlite3
 import sys
 import time
 from collections.abc import AsyncIterator
@@ -164,11 +165,11 @@ async def _cmd_rebuild_cache(config: Config, args: argparse.Namespace) -> int:
 
 
 async def _cmd_stats(config: Config, args: argparse.Namespace) -> int:
+    config = _data_dir(config, args)
     async with _context(config, need_provider=False) as ctx:
         rows = await ctx.store.instruments()
         if not rows:
             print("No instruments yet. Run `openchart backfill <INSTRUMENT>` first.")
-            return 0
         for row in rows:
             n = await ctx.store.count(row.source, row.instrument)
             first = await ctx.store.first_ts(row.source, row.instrument)
@@ -195,11 +196,23 @@ async def _cmd_stats(config: Config, args: argparse.Namespace) -> int:
                     g for g, mark in (("H1", h1_from), ("M1", m1_from)) if mark is None
                 )
                 print(f"  download not finished ({waiting}): it continues when the server runs")
+
+        async def count(sql: str) -> int:
+            async with ctx.store.conn.execute(sql) as cur:
+                return (await cur.fetchone())[0]
+
+        # To compare two installs (for example after moving the data folder).
+        drawings = await count("SELECT COUNT(*) FROM drawings")
+        alerts = await count("SELECT COUNT(*) FROM alerts")
+        active = await count("SELECT COUNT(*) FROM alerts WHERE status = 'active'")
+        layouts = await count("SELECT COUNT(*) FROM layouts")
+        print(f"Drawings: {drawings}, alerts: {alerts} ({active} active), layouts: {layouts}")
     return 0
 
 
 async def _cmd_purge(config: Config, args: argparse.Namespace) -> int:
     """Delete one instrument and its stored prices, to download it again from scratch."""
+    config = _data_dir(config, args)
     if in_use(config.data_dir):
         print(
             f"An OpenChart server is running on {config.data_dir}: stop it first "
@@ -373,6 +386,195 @@ async def _cmd_reset_password(config: Config, args: argparse.Namespace) -> int:
     return 0
 
 
+def _data_dir(config: Config, args: argparse.Namespace) -> Config:
+    return replace(config, data_dir=Path(args.data_dir)) if args.data_dir else config
+
+
+async def _cmd_backup(config: Config, args: argparse.Namespace) -> int:
+    from openchart.backup import BackupError, backup, human_size
+
+    config = _data_dir(config, args)
+    try:
+        result = await asyncio.to_thread(
+            backup, config.data_dir, Path(args.out) if args.out else None, ticks=not args.no_ticks
+        )
+    except (BackupError, OSError, sqlite3.Error) as exc:
+        print(f"Backup failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"Backup written: {result.path}")
+    print(f"  {human_size(result.size)}, {result.files:,} files: the database (checked)", end="")
+    print(f", {result.tick_files:,} tick files" if result.tick_files else "", end="")
+    print(", your indicators and settings files.")
+    if result.has_secrets:
+        print(
+            "  secrets.enc is in it, encrypted; its key is not. Keep the key (the service's "
+            "secret.key or OPENCHART_SECRET_KEY) to restore the tokens, or enter them again."
+        )
+    if result.skipped:
+        print(f"  {len(result.skipped)} tick part file(s) were merged during the copy; skipped.")
+    print("To restore: stop the server, unzip into an empty data folder, start the server.")
+    return 0
+
+
+async def _cmd_secrets(config: Config, args: argparse.Namespace) -> int:
+    """Where the tokens are kept; move them to the encrypted file for the Windows service."""
+    from openchart.config import mask_secret
+    from openchart.settings import (
+        SECRET_NAMES,
+        SECRETS_FILE,
+        EncryptedFileSecrets,
+        KeyringSecrets,
+        new_secret_key,
+        secret_key_from_env,
+        secrets_to_file,
+    )
+
+    if args.action == "new-key":
+        print(new_secret_key())
+        return 0
+    config = _data_dir(config, args)
+    if not config.db_path.is_file():
+        print(f"No database in {config.data_dir}.", file=sys.stderr)
+        return 1
+    async with await Database.open(config.db_path) as db:
+        instance_id = await SettingsStore(db.conn).instance_id()
+
+    if args.action == "status":
+        try:
+            store = open_secrets(config, instance_id)
+        except SecretStoreUnavailable as exc:
+            print(f"Secrets: unavailable. {exc}")
+            return 1
+        where = (
+            f"encrypted file {config.data_dir / SECRETS_FILE}"
+            if isinstance(store, EncryptedFileSecrets)
+            else "the Windows Credential Manager of this user"
+            if os.name == "nt"
+            else "the system credential store"
+        )
+        print(f"Secrets are kept in: {where}")
+        for name in SECRET_NAMES:
+            try:
+                value = store.get(name)
+            except SecretStoreUnavailable as exc:
+                print(f"  {name}: cannot read ({exc})")
+                return 1
+            print(f"  {name}: {mask_secret(value) if value else 'not set'}")
+        return 0
+
+    # to-file: copy the tokens from this user's credential store into secrets.enc, with a
+    # key kept in --key-file (created if missing). The install script then locks the key
+    # file down to SYSTEM and Administrators.
+    if secret_key_from_env():
+        print("OPENCHART_SECRET_KEY(_FILE) is set in this shell; unset it first.", file=sys.stderr)
+        return 1
+    source = KeyringSecrets(instance_id) if KeyringSecrets.available() else None
+    try:
+        moved = await asyncio.to_thread(
+            secrets_to_file, config.data_dir, Path(args.key_file), source
+        )
+    except SecretStoreUnavailable as exc:
+        print(f"{exc}. Use the key file the encrypted file was made with.", file=sys.stderr)
+        return 1
+    print(f"Key file: {args.key_file} ({'created' if moved.key_created else 'existing'})")
+    print(f"Encrypted secrets: {config.data_dir / SECRETS_FILE}")
+    print(f"Copied from the Credential Manager: {', '.join(moved.copied) or 'nothing'}")
+    if moved.missing:
+        print(f"Not set yet (enter them in the web page's Settings): {', '.join(moved.missing)}")
+    return 0
+
+
+async def _cmd_self_test(config: Config, args: argparse.Namespace) -> int:
+    """Check, offline, that every part this install needs works (a frozen build, Docker)."""
+    import tempfile
+
+    def password() -> str:
+        from argon2 import PasswordHasher
+
+        ph = PasswordHasher()
+        assert ph.verify(ph.hash("self-test"), "self-test")
+        return "argon2"
+
+    def encryption() -> str:
+        from openchart.settings import EncryptedFileSecrets, new_secret_key
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EncryptedFileSecrets(Path(tmp) / "s.enc", new_secret_key())
+            store.set("x", "y")
+            assert store.get("x") == "y"
+        return "Fernet"
+
+    def ticks() -> str:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pq.write_table(pa.table({"ts": [1], "bid": [1.0]}), Path(tmp) / "t.parquet")
+            assert pq.read_table(Path(tmp) / "t.parquet").num_rows == 1
+        return f"pyarrow {pa.__version__}"
+
+    def credential_store() -> str:
+        from openchart.settings import KeyringSecrets
+
+        if not KeyringSecrets.available():
+            return "none (use OPENCHART_SECRET_KEY or OPENCHART_SECRET_KEY_FILE)"
+        import keyring
+
+        return type(keyring.get_keyring()).__name__
+
+    def timezones() -> str:
+        from zoneinfo import ZoneInfo
+
+        ZoneInfo("America/New_York")
+        return "America/New_York"
+
+    async def database() -> str:
+        from openchart.store.migrate import applied_versions, discover_migrations
+
+        with tempfile.TemporaryDirectory() as tmp:
+            async with await Database.open(Path(tmp) / "t.db") as db:
+                applied = await applied_versions(db.conn)
+        expected = {m.version for m in discover_migrations()}
+        assert applied == expected and expected, f"applied {applied}, expected {expected}"
+        return f"{len(applied)} migrations applied"
+
+    def indicators() -> str:
+        from openchart.indicators._registry import load_indicators
+
+        registry = load_indicators(None)
+        assert registry.indicators and not registry.errors, registry.errors
+        return ", ".join(registry.indicators)
+
+    def web() -> str:
+        from openchart.api.app import WEB_DIR
+
+        assert (WEB_DIR / "index.html").is_file(), f"no web UI in {WEB_DIR}"
+        return str(WEB_DIR)
+
+    checks = [
+        ("password hashing", password),
+        ("encrypted secrets", encryption),
+        ("tick files", ticks),
+        ("credential store", credential_store),
+        ("time zones", timezones),
+        ("database", database),
+        ("indicators", indicators),
+        ("web page", web),
+    ]
+    failed = 0
+    for name, check in checks:
+        try:
+            result = check()
+            if asyncio.iscoroutine(result):
+                result = await result
+            print(f"  ok    {name}: {result}")
+        except Exception as exc:
+            failed += 1
+            print(f"  FAIL  {name}: {type(exc).__name__}: {exc}")
+    print(f"openchart {__version__}: {'all checks passed' if not failed else f'{failed} failed'}")
+    return 1 if failed else 0
+
+
 COMMANDS = {
     "migrate": _cmd_migrate,
     "test-connection": _cmd_test_connection,
@@ -384,6 +586,9 @@ COMMANDS = {
     "reset-password": _cmd_reset_password,
     "purge": _cmd_purge,
     "run": _cmd_run,
+    "backup": _cmd_backup,
+    "secrets": _cmd_secrets,
+    "self-test": _cmd_self_test,
 }
 
 
@@ -399,7 +604,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--deep", action="store_true", help="also download H1 history as far back as available"
     )
-    sub.add_parser("stats", help="row counts and coverage per instrument")
+    p = sub.add_parser("stats", help="row counts and coverage, drawings, alerts and layouts")
+    p.add_argument("--data-dir", help="the data folder (default data/, from config)")
     sub.add_parser("reset-password", help="set a new web password (if you forgot it)")
     p = sub.add_parser("rebuild-cache", help="recompute the cached 4h/D/W bars")
     p.add_argument("instrument", nargs="?", help="default: all instruments")
@@ -424,17 +630,38 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="also delete the instrument's drawings, alerts and alert log",
     )
+    p.add_argument("--data-dir", help="the data folder (default data/, from config)")
     p = sub.add_parser("run", help="start the server: API, websocket and live feed")
     p.add_argument(
         "--host", help="bind address (default: 127.0.0.1, or 0.0.0.0 if enabled in Settings)"
     )
     p.add_argument("--port", type=int, help="port (default 8000, from config)")
     p.add_argument("--data-dir", help="database and tick folder (default data/, from config)")
+    p = sub.add_parser(
+        "backup", help="copy the data folder into one zip (safe while the server runs)"
+    )
+    p.add_argument("--data-dir", help="the data folder (default data/, from config)")
+    p.add_argument("--out", help="where to put the zip (default: <data folder>/backups)")
+    p.add_argument("--no-ticks", action="store_true", help="leave out the raw tick files")
+    p = sub.add_parser("secrets", help="where the OANDA and Telegram tokens are kept")
+    p.add_argument(
+        "action",
+        choices=["status", "new-key", "to-file"],
+        help="status: where and which; new-key: print a key for OPENCHART_SECRET_KEY; "
+        "to-file: copy them from the Credential Manager into the encrypted file (for the "
+        "Windows service)",
+    )
+    p.add_argument("--data-dir", help="the data folder (default data/, from config)")
+    p.add_argument("--key-file", help="to-file: the key file to use or create")
+    sub.add_parser("self-test", help="check offline that every part of this install works")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.command == "secrets" and args.action == "to-file" and not args.key_file:
+        parser.error("secrets to-file needs --key-file")
     try:
         config = load_config()
     except ConfigError as exc:

@@ -35,6 +35,79 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: pytest -q
 
+  windows-package:
+    # The release build (server folder and viewer, without NSSM), smoke-tested; kept nowhere.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install . pyinstaller pywebview packaging
+      - name: Build and smoke-test
+        shell: pwsh
+        run: .\packaging\build-windows.ps1 -Python python
+      - name: Licence files in both zips
+        shell: pwsh
+        run: |
+          foreach ($zip in Get-ChildItem dist\*.zip) {
+            $names = (Expand-Archive $zip -DestinationPath "check\$($zip.BaseName)" -PassThru).Name
+            foreach ($f in "LICENSE.txt", "NOTICE.txt", "THIRD-PARTY-LICENSES.txt") {
+              if ($names -notcontains $f) { throw "$f missing from $($zip.Name)" }
+            }
+          }
+
+  docker:
+    # Builds the image and runs it on a test volume; nothing is pushed anywhere.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image
+        run: docker build -t openchart:ci .
+      - name: Self-test inside the image
+        run: docker run --rm openchart:ci openchart self-test
+      - name: Licence files ship in the image, and it runs as a non-root user
+        run: |
+          docker run --rm openchart:ci sh -c 'test -s /usr/share/doc/openchart/LICENSE && test -s /usr/share/doc/openchart/NOTICE && grep -q "Lightweight Charts" /usr/share/doc/openchart/NOTICE && id -u' | tee uid.txt
+          test "$(tail -1 uid.txt)" != "0"
+      - name: Start with docker compose, wait until healthy
+        env:
+          OPENCHART_BIND: 127.0.0.1
+          OPENCHART_PORT: "18000"
+        run: |
+          echo "OPENCHART_SECRET_KEY=$(docker run --rm openchart:ci openchart secrets new-key)" > .env
+          docker compose config --quiet
+          docker image tag openchart:ci openchart:local
+          docker compose up -d --no-build
+          for i in $(seq 1 40); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' "$(docker compose ps -q openchart)")
+            echo "health: $status"
+            [ "$status" = healthy ] && break
+            sleep 3
+          done
+          test "$status" = healthy
+          curl -fsS http://127.0.0.1:18000/api/health
+          curl -fsS http://127.0.0.1:18000/ | grep -q 'id="app"'
+          curl -fsS http://127.0.0.1:18000/api/setup/status
+          docker compose logs openchart | grep -q "secrets: encrypted file /data/secrets.enc"
+          docker compose exec -T openchart sh -c 'test -f /data/openchart.db && openchart backup && ls /data/backups'
+      - name: Not reachable from other addresses when bound to 127.0.0.1
+        run: |
+          ip=$(hostname -I | awk '{print $1}')
+          ! curl -fsS --max-time 3 "http://$ip:18000/api/health"
+      - name: Logs
+        if: always()
+        run: docker compose logs openchart || true
+
   frontend:
     runs-on: ubuntu-latest
     defaults:

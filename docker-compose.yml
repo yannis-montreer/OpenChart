@@ -1,0 +1,31 @@
+# OpenChart server in Docker. Settings come from a .env file next to this one (git-ignored):
+#
+#   OPENCHART_SECRET_KEY=<a key: docker compose build, then
+#                         docker run --rm openchart:local openchart secrets new-key>
+#   OPENCHART_BIND=127.0.0.1      # which host address to listen on: 127.0.0.1 (this machine
+#                                 # only, the default), your Tailscale IP, or 0.0.0.0 (all)
+#   OPENCHART_PORT=8000           # the host port
+#
+# Start: docker compose up -d. First visit: the setup page asks for a setup code, printed
+# by: docker compose logs openchart. Data: the "openchart-data" volume (back it up with
+# docker compose exec openchart openchart backup; the zip lands in /data/backups).
+services:
+  openchart:
+    build: .
+    image: openchart:local
+    restart: unless-stopped
+    ports:
+      - "${OPENCHART_BIND:-127.0.0.1}:${OPENCHART_PORT:-8000}:8000"
+    environment:
+      # Encrypts the tokens saved in the web page (/data/secrets.enc). Keep it: without it
+      # they cannot be read and must be entered again.
+      OPENCHART_SECRET_KEY: ${OPENCHART_SECRET_KEY:?set OPENCHART_SECRET_KEY in .env (see the comment at the top of docker-compose.yml)}
+      # Optional: credentials from the environment instead of the setup page.
+      # OPENCHART_OANDA_ENV: practice
+      # OPENCHART_OANDA_ACCOUNT_ID: ${OPENCHART_OANDA_ACCOUNT_ID:-}
+      # OPENCHART_OANDA_TOKEN: ${OPENCHART_OANDA_TOKEN:-}
+    volumes:
+      - openchart-data:/data
+
+volumes:
+  openchart-data:

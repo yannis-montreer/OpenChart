@@ -169,7 +169,14 @@ export async function showSetup(status: SetupStatus): Promise<void> {
     { class: "auth-card" },
     brand(),
     h("h1", {}, "Set up OpenChart"),
-    h("p", { class: "lead" }, "This takes about two minutes. Everything stays on this server: tokens go to the system's credential store, never into files."),
+    h(
+      "p",
+      { class: "lead" },
+      "This takes about two minutes. Everything stays on this server: " +
+        (status.secret_store?.startsWith("encrypted file")
+          ? "tokens are encrypted in its data folder, with a key kept apart."
+          : "tokens go to the system's credential store, never into files."),
+    ),
     status.secret_store_error ? h("div", { class: "notice bad" }, status.secret_store_error) : null,
     status.setup_code_required
       ? h(

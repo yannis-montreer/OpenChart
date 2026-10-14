@@ -19,7 +19,7 @@ from openchart.config import OandaConfig
 from openchart.market.instruments import instrument_hours
 from openchart.providers.base import InstrumentInfo, ProviderError
 from openchart.server import Server
-from openchart.settings import describe_secret
+from openchart.settings import EncryptedFileSecrets, describe_secret
 
 log = logging.getLogger(__name__)
 
@@ -181,6 +181,14 @@ def account_routes(server: Server) -> APIRouter:
             "authenticated": configured and authenticated,
             "setup_code_required": not configured
             and not server.auth.setup_allowed_from(client_host(request), None),
+            # The kind only: this route needs no login, so no paths.
+            "secret_store": (
+                "encrypted file"
+                if isinstance(server.secrets, EncryptedFileSecrets)
+                else server.secrets.backend
+                if server.secrets
+                else None
+            ),
             "secret_store_error": server.secrets_error,
         }
 
