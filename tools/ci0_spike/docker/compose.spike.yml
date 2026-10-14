@@ -1,6 +1,8 @@
 # CI-0 spike: the sidecar shape proposed for Docker (design section 3.3), with a stand-in
 # server. Run from the repository root after `docker build -t openchart:ci .`:
 #   docker compose -f tools/ci0_spike/docker/compose.spike.yml up --abort-on-container-exit --exit-code-from server
+# No port is published: the stand-in server's port 8000 exists only on the project network.
+name: ocspike
 services:
   server:
     image: openchart:ci

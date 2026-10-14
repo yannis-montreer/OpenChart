@@ -172,7 +172,48 @@ The open questions it answers:
 - Does the restricted token, as SYSTEM, still start the worker? (It needs the release
   folder to be readable without SYSTEM.)
 
-### Docker (CI only, needs the branch pushed)
+### Docker: done locally (2026-10-15, Docker Desktop 29.8.2, WSL2, cgroup v2)
+
+The owner chose to run it locally instead of pushing. The image was built from
+`origin/main` (67d0a40) with a clean `git archive`. The spike used
+`compose.spike.yml` (project `ocspike`, no published port). **Minimum isolation:
+holds.**
+
+| Probe (sidecar worker, uid 10002) | Result |
+|---|---|
+| environment | clean: no secret key or tokens. It does see the image's own `OPENCHART_DATA_DIR/HOST/PORT`, which CI-1 clears. |
+| `/data/openchart.db`, `/data/secrets.enc` | not there (the volume is not mounted) |
+| processes visible | 2: its own (separate PID namespace) |
+| write into `/` or `/tmp` | read-only file system |
+| reach the server container, or 192.0.2.1 | no name resolution; network unreachable |
+| start a program | **allowed** (Linux has no job-object equivalent here; it counts against the pids limit) |
+| start 64 processes | stopped at 29 by `pids_limit: 32` |
+| hang | child killed 3–5 ms after the 1 s deadline; the worker carried on |
+| 2 GB with `RLIMIT_AS` | `MemoryError` after exactly the 256 MB budget |
+| 2 GB without `RLIMIT_AS` | the container's memory limit killed the child (signal 9); the worker carried on |
+| CPU, `cpus: 0.5` | 43% of one core measured |
+| typical script, 5,200 bars | 9–10 ms in the worker; **17.5 ms round trip** median (fork included); max 72 ms at 0.5 CPU, 24 ms at 1.0 CPU |
+
+Two corrections were needed in the probe itself, and both now feed into CI-1:
+
+- **The address-space limit** has to be "the child's current size + a budget". A fixed
+  400 MB failed at 64 MB, because numpy and pandas reserve a lot of address space.
+- **The secret check** must not flag the Python image's `GPG_KEY`, which is the public
+  fingerprint of Python's signing key.
+
+Container usage (`docker stats`, sampled about every 2 s):
+
+| Container | Memory, steady | Memory, peak | CPU, steady | CPU, peak |
+|---|---|---|---|---|
+| sidecar worker (idle, then the probes) | 54 MiB | 65 MiB (+ the children killed at their limits) | — | 51% (its 0.5 cap) |
+| stand-in server | 53 MiB | 68 MiB | 0.5% | 33% |
+| OpenChart `openchart run`, no broker | 84 MiB | 94 MiB | 0.2% | 108% (start) |
+| OpenChart with the fake broker, 10 days of M1, live ticks | 89 MiB | 107 MiB | 0.0–0.2% | 111% (start and history) |
+
+The workflow `.github/workflows/ci0-spike.yml` stays on the branch, so CI repeats the run
+on a later push.
+
+### Docker in CI (kept for later pushes)
 
 - **The workflow:** `.github/workflows/ci0-spike.yml` runs
   `tools/ci0_spike/docker/compose.spike.yml`:

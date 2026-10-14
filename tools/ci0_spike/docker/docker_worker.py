@@ -18,7 +18,20 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from worker_probe import recv, send, typical
 
-AS_LIMIT = 400 * 2**20  # per child, under the container's 512 MB
+# Per child: on top of the address space it inherits (numpy and pandas reserve a few
+# hundred MB of it without using it), under the container's 512 MB.
+AS_BUDGET = 256 * 2**20
+# Not bare "KEY": the python image sets GPG_KEY, the public fingerprint of Python's
+# release signing key.
+SECRET_WORDS = ("TOKEN", "SECRET", "PASSWORD", "OANDA", "TELEGRAM")
+
+
+def vm_size() -> int:
+    with open("/proc/self/status") as f:
+        for line in f:
+            if line.startswith("VmSize:"):
+                return int(line.split()[1]) * 1024
+    return 0
 
 
 def attempt(fn) -> dict:
@@ -69,7 +82,7 @@ def many_processes(n=64):
 
 def probes() -> dict:
     names = sorted(os.environ)
-    secret = [n for n in names if n.upper().startswith(("OPENCHART", "OANDA", "TELEGRAM"))]
+    secret = [n for n in names if any(w in n.upper() for w in SECRET_WORDS)]
     return {
         "identity": {"result": "info", "detail": f"uid {os.getuid()}, pid {os.getpid()}"},
         "environment": {
@@ -96,7 +109,8 @@ def probes() -> dict:
 def child(conn_file, req, arrays, limit_as: bool) -> None:
     """Runs in the forked child; answers on the connection, then exits."""
     if limit_as:
-        resource.setrlimit(resource.RLIMIT_AS, (AS_LIMIT, AS_LIMIT))
+        limit = vm_size() + AS_BUDGET
+        resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
     resource.setrlimit(resource.RLIMIT_CPU, (30, 30))
     cmd = req["cmd"]
     if cmd == "probe":
