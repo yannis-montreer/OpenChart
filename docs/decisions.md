@@ -238,4 +238,25 @@ decimals, easier for contributors).
   before.
 - **Test data** (`synthetic_m1`) now has realistic decimals (bid and ask rounded to the
   instrument's, mid one more), as every broker's prices do.
+- **Room on disk first:** the migration measured up to 1.4 times the database in extra
+  disk (the rewritten tables, the WAL, VACUUM's copy), so a `-- vacuum-after` migration
+  needs 1.5 times the database (and its WAL) free on its disk, or stops before changing
+  anything: "Not enough free disk space to upgrade the database ... Nothing was changed."
+  Migrations and their VACUUM are logged with their durations.
+- **Through the Windows service** (temporary service, LocalSystem, a copy of the owner's
+  database, no broker): the installer migrated one copy as the administrator (19 s for
+  the whole setup), and the service migrated another itself at start: migration 9.0 s,
+  VACUUM 4.6 s, answering after 15.4 s, 362 MB to 156 MB. **Slow migrations and the
+  service:** NSSM reports "Running" once the program has not exited for its throttle
+  time, at most 20 s (its own deadline, event 1061), whether the server is ready or
+  not, and reports "Start pending" with a wait hint until then, so Windows' service
+  start timeout never applies. A migration longer than that shows "Running" while the
+  web page does not answer yet; the log says "upgrading the database ... (this can take
+  a minute)". A migration that fails (no room, an inexact price) makes the program
+  exit: NSSM restarts it after 5 s and keeps retrying with growing pauses, each attempt
+  logging the reason and changing nothing.
+- **Killed mid-way** (a stop that takes longer than NSSM's 20 s, a power cut): during
+  the rewrite, the database stays at version 6 untouched and the next start migrates;
+  during VACUUM, the migration is already committed (version 7, every row) and only the
+  shrinking is lost until a later VACUUM. Integrity checks pass in both cases.
 
