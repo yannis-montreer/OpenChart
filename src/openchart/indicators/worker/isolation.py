@@ -174,9 +174,9 @@ class WindowsLauncher:
         low_integrity: bool = True,
         container_name: str | None = None,
     ):
-        """`private_desktop`: None decides it: a sandboxed identity started from session 0
-        (a service, a CI runner) gets a desktop of its own (finding 7; found again on
-        GitHub's Windows runner in CI-1)."""
+        """`private_desktop`: None decides it: a sandboxed identity started without an
+        interactive window station (a service, a CI runner) gets a desktop of its own
+        (finding 7; found again on GitHub's Windows runner in CI-1)."""
         from openchart.indicators.worker import windows
 
         self.identity = identity
@@ -187,7 +187,7 @@ class WindowsLauncher:
         default_argv, default_cwd = worker_argv()
         self.argv, self.cwd = argv or default_argv, cwd or default_cwd
         if private_desktop is None:
-            private_desktop = identity != "plain" and windows.in_session_zero()
+            private_desktop = identity != "plain" and not windows.interactive_window_station()
         self.private_desktop = private_desktop
         self.low_integrity = low_integrity
         self.container_name = container_name or windows.CONTAINER_NAME
@@ -325,10 +325,11 @@ def plan(limits: Limits) -> Plan:
                     [], f"{SANDBOX_SID_ENV} does not match the sandbox: rerun the installer"
                 )
             return Plan([WindowsLauncher("appcontainer", limits, private_desktop=True)])
-        if windows.in_session_zero():
-            # Not a service, but in session 0 (a CI runner): the restricted token cannot
-            # start a worker there, even on a desktop of its own (CI-0 as SYSTEM; CI-1 on
-            # GitHub's runner). The job-limited process: below the minimum, with the notice.
+        if not windows.interactive_window_station():
+            # Not a service, but without an interactive window station (a CI runner): the
+            # restricted token cannot start a worker there, even on a desktop of its own
+            # (CI-0 as SYSTEM; CI-1 on GitHub's runner, session 2). The job-limited
+            # process: below the minimum, with the notice.
             return Plan([WindowsLauncher("plain", limits)])
         # A source install: Low integrity. A frozen build cannot start at Low outside an
         # AppContainer (finding 9), so it keeps the server's level.

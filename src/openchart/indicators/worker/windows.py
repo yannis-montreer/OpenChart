@@ -288,17 +288,22 @@ def sid_to_string(sid: PVOID) -> str:
     return text
 
 
-ProcessIdToSessionId = _sig(k32, "ProcessIdToSessionId", BOOL, DWORD, C.POINTER(DWORD))
+class USEROBJECTFLAGS(C.Structure):
+    _fields_ = [("fInherit", BOOL), ("fReserved", BOOL), ("dwFlags", DWORD)]
 
 
-def in_session_zero() -> bool:
-    """True for services and processes they start (a CI runner, the Windows service):
-    their desktop admits only SYSTEM and Administrators, so a restricted or AppContainer
-    worker needs a desktop of its own there (finding 7)."""
-    session = DWORD()
-    if not ProcessIdToSessionId(os.getpid(), C.byref(session)):
-        return False
-    return session.value == 0
+def interactive_window_station() -> bool:
+    """False for services and what they start (the Windows service; a CI runner, which
+    GitHub runs in session 2 but on a window station of its own): their desktop admits only
+    SYSTEM and Administrators, so a sandboxed worker needs a desktop of its own there
+    (finding 7), and the restricted token cannot start a worker at all (CI-0, CI-1). The
+    same test as .NET's Environment.UserInteractive: the window station is visible."""
+    flags = USEROBJECTFLAGS()
+    if not GetUserObjectInformationW(
+        GetProcessWindowStation(), 1, C.byref(flags), C.sizeof(flags), None
+    ):  # UOI_FLAGS
+        return True
+    return bool(flags.dwFlags & 0x1)  # WSF_VISIBLE
 
 
 def running_as_system() -> bool:

@@ -8,9 +8,9 @@
     Checks the version, self-test, the indicator sandbox (sandbox check), that the server
     answers and serves the web page, the built-in EMA, the encrypted secrets file, and the
     indicator worker. Run by hand the release build is below the minimum isolation and must
-    say so: in an interactive session it gets the restricted token; in session 0 (a CI
-    runner, like a service) the restricted token cannot start a worker (found in CI-1, as
-    in CI-0 for SYSTEM), so it gets the job-limited process-only worker. Either way the
+    say so: on an interactive window station it gets the restricted token; without one (a
+    CI runner, like a service) the restricted token cannot start a worker (found in CI-1,
+    as in CI-0 for SYSTEM), so it gets the job-limited process-only worker. Either way the
     "weaker isolation" notice must show.
 
 .EXAMPLE
@@ -34,9 +34,11 @@ function Run {
     if ($code -ne 0) { throw "$Program $($ProgramArgs -join ' ') failed (exit $code)" }
 }
 
-$sessionZero = (Get-Process -Id $PID).SessionId -eq 0
-$expected = if ($sessionZero) { "process only" } else { "restricted token" }
-Write-Host "== Smoke test of the frozen server (temporary data folder, port $Port, no broker; session $((Get-Process -Id $PID).SessionId): expecting '$expected')" -ForegroundColor Cyan
+# The server's own test (worker/windows.py: interactive_window_station): is the window
+# station visible? GitHub's runner is session 2 but not interactive, like a service.
+$interactive = [Environment]::UserInteractive
+$expected = if ($interactive) { "restricted token" } else { "process only" }
+Write-Host "== Smoke test of the frozen server (temporary data folder, port $Port, no broker; interactive window station: $interactive, expecting '$expected')" -ForegroundColor Cyan
 $exe = Join-Path (Resolve-Path $ServerDir) "openchart\openchart.exe"
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ("openchart-smoke-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
 New-Item -ItemType Directory $tmp | Out-Null

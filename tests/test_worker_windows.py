@@ -56,14 +56,16 @@ def script(body: str = "    pass"):
     return hashlib.sha256(text.encode()).hexdigest(), "s.py", text
 
 
-# In session 0 (GitHub's runner, like a service) the restricted token cannot start a
-# worker even on a desktop of its own (CI-0 as SYSTEM, CI-1 on the runner). The job
-# object's limits and the audit hook are the same for the plain worker, so those tests run
-# there with it; the tests of the restricted identity itself run in interactive sessions.
-SESSION_ZERO = windows.in_session_zero()
-JOB_IDENTITY = "plain" if SESSION_ZERO else "restricted"
+# Without an interactive window station (a service; GitHub's runner, session 2) the
+# restricted token cannot start a worker even on a desktop of its own (CI-0 as SYSTEM,
+# CI-1 on the runner). The job object's limits and the audit hook are the same for the
+# plain worker, so those tests run there with it; the tests of the restricted identity
+# itself run in interactive sessions.
+NOT_INTERACTIVE = not windows.interactive_window_station()
+JOB_IDENTITY = "plain" if NOT_INTERACTIVE else "restricted"
 interactive_only = pytest.mark.skipif(
-    SESSION_ZERO, reason="the restricted token cannot start a worker in session 0"
+    NOT_INTERACTIVE,
+    reason="the restricted token cannot start a worker without an interactive window station",
 )
 
 
@@ -311,6 +313,11 @@ async def test_appcontainer_probes_against_decoys(tmp_path):
             targets["credential"] = {"Credential Manager decoy": CREDENTIAL}
             targets["registry"] = {"registry decoy (HKCU)": REGISTRY}
             targets["write"] = {"write into the data folder": str(data)}
+            # Finding 2, as the server does it: writes to its own folder removed.
+            profile_note = isolation._restrict_profile(launcher)
+            own = launcher.profile_folder()
+            assert own, "the test container has no folder of its own"
+            targets["write"]["write into its own folder"] = own
             try:
                 started = await fresh.start(targets)
             finally:
@@ -324,6 +331,7 @@ async def test_appcontainer_probes_against_decoys(tmp_path):
                 rows = [
                     f"{k}: {v.get('result')} ({v.get('detail', '')})" for k, v in probes.items()
                 ]
+                rows.append(f"(own folder: {profile_note})")
                 (Path(report) / "appcontainer-probes.txt").write_text(
                     "".join(r + "\n" for r in rows)
                 )
@@ -336,8 +344,10 @@ async def test_appcontainer_probes_against_decoys(tmp_path):
                 "Credential Manager decoy",
                 "registry decoy (HKCU)",
                 "write into the data folder",
+                "write into its own folder",
             ):
                 assert probes[name]["result"] != "allowed", (name, probes[name])
+            assert profile_note == "writes to its own folder removed"
             assert (await fresh.compute(*script(), {}, BARS))["out"].size == 10
         finally:
             await fresh.stop()
@@ -411,8 +421,8 @@ async def test_a_release_zip_run_by_hand_gets_the_weaker_isolation_notice(monkey
 
 @interactive_only
 async def test_the_restricted_worker_on_a_desktop_of_its_own(tmp_path):
-    """What a server in session 0 does (a service, GitHub's Windows runner, where the
-    restricted worker died with STATUS_DLL_INIT_FAILED on the session's own desktop)."""
+    """The restricted worker on a desktop of its own works where a desktop is usable.
+    Without an interactive window station it fails even so (CI-1 on GitHub's runner)."""
     limits = Limits()
     launcher = WindowsLauncher("restricted", limits, private_desktop=True)
     runner, iso = await start_worker(tmp_path, limits, [launcher])
@@ -532,8 +542,8 @@ def test_the_catalog_shows_why_a_service_runs_no_custom_code(monkeypatch, tmp_pa
     assert set(started) == {"appcontainer"}
 
 
-def test_session_zero_without_a_service_gets_the_plain_worker(monkeypatch):
+def test_no_interactive_window_station_without_a_service_gets_the_plain_worker(monkeypatch):
     monkeypatch.setattr(windows, "running_as_system", lambda: False)
     monkeypatch.delenv(isolation.SANDBOX_SID_ENV, raising=False)
-    monkeypatch.setattr(windows, "in_session_zero", lambda: True)
+    monkeypatch.setattr(windows, "interactive_window_station", lambda: False)
     assert [x.identity for x in isolation.plan(Limits()).launchers] == ["plain"]

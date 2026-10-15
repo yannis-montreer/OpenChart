@@ -115,6 +115,9 @@ try {
         Check ($probes -match "$p (denied|absent|error|timed out)") "probe '$p' is refused"
     }
     Check ($probes -match "environment clean") "the worker's environment holds no secrets"
+    Write-Host "    notes: $([regex]::Match($serviceLog, 'indicator sandbox notes: ([^\r\n]*)').Groups[1].Value)"
+    # Finding 2: the one write an AppContainer has is its own folder; the server removes it.
+    Check ($probes -match "write into its own folder (denied|error)") "probe 'write into its own folder' is refused"
     Check ($serviceLog -match "indicator sandbox notes: [^\r\n]*a private desktop of its own") "the worker has a private desktop"
     Check ($serviceLog -match "indicator worker ready \(appcontainer") "the worker runs in the AppContainer"
     $workers = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like "$Release*" -and $_.CommandLine -like "*indicator-worker*" })
