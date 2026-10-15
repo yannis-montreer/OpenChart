@@ -145,3 +145,6 @@ if ($failures.Count) {
     exit 1
 }
 Write-Host "`nAll checks passed."
+# Explicitly: the last program run was `sc.exe query` failing with 1060 (the service is
+# gone, as it should be), and a CI step ends with that leftover exit code otherwise.
+exit 0
