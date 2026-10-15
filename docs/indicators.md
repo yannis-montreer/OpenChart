@@ -130,20 +130,34 @@ one starts.
 | `atr(high, low, close, n)` | `rma(tr, n)`, seeded with the average of the first `n` true ranges | first value at bar `n - 1`; about `20 * n` to agree to 1e-8 |
 | `stoch(close, high, low, n)` | raw %K: `100 * (close - lowest low) / (highest high - lowest low)` over the last `n` bars; a window with no range is a gap. Smooth with `sma` | `n` bars |
 | `cci(x, n)` | `(x - sma) / (0.015 * mean absolute deviation)`; no deviation is a gap | `n` bars |
-| `macd(x, fast, slow, signal)` | `(macd, signal, hist)`: `ema(fast) - ema(slow)`, `ema` of that, and their difference | MACD from bar `max(fast, slow) - 1`, signal `signal - 1` bars later; about `10 * (slow + signal)` to agree to 1e-8 |
+| `macd(x, fast=12, slow=26, signal=9)` | `(macd, signal, hist)`: `ema(fast) - ema(slow)`, `ema` of that, and their difference | MACD from bar `max(fast, slow) - 1`, signal `signal - 1` bars later; about `10 * (slow + signal)` to agree to 1e-8 |
 | `mom(x, n)`, `roc(x, n)` | `x - x[n]`; `100 * (x - x[n]) / x[n]` (from zero is a gap) | first value at bar `n` |
 | `stdev(x, n)` | population deviation (divided by `n`), TradingView's default | `n` bars |
 | `bb(x, n, mult=2.0)` | `(basis, upper, lower)`: `sma` and `mult` population deviations either side | `n` bars |
+| `highest(x, n)`, `lowest(x, n)` | extreme of the last `n` bars, the current one included | `n` bars |
+| `highestbars(x, n)`, `lowestbars(x, n)` | where that extreme is, as Pine: `0` this bar, `-1` the bar before, down to `-(n - 1)`; on a tie the most recent bar | `n` bars |
+| `sum(x, n)` | sum of the last `n` | `n` bars |
+| `cum(x)` | running total from the first bar; a gap is a gap on its own bar and the total goes on | **no warmup helps**: it depends on where the history starts |
+| `pivothigh(x, left, right)`, `pivotlow` | the pivot's price on the bar where it is *confirmed*, `right` bars after the pivot, NaN elsewhere. A pivot high is higher than the `left` bars before it and the `right` bars after it | `left + right + 1` bars |
 
 A gap in the input: `ema` and `rma` give NaN at the gap and start again, with a new
-seed, once `n` values in a row are back; windowed helpers give NaN while the gap is in
-the window. `rsi`, `atr` and `macd` are built on them, so a gap acts the same way.
-The rest of the first set (windows and pivots: `highest`, `lowest`, `highestbars`,
-`lowestbars`, `sum`, `cum`, `pivothigh`, `pivotlow`) follows in the next step.
+seed, once `n` values in a row are back; windowed helpers (including `highest`, `lowest`,
+`highestbars`, `lowestbars`, `sum` and the pivots) give NaN while the gap is in the window.
+`rsi`, `atr` and `macd` are built on `ema`/`rma`, so a gap acts the same way.
 
-Speed (this PC, 5,000 bars): the recursive and series helpers take 0.1 to 1.2 ms. The
-window helpers cost bars x length: `wma`, `vwma`, `hma`, `cci`, `stdev` and `bb` are 0.4 to
-3 ms at length 20 to 200 and about 10 to 30 ms at length 2000.
+**Pivots appear late, on purpose.** A pivot high needs `right` lower bars after it, so it
+cannot be known before the bar that is `right` bars later. `pivothigh` puts its value on that
+bar, so a marker or line drawn from it shows up `right` bars after the turn, and the value
+at a bar never changes when later bars arrive. Drawing it back at the pivot bar
+itself would need the future, so `ta` does not offer it. **How equal prices count is not confirmed against TradingView yet:** today
+a bar equal to the pivot on either side stops it being a pivot (so two equal highs side by
+side give none). It is one setting in the library (`_PIVOT_STRICT`) and one test.
+
+Speed (this PC, 5,000 bars): the recursive and series helpers take 0.1 to 1.2 ms;
+`highest`/`lowest` 0.2 ms at any length. The rest cost bars x length: at length 20 they are
+0.2 to 0.4 ms (`wma`, `vwma`, `hma`, `cci`, `stdev`, `bb`, `sum`, `highestbars`,
+`pivothigh` alike) and at length 2000 about 10 to 30 ms (`sum` 11, `pivothigh` 17,
+`highestbars` 30).
 
 ## Not yet
 

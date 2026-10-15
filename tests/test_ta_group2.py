@@ -136,9 +136,10 @@ def hlc(n=300, seed=3, gaps=False):
     return h, low, c
 
 
-# Wilder's published RSI(14) example (the 33-close sample in StockCharts' RSI worksheet) and
-# the 19 values it prints, to two decimals. Before it was used here, all 19 were checked
-# against the formula loop above: they agree, so each confirms the other.
+# Wilder's RSI(14) example (the 33-close sample of StockCharts' RSI worksheet) and the 19
+# values it prints, to two decimals, reproduced here from memory, not quoted from the source.
+# All 19 were checked against the formula loop above before use: they agree, so each
+# confirms the other. A regression check against the textbook method, not a citation.
 WILDER_CLOSES = [
     44.3389, 44.0902, 44.1497, 43.6124, 44.3278, 44.8264, 45.0955, 45.4245, 45.8433, 46.0826,
     45.8931, 46.0328, 45.6140, 46.2820, 46.2820, 46.0028, 46.0328, 46.4116, 46.2222, 45.6439,
@@ -239,6 +240,34 @@ def test_macd_matches_the_reference(fast, slow, signal, gaps):
     got = ta.macd(S(c), fast, slow, signal)
     for g, want in zip(got, ref_macd(c, fast, slow, signal), strict=True):
         same(g, want)
+
+
+def test_macd_defaults_are_tradingviews_12_26_9():
+    _, _, c = hlc()
+    for got, want in zip(ta.macd(S(c)), ref_macd(c, 12, 26, 9), strict=True):
+        same(got, want)
+    assert ta.macd(S(c))[0].first_valid_index() == 25
+    # Each one can still be given alone.
+    for got, want in zip(ta.macd(S(c), slow=10), ref_macd(c, 12, 10, 9), strict=True):
+        same(got, want)
+
+
+def test_bb_default_multiplier_is_2():
+    _, _, c = hlc()
+    default, explicit = ta.bb(S(c), 20), ta.bb(S(c), 20, 2.0)
+    for a, b in zip(default, explicit, strict=True):
+        same(a, b.tolist())
+    mid, dev = ref_sma(c, 20), ref_stdev(c, 20)
+    same(
+        default[1],
+        [NAN if isnan(m) else m + 2 * d for m, d in zip(mid, dev, strict=True)],
+        rel=1e-9,
+    )
+    same(
+        default[2],
+        [NAN if isnan(m) else m - 2 * d for m, d in zip(mid, dev, strict=True)],
+        rel=1e-9,
+    )
 
 
 def test_macd_starts_where_its_parts_do_and_is_zero_on_a_constant():

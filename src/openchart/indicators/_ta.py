@@ -34,12 +34,19 @@ __all__ = [
     "cross",
     "crossover",
     "crossunder",
+    "cum",
     "ema",
     "falling",
+    "highest",
+    "highestbars",
     "hma",
+    "lowest",
+    "lowestbars",
     "macd",
     "mom",
     "nz",
+    "pivothigh",
+    "pivotlow",
     "rising",
     "rma",
     "roc",
@@ -48,6 +55,7 @@ __all__ = [
     "sma",
     "stdev",
     "stoch",
+    "sum",
     "tr",
     "valuewhen",
     "vwma",
@@ -430,9 +438,12 @@ def bb(values, length: int, mult: float = 2.0) -> tuple[pd.Series, pd.Series, pd
     return basis, basis + spread, basis - spread
 
 
-def macd(values, fast: int, slow: int, signal: int) -> tuple[pd.Series, pd.Series, pd.Series]:
+def macd(
+    values, fast: int = 12, slow: int = 26, signal: int = 9
+) -> tuple[pd.Series, pd.Series, pd.Series]:
     """MACD: `(macd, signal, histogram)`: `macd = ema(x, fast) - ema(x, slow)`,
-    `signal = ema(macd, signal)` and `histogram = macd - signal`.
+    `signal = ema(macd, signal)` and `histogram = macd - signal`. The defaults are
+    TradingView's 12, 26 and 9.
 
     The MACD line starts at bar `max(fast, slow) - 1`, the signal `signal - 1` bars later.
     Warmup: about `10 * (slow + signal)` earlier bars agree with a longer history to 1e-8.
@@ -443,6 +454,122 @@ def macd(values, fast: int, slow: int, signal: int) -> tuple[pd.Series, pd.Serie
     line = ema(values, fast) - ema(values, slow)
     smoothed = ema(line, signal)
     return line, smoothed, line - smoothed
+
+
+# Windows and pivots
+
+
+def highest(values, length: int) -> pd.Series:
+    """The highest value of the last `length` bars, the current bar included. A gap in the
+    window makes the value a gap. Warmup: `length` bars. Exact from the first value."""
+    length = _length(length)
+    return _series(values).rolling(length, min_periods=length).max()
+
+
+def lowest(values, length: int) -> pd.Series:
+    """The lowest value of the last `length` bars, the current bar included (see `highest`)."""
+    length = _length(length)
+    return _series(values).rolling(length, min_periods=length).min()
+
+
+def _extreme_offset(values, length: int, better) -> pd.Series:
+    s = _series(values)
+    x = s.to_numpy()
+    best = x.copy()
+    back = np.zeros(len(x))
+    bad = np.isnan(x)
+    for k in range(1, length):
+        candidate = _lagged(x, k)
+        bad |= np.isnan(candidate)
+        with np.errstate(invalid="ignore"):
+            take = better(candidate, best)  # strictly: on a tie the more recent bar stays
+        best = np.where(take, candidate, best)
+        back = np.where(take, k, back)
+    out = -back
+    out[bad] = np.nan
+    return pd.Series(out, index=s.index)
+
+
+def highestbars(values, length: int) -> pd.Series:
+    """Where the highest value of the last `length` bars is, as Pine's `ta.highestbars`: 0 when
+    it is the current bar, -1 for the bar before, down to `-(length - 1)`. When the highest
+    value occurs more than once, the most recent bar. A gap in the window gives a gap.
+
+    Warmup: `length` bars. Exact from the first value.
+    """
+    return _extreme_offset(values, _length(length), np.greater)
+
+
+def lowestbars(values, length: int) -> pd.Series:
+    """Where the lowest value of the last `length` bars is (see `highestbars`; ties also go
+    to the most recent bar)."""
+    return _extreme_offset(values, _length(length), np.less)
+
+
+def sum(values, length: int) -> pd.Series:
+    """The sum of the last `length` values. A gap in the window gives a gap.
+
+    Warmup: `length` bars. Exact from the first value.
+    """
+    length = _length(length)
+    s = _series(values)
+    return pd.Series(_weighted_sum(s.to_numpy(), np.ones(length)), index=s.index)
+
+
+def cum(values) -> pd.Series:
+    """The running total from the first bar. A gap is a gap on its own bar and the total
+    carries on after it.
+
+    Warmup: unlike every other helper, no number of earlier bars makes it agree with a longer
+    history, since the total includes all of it. Use `sum` over a window, or a difference.
+    """
+    s = _series(values)
+    return pd.Series(np.cumsum(np.nan_to_num(s.to_numpy())), index=s.index).where(s.notna())
+
+
+# Which ties make a bar a pivot. UNCONFIRMED against TradingView (docs/decisions.md): to
+# change the rule, change this one line. The pair is (left side strict, right side strict);
+# strict means a bar equal to the pivot on that side stops it being a pivot.
+_PIVOT_STRICT = (True, True)
+
+
+def _pivot(values, left: int, right: int, above: bool) -> pd.Series:
+    left = _whole(left, "left", 1)
+    right = _whole(right, "right", 1)
+    s = _series(values)
+    x = s.to_numpy()
+    centre = _lagged(x, right)  # the candidate for the bar `right` bars back
+    strict_left, strict_right = _PIVOT_STRICT
+    found = ~np.isnan(centre)
+    with np.errstate(invalid="ignore"):  # a gap compares False, so there is no pivot
+        for k in range(left + right + 1):
+            if k == right:
+                continue
+            other = _lagged(x, k)
+            strict = strict_right if k < right else strict_left
+            if above:
+                found &= (centre > other) if strict else (centre >= other)
+            else:
+                found &= (centre < other) if strict else (centre <= other)
+    return pd.Series(np.where(found, centre, np.nan), index=s.index)
+
+
+def pivothigh(values, left: int, right: int) -> pd.Series:
+    """Pivot highs: a bar higher than the `left` bars before it and the `right` bars after it.
+
+    The pivot's price is reported on the bar where it is confirmed, `right` bars after the
+    pivot itself, and everywhere else the value is a gap. So the chart shows a pivot `right`
+    bars late, and never before it can be known. A gap among those bars means no pivot. How
+    equal values count: `_PIVOT_STRICT` (equal prices on either side stop a pivot).
+
+    Warmup: `left + right + 1` bars for the first possible pivot.
+    """
+    return _pivot(values, left, right, True)
+
+
+def pivotlow(values, left: int, right: int) -> pd.Series:
+    """Pivot lows: the mirror image of `pivothigh`."""
+    return _pivot(values, left, right, False)
 
 
 def mom(values, length: int) -> pd.Series:
