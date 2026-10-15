@@ -352,3 +352,26 @@ def delete_credential(target: str) -> None:
     advapi = ctypes.WinDLL("advapi32")
     advapi.CredDeleteW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD]
     advapi.CredDeleteW(target, 1, 0)
+
+
+async def test_a_release_zip_run_by_hand_gets_the_weaker_isolation_notice(monkeypatch, tmp_path):
+    """Owner's decision 1: not the service, so the restricted token at the build's own
+    integrity (PyInstaller cannot start at Low), below the minimum, with the notice."""
+    monkeypatch.setattr(isolation, "frozen", lambda: True)
+    monkeypatch.setattr(windows, "running_as_system", lambda: False)
+    launchers = isolation.plan(Limits()).launchers
+    assert [(x.identity, x.low_integrity) for x in launchers] == [
+        ("restricted", False),
+        ("plain", True),
+    ]
+    # Started here on the source interpreter, at that same integrity.
+    monkeypatch.setattr(isolation, "frozen", lambda: False)
+    limits = Limits()
+    launcher = WindowsLauncher("restricted", limits, low_integrity=False)
+    runner, iso = await start_worker(tmp_path, limits, [launcher])
+    try:
+        assert iso.level == "restricted" and not iso.minimum_met
+        assert iso.notice == isolation.WEAKER_NOTICE
+        assert iso.to_json()["notice"].startswith("weaker isolation")
+    finally:
+        await runner.stop()

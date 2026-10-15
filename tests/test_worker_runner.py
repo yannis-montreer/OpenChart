@@ -191,3 +191,61 @@ def test_probe_targets_are_absolute_whatever_the_data_folder_is_given_as(monkeyp
     targets = probe_targets(Path("data"), 9, "restricted")
     assert Path(targets["read"]["read the database"]) == tmp_path / "data" / "openchart.db"
     assert Path(targets["list"]["list the data folder"]).is_absolute()
+
+
+def counting(registry):
+    calls = []
+    real = registry.runner.compute
+
+    async def compute(*args, **kwargs):
+        calls.append(args)
+        return await real(*args, **kwargs)
+
+    registry.runner.compute = compute
+    return calls
+
+
+async def test_an_error_is_answered_from_memory_for_the_same_script_params_and_bars(custom):
+    # Owner, CI-1: errors are not counted toward the quarantine, so they must not keep
+    # the worker busy either.
+    registry, _, folder = custom
+    (folder / "raises.py").write_text("RAISE\n")
+    d = await registry.get("raises")
+    calls = counting(registry)
+    for _ in range(3):
+        with pytest.raises(ScriptFailed, match="ZeroDivisionError"):
+            await registry.compute(d, FRAME, {})
+    assert len(calls) == 1
+    with pytest.raises(ScriptFailed):  # other bars: computed
+        await registry.compute(d, FRAME.assign(c=FRAME["c"] + 1), {})
+    assert len(calls) == 2
+
+
+async def test_a_slow_error_pauses_that_script_until_its_file_changes(custom):
+    registry, _, folder = custom  # deadline 0.5 s; the script raises after 0.4 s
+    (folder / "slow.py").write_text("SLOWRAISE\n")
+    d = await registry.get("slow")
+    calls = counting(registry)
+    for shift in range(3):  # new bars each time, as a forming bar gives
+        with pytest.raises(ScriptFailed) as failed:
+            await registry.compute(d, FRAME.assign(c=FRAME["c"] + shift), {})
+        assert failed.value.kind == "error"
+    assert len(calls) == 1
+    assert d.status == "ok" and d.failures == 0  # shown, not counted
+
+    (folder / "slow.py").write_text("fixed\n")
+    st = (folder / "slow.py").stat()
+    os.utime(folder / "slow.py", ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+    d = await registry.get("slow")
+    assert (await registry.compute(d, FRAME, {}))["out"].tolist() == [0, 1, 2, 3, 4]
+    assert len(calls) == 2
+
+
+async def test_the_deadline_still_applies_to_every_job(custom):
+    registry, _, folder = custom
+    (folder / "busy.py").write_text("HANG\n")
+    d = await registry.get("busy")
+    t = time.perf_counter()
+    with pytest.raises(ScriptFailed) as failed:
+        await registry.compute(d, FRAME, {})
+    assert failed.value.kind == "timeout" and time.perf_counter() - t < 2

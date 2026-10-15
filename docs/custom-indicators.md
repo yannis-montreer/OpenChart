@@ -19,6 +19,9 @@ in CI-4.
   (`OPENCHART_WORKER_MEMORY_MB`, `OPENCHART_WORKER_CPU_PERCENT`, `OPENCHART_WORKER_TIMEOUT_S`,
   1 to 30 s). A script past its deadline is killed with the worker, which restarts in 1 to
   2 s; a script that fails that way 3 times in a row is stopped until its file changes.
+  A script's own exception is shown with its line and kept: the same request gets it back
+  without running again, and a script that raised after more than half its deadline is
+  not run again with those settings for 30 s. Editing the file runs it at once.
 - **The rest of the server never waits on it:** the price feed, candles, alerts and the
   watchdog carry on while a script hangs (tested).
 - **A clean environment:** no `OPENCHART_*`, no tokens.

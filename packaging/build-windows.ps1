@@ -128,7 +128,8 @@ try {
         $logText = Get-Content $log -Raw
     }
     $sandbox = [regex]::Match($logText, "indicator sandbox: [^\r\n]*").Value
-    if ($sandbox -notmatch "ready \(restricted token\)") { throw "The indicator worker did not start: $sandbox" }
+    # Run by hand, the release build is below the minimum isolation and must say so.
+    if ($sandbox -notmatch "ready \(restricted token\); weaker isolation") { throw "The indicator worker did not start, or without its notice: $sandbox" }
     Write-Host "   health ok, web page served, setup required: $($setup.setup_required), EMA loaded, secrets file used, indicator worker ready" -ForegroundColor Green
 } finally {
     Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue

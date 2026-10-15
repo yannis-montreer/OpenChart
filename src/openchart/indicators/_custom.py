@@ -15,8 +15,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import json
 import logging
 import re
+import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -34,6 +37,16 @@ ID = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 MAX_FILE_BYTES = 256 * 1024
 QUARANTINE_AFTER = 3
 WORKER_WAIT = 90.0  # seconds a request waits for the worker's first start
+ERROR_CACHE_SIZE = 256  # a script's own errors kept, by script, parameters and bars
+SLOW_ERROR_PAUSE = 30.0  # seconds a slow error is answered from memory
+
+
+def _bars_digest(bars: dict[str, np.ndarray]) -> str:
+    h = hashlib.sha1(usedforsecurity=False)
+    for name in sorted(bars):
+        h.update(name.encode())
+        h.update(np.ascontiguousarray(bars[name], dtype="<f8").tobytes())
+    return h.hexdigest()
 
 
 def _not_here(*_args: Any) -> Any:
@@ -109,6 +122,9 @@ class CustomIndicators:
         self._ready = asyncio.Event()
         self._defs: dict[str, CustomDefinition] = {}
         self._scan = asyncio.Lock()
+        # A script's own errors, by (hash, params, bars), and slow ones by (hash, params).
+        self._errors: OrderedDict[tuple[str, str, str], ScriptFailed] = OrderedDict()
+        self._slow: dict[tuple[str, str], tuple[float, ScriptFailed]] = {}
 
     def worker_ready(self, runner: IndicatorRunner | None, isolation: Isolation) -> None:
         self.runner, self.isolation = runner, isolation
@@ -231,13 +247,34 @@ class CustomIndicators:
     async def compute(
         self, d: CustomDefinition, frame: pd.DataFrame, params: dict[str, Any]
     ) -> dict[str, pd.Series]:
+        """Values from the worker. A script's own error is not counted toward the
+        quarantine, so it is kept instead (owner, CI-1): the same script, parameters and
+        bars answer the same error without running again, and a script that raised
+        after more than half its deadline is not run again with those parameters for
+        SLOW_ERROR_PAUSE seconds. Editing the file (a new hash) runs it at once."""
         runner, indicator = self._check_runnable(d)
         bars = {c: frame[c].to_numpy(dtype="float64") for c in ("ts", "o", "h", "l", "c", "v")}
+        about = (d.digest, json.dumps(params, sort_keys=True))
+        exact = (*about, _bars_digest(bars))
+        if exact in self._errors:
+            self._errors.move_to_end(exact)
+            raise self._errors[exact]
+        slow = self._slow.get(about)
+        if slow is not None and time.monotonic() - slow[0] < SLOW_ERROR_PAUSE:
+            raise slow[1]
+        t = time.monotonic()
         try:
             out = await runner.compute(d.digest, d.file, d.source, params, bars)
         except ScriptFailed as exc:
             self._failed(d, exc)
+            if exc.kind == "error":
+                self._errors[exact] = exc
+                while len(self._errors) > ERROR_CACHE_SIZE:
+                    self._errors.popitem(last=False)
+                if time.monotonic() - t > runner.limits.timeout_s / 2:
+                    self._slow[about] = (time.monotonic(), exc)
             raise
+        self._slow.pop(about, None)
         d.failures = 0
         if d.status != "ok":
             d.status, d.reason, d.line = "ok", None, None

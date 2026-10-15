@@ -2,8 +2,8 @@
 fraction of a second (tests/test_worker_runner.py).
 
 What a "script" does is written in its source: `HANG` loops, `SLEEP` sleeps, `CRASH`
-ends the process, `RAISE` raises; anything else describes one output and echoes the
-closes.
+ends the process, `RAISE` raises, `SLOWRAISE` raises after 0.4 s; anything else
+describes one output and echoes the closes.
 """
 
 import os
@@ -84,6 +84,8 @@ def main():
                     time.sleep(3600)
                 if "CRASH" in source:
                     os._exit(3)
+                if "SLOWRAISE" in source:
+                    time.sleep(0.4)
                 if "RAISE" in source:
                     head = {
                         "error": {
