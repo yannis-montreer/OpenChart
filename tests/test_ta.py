@@ -274,17 +274,22 @@ def test_valuewhen():
     same(ta.valuewhen(cond, x, n=2), [NAN] * 5)
 
 
-def test_rising_and_falling_compare_with_every_one_of_the_previous_values():
+def test_rising_and_falling_need_every_step_to_go_the_same_way():
+    # n steps, n + 1 values: x[0] > x[1] > x[2] for n = 2 (checked in TradingView).
     x = pd.Series([1.0, 2, 3, 2, 4])
-    assert ta.rising(x, 2).tolist() == [False, False, True, False, True]
+    assert ta.rising(x, 2).tolist() == [False, False, True, False, False]
     y = pd.Series([5.0, 4, 3, 4, 2])
-    assert ta.falling(y, 2).tolist() == [False, False, True, False, True]
+    assert ta.falling(y, 2).tolist() == [False, False, True, False, False]
+    assert ta.rising(pd.Series([1.0, 2, 3, 4, 5]), 4).tolist() == [False] * 4 + [True]
+    assert ta.rising(pd.Series([1.0, 2, 2, 3]), 2).tolist() == [False] * 4  # a flat step breaks it
 
 
-def test_rising_is_not_the_same_as_every_step_going_up():
-    # 4 is above both of the previous two values although 3 -> 2 went down. This is the
-    # reading chosen where the Pine reference's wording is "greater than any previous".
-    assert ta.rising(pd.Series([1.0, 3, 2, 4]), 2).tolist()[3] is True
+def test_the_series_that_separates_each_step_from_higher_than_all():
+    # [2, 1, 3] at n = 2: 3 is higher than both earlier values, but 1 -> 3 follows 2 -> 1, a
+    # step down, so it is not rising. Mirrored for falling. "Higher than all" would say True.
+    assert ta.rising(pd.Series([2.0, 1, 3]), 2).tolist() == [False, False, False]
+    assert ta.falling(pd.Series([2.0, 3, 1]), 2).tolist() == [False, False, False]
+    assert ta.rising(pd.Series([1.0, 3, 2, 4]), 2).tolist() == [False] * 4
 
 
 def test_rising_with_a_gap_in_the_window_is_false():

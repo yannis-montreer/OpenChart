@@ -124,7 +124,7 @@ one starts.
 | `crossover(a, b)`, `crossunder`, `cross` | `a > b` now and `a <= b` on the bar before; either side may be a number (`crossover(rsi, 30)`) | one bar after the inputs' own |
 | `barssince(cond)` | bars since `cond` was True (0 on a True bar); NaN before the first | none (it counts from the first bar it sees) |
 | `valuewhen(cond, x, n=0)` | `x` on the bar where `cond` was True the `n`-th time back | until `cond` has been True `n + 1` times |
-| `rising(x, n)`, `falling(x, n)` | `x` higher (lower) than each of the previous `n` values | `n + 1` bars |
+| `rising(x, n)`, `falling(x, n)` | each of the last `n` steps went up (down): `x[0] > x[1] > ... > x[n]` | `n + 1` bars |
 
 A gap in the input: `ema` and `rma` give NaN at the gap and start again, with a new
 seed, once `n` values in a row are back; windowed helpers give NaN while the gap is in

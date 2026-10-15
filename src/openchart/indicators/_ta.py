@@ -280,20 +280,22 @@ def valuewhen(condition, values, n: int = 0) -> pd.Series:
 
 
 def rising(values, n: int) -> pd.Series:
-    """True when the value is higher than each of the previous `n` values. A gap anywhere
-    in those `n + 1` values gives False.
-
-    Note: this is the reading "greater than any previous source for length bars back" of
-    the Pine reference, so `[1, 3, 2, 4]` is rising over 2 bars at the last bar although
-    3 -> 2 went down. See docs/decisions.md.
+    """True when each of the last `n` steps went up: `x[0] > x[1] > ... > x[n]` in Pine's
+    indexing (`n` steps, `n + 1` values). `[2, 1, 3]` is not rising over 2 although 3 is
+    above both earlier values. A gap anywhere in those `n + 1` values gives False.
     """
-    n = _whole(n, "n", 1)
     s = _series(values)
-    return (s > s.rolling(n, min_periods=n).max().shift(1)).astype(bool)
+    out = pd.Series(True, index=s.index)
+    for k in range(_whole(n, "n", 1)):
+        out &= s.shift(k) > s.shift(k + 1)
+    return out.astype(bool)
 
 
 def falling(values, n: int) -> pd.Series:
-    """True when the value is lower than each of the previous `n` values (see `rising`)."""
-    n = _whole(n, "n", 1)
+    """True when each of the last `n` steps went down: `x[0] < x[1] < ... < x[n]` in Pine's
+    indexing (see `rising`)."""
     s = _series(values)
-    return (s < s.rolling(n, min_periods=n).min().shift(1)).astype(bool)
+    out = pd.Series(True, index=s.index)
+    for k in range(_whole(n, "n", 1)):
+        out &= s.shift(k) < s.shift(k + 1)
+    return out.astype(bool)
