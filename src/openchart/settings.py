@@ -32,6 +32,7 @@ from typing import Any, Protocol
 import aiosqlite
 
 from openchart.config import OANDA_HOSTS, Config, OandaConfig, mask_secret
+from openchart.files import open_private
 
 log = logging.getLogger(__name__)
 
@@ -43,6 +44,12 @@ SECRETS_FILE = "secrets.enc"
 
 class SecretStoreUnavailable(RuntimeError):
     pass
+
+
+class SecretKeyChanged(SecretStoreUnavailable):
+    """secrets.enc exists but this key does not open it. The server stops: running on
+    without the broker and Telegram tokens would chart stale prices and send no alerts,
+    while looking healthy."""
 
 
 class Secrets(Protocol):
@@ -111,14 +118,16 @@ class EncryptedFileSecrets:
         try:
             return json.loads(self._fernet.decrypt(self.path.read_bytes()))
         except self._invalid as exc:
-            raise SecretStoreUnavailable(
+            raise SecretKeyChanged(
                 f"Cannot decrypt {self.path.name}: {SECRET_KEY_ENV} has changed"
+                f" (or the key file {SECRET_KEY_FILE_ENV} names)"
             ) from exc
 
     def _save(self, data: dict[str, str]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_bytes(self._fernet.encrypt(json.dumps(data).encode()))
+        with open_private(tmp) as f:
+            f.write(self._fernet.encrypt(json.dumps(data).encode()))
         os.replace(tmp, self.path)
 
     def get(self, name: str) -> str | None:

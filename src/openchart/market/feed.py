@@ -9,6 +9,10 @@ stream.
 Each tick goes to the candle builder, the tick store and any listeners (the websocket
 hub). Closed M1 bars are written in small batches, and once a minute the last few
 minutes are re-fetched from the provider so stored M1 matches the broker's candles.
+Minutes that miss those refreshes (closed just before a stop, a dropped stream or a
+sleep) are checked against the broker too: the hour before the newest stored minute on
+every start and reconnect, the hour before a pause on waking, and the whole previous UTC
+day once a day.
 """
 
 from __future__ import annotations
@@ -18,12 +22,15 @@ import contextlib
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from openchart.market.backfill import (
     CLOSURE_MINUTES,
     DEEP_HISTORY_START,
     RepairResult,
+    check_day,
+    check_tail,
     deep_fill,
     download_backward,
     gap_fill,
@@ -36,6 +43,7 @@ from openchart.market.candle_builder import CandleBuilder
 from openchart.market.sessions import TradingHours
 from openchart.providers.base import Candle, Provider, Tick
 from openchart.providers.stream import ResilientTickStream
+from openchart.settings import SettingsStore
 from openchart.store.candles import CandleStore
 from openchart.store.ticks import TickWriter
 
@@ -49,6 +57,11 @@ WakeListener = Callable[[float, float], None]  # frozen from, to (wall clock)
 WAKE_SECONDS = 30.0
 # A failed history download is tried again after this long.
 DOWNLOAD_RETRY_SECONDS = 60.0
+# The previous UTC day is checked against the broker this long after midnight, when the
+# broker's last candles of the day are final.
+DAY_CHECK_DELAY = timedelta(minutes=15)
+# Settings key holding, per instrument, the last day checked ("YYYY-MM-DD").
+DAY_CHECK_KEY = "m1_checked_through"
 
 
 def _history() -> dict[str, Any]:
@@ -126,6 +139,7 @@ class Feed:
         for instrument in self.instruments:
             if await self.store.last_ts(self.source, instrument) is None:
                 continue
+            await self.check_tail(instrument)  # before gap fill moves the newest minute
             result = await gap_fill(self.provider, self.store, instrument)
             await self._repaired(
                 await repair_recent(
@@ -297,6 +311,37 @@ class Feed:
             except Exception:
                 log.exception("closures listener failed")
 
+    async def check_tail(self, instrument: str, before: int | None = None) -> None:
+        """The hour before `before` (default: before the newest stored minute) against the
+        broker's candles."""
+        try:
+            await check_tail(self.provider, self.store, instrument, before)
+        except Exception as exc:
+            log.warning("checking recent M1 of %s against the broker failed: %s", instrument, exc)
+
+    async def check_previous_day(self, now: float | None = None) -> None:
+        """Once a day per instrument: yesterday's M1 (UTC) against the broker's. A day the
+        server was off is checked when it next runs; older days are not."""
+        now = time.time() if now is None else now
+        day = (datetime.fromtimestamp(now, UTC) - DAY_CHECK_DELAY).date() - timedelta(days=1)
+        settings = SettingsStore(self.store.conn)
+        done: dict[str, str] = dict(await settings.get(DAY_CHECK_KEY, {}) or {})
+        for instrument in self.instruments:
+            key = f"{self.source}:{instrument}"
+            if key in done and date.fromisoformat(done[key]) >= day:
+                continue
+            if instrument in self.downloading:
+                continue  # its download fetches that day anyway
+            if await self.store.last_ts(self.source, instrument) is None:
+                continue
+            try:
+                await check_day(self.provider, self.store, instrument, day)
+            except Exception as exc:
+                log.warning("checking %s of %s against the broker failed: %s", day, instrument, exc)
+                continue
+            done[key] = day.isoformat()
+            await settings.set(DAY_CHECK_KEY, done)
+
     async def refresh(self) -> None:
         for instrument in self.instruments:
             try:
@@ -313,6 +358,7 @@ class Feed:
             await asyncio.sleep(1)
             wall = time.time()
             woke = wall - last_wall > WAKE_SECONDS
+            paused_at = last_wall
             if woke:
                 log.info("resumed after %.0fs paused; checking recent history", wall - last_wall)
                 if self.on_wake is not None:
@@ -331,12 +377,16 @@ class Feed:
             if now - last_refresh >= self.refresh_interval:
                 last_refresh = now
                 await self.refresh()
+                await self.check_previous_day()
                 for instrument in self.instruments:
                     await self.extend_cache(instrument)
             if woke:
                 # The refresh wrote the last few minutes, ahead of the pause: fill what lies
                 # between. The stream's reconnect does it too, but only if it notices.
                 await self.repair()
+                # The minutes closed just before the pause missed their refreshes.
+                for instrument in self.instruments:
+                    await self.check_tail(instrument, before=int(paused_at) // 60 * 60 + 60)
             if now - last_status >= self.status_interval:
                 last_status = now
                 self.log_status()
@@ -378,6 +428,7 @@ class Feed:
     async def run(self) -> None:
         await self.find_downloads()
         await self.fill_history()
+        await self.check_previous_day()
         if self.tick_writer:
             await asyncio.to_thread(self.tick_writer.compact_closed_days)
         periodic = asyncio.create_task(self._periodic())
