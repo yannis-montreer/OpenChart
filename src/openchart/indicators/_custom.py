@@ -27,14 +27,21 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from openchart.indicators._base import Indicator, Output, Param
+from openchart.indicators._base import (
+    MAX_FILE_BYTES,
+    Indicator,
+    Info,
+    Param,
+    ResultError,
+    output_from_json,
+    validate_schema,
+)
 from openchart.indicators.worker.isolation import Isolation
 from openchart.indicators.worker.runner import IndicatorRunner, ScriptFailed, WorkerUnavailable
 
 log = logging.getLogger(__name__)
 
 ID = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
-MAX_FILE_BYTES = 256 * 1024
 QUARANTINE_AFTER = 3
 WORKER_WAIT = 90.0  # seconds a request waits for the worker's first start
 ERROR_CACHE_SIZE = 256  # a script's own errors kept, by script, parameters and bars
@@ -53,8 +60,13 @@ def _not_here(*_args: Any) -> Any:
     raise RuntimeError("custom indicators are computed in the worker")
 
 
-def indicator_from_json(indicator_id: str, d: dict[str, Any]) -> Indicator:
-    """The schema the worker described, for validating parameters here."""
+def indicator_from_json(indicator_id: str, d: dict[str, Any], file: str | None = None) -> Indicator:
+    """The schema the worker described, for validating parameters here. It is checked by
+    the same rules the worker applied to the file: the worker is not trusted, and what is
+    built here is what the browser is told."""
+    file = file or f"{indicator_id}.py"
+    if not isinstance(d["params"], list) or not isinstance(d["outputs"], list):
+        raise ValueError("params and outputs must be lists")
     params = []
     for p in d["params"]:
         params.append(
@@ -67,9 +79,11 @@ def indicator_from_json(indicator_id: str, d: dict[str, Any]) -> Indicator:
                 max=p.get("max"),
                 step=p.get("step"),
                 choices=tuple(p.get("choices", ())) if p["type"] == "choice" else (),
+                max_length=p.get("max_length") if p["type"] == "string" else None,
             )
         )
-    outputs = [Output(o["name"], o["label"], o["color"], o["width"]) for o in d["outputs"]]
+    outputs = [output_from_json(o) for o in d["outputs"]]
+    validate_schema(file, d["name"], d["title"], params, outputs)
     return Indicator(
         id=indicator_id,
         name=d["name"],
@@ -202,7 +216,7 @@ class CustomIndicators:
             return
         try:
             schema = await self.runner.describe(d.digest, d.file, d.source)
-            d.indicator = indicator_from_json(d.id, schema)
+            d.indicator = indicator_from_json(d.id, schema, d.file)
             d.status, d.reason, d.line = "ok", None, None
         except ScriptFailed as exc:
             self._failed(d, exc)
@@ -245,7 +259,11 @@ class CustomIndicators:
             raise
 
     async def compute(
-        self, d: CustomDefinition, frame: pd.DataFrame, params: dict[str, Any]
+        self,
+        d: CustomDefinition,
+        frame: pd.DataFrame,
+        params: dict[str, Any],
+        info: Info | None = None,
     ) -> dict[str, pd.Series]:
         """Values from the worker. A script's own error is not counted toward the
         quarantine, so it is kept instead (owner, CI-1): the same script, parameters and
@@ -254,7 +272,8 @@ class CustomIndicators:
         SLOW_ERROR_PAUSE seconds. Editing the file (a new hash) runs it at once."""
         runner, indicator = self._check_runnable(d)
         bars = {c: frame[c].to_numpy(dtype="float64") for c in ("ts", "o", "h", "l", "c", "v")}
-        about = (d.digest, json.dumps(params, sort_keys=True))
+        info_json = info.to_json() if info is not None else None
+        about = (d.digest, json.dumps([params, info_json], sort_keys=True))
         exact = (*about, _bars_digest(bars))
         if exact in self._errors:
             self._errors.move_to_end(exact)
@@ -264,7 +283,11 @@ class CustomIndicators:
             raise slow[1]
         t = time.monotonic()
         try:
-            out = await runner.compute(d.digest, d.file, d.source, params, bars)
+            out = await runner.compute(d.digest, d.file, d.source, params, bars, info_json)
+            try:  # the worker is not trusted: what it sent back is checked again here
+                series = indicator.check_wire(out, len(frame))
+            except ResultError as exc:
+                raise ScriptFailed("error", {"type": "ResultError", "message": str(exc)}) from None
         except ScriptFailed as exc:
             self._failed(d, exc)
             if exc.kind == "error":
@@ -278,17 +301,4 @@ class CustomIndicators:
         d.failures = 0
         if d.status != "ok":
             d.status, d.reason, d.line = "ok", None, None
-        series = {}
-        for o in indicator.outputs:  # the worker checked the shape; check it again here
-            values = np.asarray(out.get(o.name, ()), dtype="float64")
-            if len(values) != len(frame):
-                raise ScriptFailed(
-                    "error",
-                    {
-                        "type": "ValueError",
-                        "message": f"output {o.name!r} has {len(values)} values "
-                        f"for {len(frame)} bars",
-                    },
-                )
-            series[o.name] = pd.Series(values)
         return series

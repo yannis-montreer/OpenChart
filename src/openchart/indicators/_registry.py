@@ -18,7 +18,7 @@ from pathlib import Path
 from types import ModuleType
 
 import openchart.indicators as package
-from openchart.indicators._base import Indicator, Output, Param
+from openchart.indicators._base import Indicator, SchemaError, validate_schema
 
 log = logging.getLogger(__name__)
 
@@ -77,15 +77,18 @@ def _import_file(path: Path) -> ModuleType:
     return module
 
 
-def from_module(stem: str, module: ModuleType, *, builtin: bool = True) -> Indicator:
-    """Check what a file declares (see `_base.py`)."""
+def from_module(
+    stem: str, module: ModuleType, *, builtin: bool = True, file: str | None = None
+) -> Indicator:
+    """Check what a file declares (`_base.validate_schema`); SchemaError names the file."""
+    file = file or f"{stem}.py"
 
     def need(attr: str, kind: type | tuple[type, ...]):
         if not hasattr(module, attr):
-            raise ValueError(f"missing {attr}")
+            raise SchemaError(f"{file}: missing {attr}")
         value = getattr(module, attr)
         if not isinstance(value, kind):
-            raise ValueError(f"{attr} has the wrong type")
+            raise SchemaError(f"{file}: {attr} has the wrong type")
         return value
 
     name = need("NAME", str).strip()
@@ -95,21 +98,8 @@ def from_module(stem: str, module: ModuleType, *, builtin: bool = True) -> Indic
     outputs = tuple(need("OUTPUTS", list | tuple))
     compute = need("compute", object)
     if not callable(compute):
-        raise ValueError("compute must be a function")
-    if not name or not isinstance(title, str):
-        raise ValueError("NAME and TITLE must be text")
-    if not all(isinstance(p, Param) for p in params):
-        raise ValueError("PARAMS must hold Int(...), Source(...), Color(...) and the like")
-    if not outputs or not all(isinstance(o, Output) for o in outputs):
-        raise ValueError("OUTPUTS must hold at least one Output(...)")
-    names = [p.name for p in params]
-    if len(set(names)) != len(names):
-        raise ValueError("two parameters have the same name")
-    by_name = {p.name: p for p in params}
-    for o in outputs:
-        for role, ref in (("color", o.color), ("width", o.width)):
-            if by_name.get(ref) is None or by_name[ref].type != role:
-                raise ValueError(f"output {o.name!r}: {ref!r} is not a {role} parameter")
+        raise SchemaError(f"{file}: compute must be a function")
+    validate_schema(file, name, title, params, outputs)
     warmup = getattr(module, "warmup", None)
     indicator = Indicator(
         id=stem,
@@ -124,7 +114,7 @@ def from_module(stem: str, module: ModuleType, *, builtin: bool = True) -> Indic
     )
     if warmup is not None:
         if not callable(warmup):
-            raise ValueError("warmup must be a function")
+            raise SchemaError(f"{file}: warmup must be a function")
         indicator.warmup = warmup
     indicator.normalize(None)  # the defaults themselves must be valid
     return indicator

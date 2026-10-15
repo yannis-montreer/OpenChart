@@ -88,10 +88,28 @@ Errors: `400` unknown timeframe or price, `404` unknown instrument, `422` invali
 | Route | |
 |---|---|
 | `GET /api/indicators` | `{indicators, errors, folder}`: each indicator's `id, name, title, overlay, params, outputs, builtin`; files that did not load (`{file, error}`); the folder for your own (docs/indicators.md) |
-| `GET /api/indicators/{id}?instrument=&timeframe=&price=&params=&from=&to=&limit=` | `{id, name, instrument, timeframe, price, params, t, values}` |
+| `GET /api/indicators/{id}?instrument=&timeframe=&price=&params=&from=&to=&limit=` | `{id, name, instrument, timeframe, price, params, t, values, hits, levels}` |
 
-- A parameter: `{name, type, default, label, group, min?, max?, step?, choices?}`; `type` is `int`, `float`, `bool`, `choice`, `source`, `color` or `width`; `group` is `inputs` or `style` (the settings tabs). An output: `{name, label, color, width}`, naming the parameters that hold its colour and width.
-- Values: `params` is a JSON object (missing ones take their defaults; unknown or invalid ones are a 400). The bars are those `GET /api/candles` returns for the same `instrument, timeframe, price, from, to, limit`; `t` holds their start times and `values` one list per output, as long as `t`, `null` where there is no value. Earlier bars are read as the indicator's warm-up needs, so values do not depend on where the window starts. 404 for an unknown indicator or instrument, 422 when the indicator's own code fails.
+- A parameter: `{name, type, default, label, group, min?, max?, step?, max_length?, choices?}`; `type` is `int`, `float`, `bool`, `choice`, `string`, `source`, `color` or `width`; `group` is `inputs` or `style` (the settings tabs). `max_length` is for `string` (1 to 1000, default 100).
+- **An output** always has `kind`, `name` and `label`; the rest depends on the kind. `color` and `width` name parameters (the browser reads the value from `params`); `width` is `null` where the output has none. Line styles are `solid`, `dashed`, `dotted`.
+
+  | `kind` | other fields | values in the answer |
+  |---|---|---|
+  | `line` | `color, width, style` | `values[name]`: a number or `null` per bar |
+  | `histogram` | `color, base` | `values[name]`: a number or `null` per bar; columns from `base` |
+  | `area` | `color, width` | `values[name]`: a number or `null` per bar; shaded below the line |
+  | `fill` | `between: [upper, lower], color, opacity` | none; shades between the `values` of two outputs. `name` is `fill:1`, `fill:2`, ... |
+  | `level` | `value` (number or `null`), `input` (a Float input's name or `null`), `color, width, style` | `levels[name]`: the number to draw at. `name` is `level:1`, ... |
+  | `marker` | `color, shape, position, text` | `hits[name]`: where it is drawn |
+  | `background` | `color, opacity` | `hits[name]`: the bars to tint |
+
+  `shape` is `arrow_up`, `arrow_down`, `circle` or `square`; `position` is `above`, `below` or `on` (the bar's close); `opacity` is above 0 and at most 1. M7 outputs (`{name, label, color, width}`) are `line` with `style: "solid"`; the old fields are unchanged.
+- **Values:** `params` is a JSON object (missing ones take their defaults; unknown or invalid ones are a 400). The bars are those `GET /api/candles` returns for the same `instrument, timeframe, price, from, to, limit`; `t` holds their start times. Earlier bars are read as the indicator's warm-up needs, so values do not depend on where the window starts.
+  - `values`: one list per `line`, `histogram` and `area` output, as long as `t`, `null` where there is no value (a gap, or not a finite number).
+  - `hits`: for each `marker` and `background` output, the ascending list of positions **in `t`** (0-based) where it is on. `[]` when never. A thousand bars with a marker every tenth bar is 100 integers, not 1,000 booleans.
+  - `levels`: `{name: number}` for each `level`, already resolved with this request's `params`.
+  - Every key of `values`, `hits` and `levels` is the `name` of an output; `fill` outputs have none (the browser draws them from the two outputs they name).
+  - 404 for an unknown indicator or instrument, 400 for bad `params`. **422 when the indicator's code fails or returns something that cannot be drawn** (a missing or undeclared output, the wrong number of values, text in a line, numbers in a marker, ...): `{"detail": "SMA cross failed: ResultError: output 'up' must be true/false values ..."}`. The server checks every answer itself, also those of the worker.
 
 ## Layouts
 

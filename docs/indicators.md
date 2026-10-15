@@ -65,9 +65,15 @@ def compute(bars, params):
 - `NAME`, `TITLE`, `OVERLAY`, `PARAMS`, `OUTPUTS` and `compute` are required; `warmup` is
   optional (default 0).
 - `compute(bars, params)` gets a pandas DataFrame with columns `ts, o, h, l, c, v` (oldest
-  first, bar start times in UTC seconds) and every parameter, validated, with defaults
-  filled in. It returns `{output name: values}`, one value per bar; NaN where there is no
-  value yet. It may return pandas Series, numpy arrays or lists.
+  first, bar start times in UTC seconds; also under the long names `time, open, high, low,
+  close, volume`, so `bars.close` reads naturally; volume is OANDA's tick count) and every
+  parameter, validated, with defaults filled in. It returns `{output name: values}`, one
+  value per bar; NaN where there is no value yet. It may return pandas Series, numpy arrays
+  or lists.
+- **`compute(bars, params, info)`:** with a third argument it also gets `info.instrument`
+  (`"XAU_USD"`), `info.display_name` (`"Gold"`), `info.decimals`, `info.timeframe` (`"1h"`)
+  and `info.price` (`"mid"`, `"bid"` or `"ask"`). `info` is read-only. A two-argument
+  `compute` is called as before.
 - `warmup(params)` asks for extra bars before the ones on screen, so the first value shown
   is the same as if it had been computed over the whole history. Without it, a moving
   average starts over at the left edge of each request.
@@ -80,6 +86,7 @@ def compute(bars, params):
 | `Float(name, default, min=, max=, step=, label=)` | number | Inputs |
 | `Bool(name, default, label=)` | checkbox | Inputs |
 | `Choice(name, default, ["a", "b"], label=)` | dropdown | Inputs |
+| `String(name, default, max_length=100, label=)` | text box (at most `max_length` characters, 1 to 1000) | Inputs |
 | `Source(name="source", default="close", label=)` | dropdown: open, high, low, close, hl2, hlc3, ohlc4, hlcc4 | Inputs |
 | `Color(name, default, label=)` | colour picker (`#rrggbb`) | Style |
 | `Width(name, default=1, label=)` | line width, 1 to 4 px | Style |
@@ -88,7 +95,45 @@ The label defaults to the name, capitalised. Values are checked on the server (t
 max, choices) before `compute` runs, and in the dialog before they are applied. The
 legend shows the name followed by the Inputs values ("EMA 9 close").
 
-Each `Output` is one line, drawn with the colour and width parameters it names.
+## Outputs
+
+Colour and width are the **names of `Color` and `Width` inputs**, so the Style tab can change
+them. An output's `label` is what the legend shows.
+
+| Declaration | Draws | `compute` returns |
+|---|---|---|
+| `Line(name, label, color=, width=, style="solid")` (`Output` is the M7 name for it) | a line; `style` is `solid`, `dashed` or `dotted` | a number per bar, NaN = gap |
+| `Histogram(name, label, color=, base=0)` | columns from `base` | a number per bar |
+| `Area(name, label, color=, width=None)` | a line with a shaded area below it | a number per bar |
+| `Fill(between=("upper", "lower"), color=, opacity=0.15, label="Fill")` | the band between two `Line`/`Area` outputs | nothing |
+| `Level(value, label="Level", color=, width=None, style="dashed")` | a horizontal line; `value` is a number or the name of a `Float` input | nothing |
+| `Marker(name, label, color=, shape="circle", position="above", text="")` | a shape on the bars that are True; `shape` is `arrow_up`, `arrow_down`, `circle`, `square`; `position` is `above`, `below`, `on` (the close) | True/False per bar |
+| `Background(name, label, color=, opacity=0.15)` | the bar's background, tinted, where True | True/False per bar |
+
+`Fill` and `Level` have no name and take no values; `compute` must not return them.
+Markers and backgrounds need real booleans (a comparison, `ta.crossover(...)`), not 0/1 and not
+NaN. Lines, histograms and areas need numbers, not booleans; infinities count as gaps. A line
+that is NaN everywhere is allowed (it just draws nothing: usually "not enough bars yet").
+
+## What is checked
+
+**When the file loads,** each failure names the file, the input or output and the rule
+(`mine.py: output 'fast': 'width' is not a width parameter`):
+
+- input and output names are identifiers (letters, digits, `_`; at most 40 characters) and
+  unique among inputs, and among outputs (an input and an output may share a name);
+- every default passes its own type's check; `min <= max`; a `Choice` has choices, without
+  repeats, and its default is one of them; a `String` default fits `max_length`;
+- an output's colour is a `Color` input and its width a `Width` input; a `Fill` names two
+  different `Line`/`Area` outputs; a `Level`'s input is a `Float`;
+- at most 30 inputs and 16 outputs, labels (and `NAME`, `TITLE`, a marker's `text`) at most 60
+  characters, the file at most 256 KB.
+
+**Every time `compute` runs,** the values are checked before anything is drawn, by the worker
+and again by the server: every declared value output is present, nothing undeclared is
+returned, each has one value per bar, the right type for its kind. A bad result is an error
+shown for that indicator ("SMA cross failed: ResultError: output 'up' must be true/false
+values..."), never a crash; it does not count toward the quarantine.
 
 ## Building blocks
 

@@ -80,8 +80,16 @@ def test_the_builtin_ema_and_its_schema():
         ("color", "color", "#2962ff", "style"),
         ("width", "width", 1, "style"),
     ]
+    # The M7 fields are unchanged; CI-2 (b) adds the output's kind and line style.
     assert described["outputs"] == [
-        {"name": "ema", "label": "EMA", "color": "color", "width": "width"}
+        {
+            "kind": "line",
+            "name": "ema",
+            "label": "EMA",
+            "color": "color",
+            "width": "width",
+            "style": "solid",
+        }
     ]
 
 
