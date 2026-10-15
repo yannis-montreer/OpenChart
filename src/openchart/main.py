@@ -27,11 +27,12 @@ from openchart.market.backfill import (
     repair,
 )
 from openchart.market.cache import CandleCache
-from openchart.market.gaps import find_gaps
+from openchart.market.gaps import coverage, find_gaps
 from openchart.market.instruments import instrument_hours
 from openchart.providers.base import AuthError, Provider, ProviderError
 from openchart.providers.registry import create_provider
 from openchart.settings import (
+    SecretKeyChanged,
     SecretStoreUnavailable,
     SettingsStore,
     effective_config,
@@ -176,10 +177,15 @@ async def _cmd_stats(config: Config, args: argparse.Namespace) -> int:
             last = await ctx.store.last_ts(row.source, row.instrument)
             line = f"{row.source}/{row.instrument}: {n:,} M1 candles, {_fmt(first)} to {_fmt(last)}"
             if first and last and row.hours:
-                # Expected trading minutes in the stored range, sampled hourly.
-                open_hours = sum(1 for t in range(first, last, 3600) if row.hours.is_open(t))
-                if open_hours:
-                    line += f", {n / (open_hours * 60):.1%} of expected trading minutes"
+                cov = coverage(
+                    await ctx.store.timestamps(row.source, row.instrument),
+                    row.hours,
+                    await ctx.store.closures(row.source, row.instrument),
+                )
+                if cov.expected:
+                    line += f", {cov.ratio:.1%} of expected trading minutes"
+                if cov.outside:
+                    line += f" (and {cov.outside:,} outside the trading hours)"
             print(line)
             h1 = await ctx.store.count(row.source, row.instrument, "H1")
             if h1:
@@ -334,6 +340,11 @@ async def _cmd_repair(config: Config, args: argparse.Namespace) -> int:
     return 0
 
 
+def in_container() -> bool:
+    """Docker creates /.dockerenv; Podman sets `container`."""
+    return Path("/.dockerenv").exists() or bool(os.environ.get("container"))  # noqa: SIM112 (lowercase by design)
+
+
 async def _cmd_run(config: Config, args: argparse.Namespace) -> int:
     import uvicorn
 
@@ -343,7 +354,18 @@ async def _cmd_run(config: Config, args: argparse.Namespace) -> int:
     if args.data_dir:
         config = replace(config, data_dir=Path(args.data_dir))
     async with await Database.open(config.db_path) as db:
-        app_settings = await load_app_settings(SettingsStore(db.conn), config)
+        settings = SettingsStore(db.conn)
+        app_settings = await load_app_settings(settings, config)
+        instance_id = await settings.instance_id()
+    try:  # before opening the port: a key that cannot open secrets.enc stops the server
+        secrets = open_secrets(config, instance_id)
+        secrets.get("oanda_token")
+    except SecretKeyChanged as exc:
+        log.error("%s", exc)
+        print(_KEY_CHANGED.format(error=exc, data_dir=config.data_dir), file=sys.stderr)
+        return EXIT_KEY_CHANGED
+    except SecretStoreUnavailable:
+        pass  # the server starts without stored tokens and shows why (Settings, setup)
     # --host, then OPENCHART_HOST, then the "other devices" setting from the web UI.
     host = (
         args.host
@@ -351,7 +373,16 @@ async def _cmd_run(config: Config, args: argparse.Namespace) -> int:
         or ("0.0.0.0" if app_settings.listen_on_network else "127.0.0.1")
     )
     port = args.port or config.port
-    if host not in ("127.0.0.1", "localhost", "::1"):
+    if in_container():
+        # 0.0.0.0 inside a container says nothing about who can connect: the published
+        # port does (docker-compose.yml: 127.0.0.1 unless OPENCHART_BIND says otherwise).
+        log.info(
+            "listening on %s:%s inside the container; who can connect depends on the "
+            "published port (docker-compose.yml: OPENCHART_BIND, 127.0.0.1 by default)",
+            host,
+            port,
+        )
+    elif host not in ("127.0.0.1", "localhost", "::1"):
         log.warning(
             "listening on %s:%s for other devices. Keep it on a private network such as "
             "Tailscale; never forward this port on your router.",
@@ -363,7 +394,26 @@ async def _cmd_run(config: Config, args: argparse.Namespace) -> int:
         uvicorn.Config(app, host=host, port=port, log_level=config.log_level.lower())
     )
     await server.serve()
+    if not server.started:  # uvicorn logged why; a service manager must see a failure
+        return EXIT_STARTUP_FAILED
     return 0
+
+
+EXIT_KEY_CHANGED = 2
+EXIT_STARTUP_FAILED = 3  # uvicorn's own code for it
+_KEY_CHANGED = """
+OpenChart did not start: {error}.
+
+The broker and Telegram tokens in {data_dir}/secrets.enc were encrypted with
+another key. Without them there would be no live prices and no alerts, so the
+server stops instead of running half blind. Either:
+  - give it the key the file was saved with again (OPENCHART_SECRET_KEY, or for
+    the Windows service the key file it names), then start it; or
+  - move secrets.enc out of the data folder (keep it until the server works),
+    start the server, and enter the tokens again in Settings: they are saved
+    with the current key.
+Everything else in the data folder (history, drawings, alerts) is untouched.
+"""
 
 
 async def _cmd_reset_password(config: Config, args: argparse.Namespace) -> int:

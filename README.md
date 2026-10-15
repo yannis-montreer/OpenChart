@@ -146,6 +146,15 @@ docker compose logs openchart                              # shows the setup cod
 
 By default it listens on `127.0.0.1:8000` of the host. Set `OPENCHART_BIND` in `.env` to your Tailscale IP (or `0.0.0.0`) to reach it from other devices, and `OPENCHART_PORT` to change the port. The key in `.env` encrypts the tokens you enter in the setup page; keep it. Back up with `docker compose exec openchart openchart backup` (the zip lands in `/data/backups` inside the volume).
 
+Good to know in a container:
+
+- **The setup page asks for the setup code even on the same PC.** Requests reach the server through Docker's network, not from `127.0.0.1`, so every browser counts as another device. The code is in `docker compose logs openchart`.
+- **The log says "listening on 0.0.0.0:8000 inside the container".** That is the container's own address; who can connect is decided by the published port (`OPENCHART_BIND`), `127.0.0.1` unless you change it.
+- **If the key in `.env` changes, the server stops instead of starting without your tokens.** The log explains it: `secrets.enc` was encrypted with another key. Put the old key back, or move `secrets.enc` out of the volume and enter the tokens again in Settings. Docker restarts the container with growing pauses until then.
+- **`secrets.enc` and the backups are readable by their owner only** (mode 600) inside the volume.
+- **A folder instead of the volume** (`./data:/data` under `volumes:`) works too; on Docker Desktop for Windows it was tested with the server, `migrate` and `backup`. On Linux the folder must be writable by the container's user: `sudo chown -R 10001 ./data`. Do not open the database from the host while the container runs: the server's lock on the data folder is not visible across that boundary. The named volume is the faster choice on Docker Desktop.
+- **Memory:** the server used about 90 MB (at most 110 MB) on a small test database and more with years of history; 2 GB and 2 CPUs for Docker Desktop leave ample room.
+
 ### Running the service from a source checkout
 
 If you run OpenChart from a clone of this repository (see Development setup below), the same script installs the service around it, keeping your data folder and copying your tokens from the Credential Manager:
