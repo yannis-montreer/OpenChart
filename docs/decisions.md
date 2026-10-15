@@ -263,3 +263,18 @@ Plan: `docs/custom-indicators-design.md` 2.4. Code: `src/openchart/indicators/_t
 - **`barssince`/`valuewhen`** treat a gap in the condition as False; NaN before the first True. `valuewhen` returns `x` as it is on that bar, gap included.
 - **`shift`/`change` refuse `n < 1`** with a message that names the future. Lengths must be whole numbers of at least 1 (not `True`, not `2.5`, not `"5"`), refused with a message.
 - **Speed on 5,000 bars** (this PC, mean of 20): `sma`/`ema`/`rma` 0.14 to 0.18 ms; `wma(200)` 1.1 ms, `vwma(200)` 2.3 ms, `hma(200)` 2.0 ms; with length 2000: `wma` 10 ms, `hma` 17 ms; the series helpers 0.1 to 0.4 ms. `wma`, `vwma` and `hma` cost O(bars x length).
+
+### CI-2 (a), group 2: oscillators and volatility
+
+Tests first: `tests/test_ta_group2.py` (loop references from the formulas, by-hand cases, no-lookahead at every cut, gaps, short inputs, index, bad lengths).
+
+- **RSI against Wilder's published worked example** (33 closes, 19 printed values to 2 decimals): all 19 agree. The sample is the one in StockCharts' RSI worksheet; I took the closes and values from memory and used them only after the independent formula loop reproduced all 19 (two separate sources confirming each other). **ATR has no published table in the tests**: StockCharts' ATR page links its rows only as a spreadsheet download, which I did not fetch without your go. ATR is tested against the loop reference and by hand (first range `high - low`, seed = average of the first `n` ranges).
+- **`rsi` on a window with nothing moving (0 / 0) gives 100**, because the reference implementation tests `down == 0` first (100), then `up == 0` (0). I wrote this from my recollection of that implementation; the other form (`rma(up) / rma(down)`) would give a gap on a flat series, and agrees everywhere else. Worth one look on a flat series in TradingView; it hardly matters on forex.
+- **`tr` always uses `high - low` for a bar without a previous close** (the first bar, or after a gap in the close): TradingView's `ta.atr` calls `ta.tr(true)`. There is no option for the other behaviour.
+- **`stoch` is the raw %K** (`stoch(close, high, low, n)`, as in Pine); smoothing is `sma(stoch(...), 3)` by the author. A window where high equals low throughout is a gap rather than a division by zero.
+- **`cci` uses the mean absolute deviation about the window's mean** (`ta.dev`'s definition) and a window with no deviation is a gap. "No deviation" allows for rounding (`mad <= 1e-12 * max(1, |mean|)`): without it, a window of `0.1, 0.1, 0.1` (whose mean rounds to `0.10000000000000002`) divides by `1e-17` and returns about `1e16`.
+- **`stdev` is the population deviation** (divided by `n`); `bb` uses it with the `sma` as basis and `mult` defaulting to 2.0.
+- **`macd(x, fast, slow, signal)`** returns `(macd, signal, hist)` with an EMA signal; no argument has a default. The signal's EMA seeds on the first `signal` MACD values.
+- **`mom`/`roc`:** `roc` from a zero value is a gap, not infinity.
+- **Tolerance:** the deviation-based helpers agree with their loop references to 1e-9 relative (prices near 2000 with a deviation of 0.5 lose a few digits to `x - mean` in both); everything else to 1e-12.
+- **Speed on 5,000 bars:** `rsi` 1.0 ms, `tr` 0.5 ms, `atr(14)` 0.7 ms, `stoch(14)` 0.7 ms, `macd` 0.6 ms, `mom`/`roc` 0.1 to 0.3 ms; `cci`, `stdev` and `bb` 0.4 to 0.6 ms at length 20, 3 ms at 200 and 28 ms at 2000 (they cost bars x length).

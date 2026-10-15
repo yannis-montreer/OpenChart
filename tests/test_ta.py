@@ -86,7 +86,7 @@ def ref_hma(xs, length):
     return ref_wma(raw, root)
 
 
-def same(got, want):
+def same(got, want, rel=1e-12):
     got = list(got)
     assert len(got) == len(want)
     for i, (g, w) in enumerate(zip(got, want, strict=True)):
@@ -94,7 +94,7 @@ def same(got, want):
             assert isnan(g), f"bar {i}: got {g}, want NaN"
         else:
             assert not isnan(g), f"bar {i}: got NaN, want {w}"
-            assert g == pytest.approx(w, rel=1e-12, abs=1e-12), f"bar {i}"
+            assert g == pytest.approx(w, rel=rel, abs=1e-12), f"bar {i}"
 
 
 def prices(n=300, seed=1):

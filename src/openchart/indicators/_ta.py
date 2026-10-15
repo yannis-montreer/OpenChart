@@ -26,7 +26,10 @@ import numpy as np
 import pandas as pd
 
 __all__ = [
+    "atr",
     "barssince",
+    "bb",
+    "cci",
     "change",
     "cross",
     "crossover",
@@ -34,11 +37,18 @@ __all__ = [
     "ema",
     "falling",
     "hma",
+    "macd",
+    "mom",
     "nz",
     "rising",
     "rma",
+    "roc",
+    "rsi",
     "shift",
     "sma",
+    "stdev",
+    "stoch",
+    "tr",
     "valuewhen",
     "vwma",
     "wma",
@@ -146,15 +156,19 @@ def rma(values, length: int) -> pd.Series:
     return _recursive(values, _length(length), 1 / _length(length))
 
 
+def _lagged(x: np.ndarray, k: int) -> np.ndarray:
+    """x[i - k] for each bar i; NaN for the first k bars."""
+    out = np.full(len(x), np.nan)
+    if k < len(x):
+        out[k:] = x[: len(x) - k]
+    return out
+
+
 def _weighted_sum(x: np.ndarray, weights: np.ndarray) -> np.ndarray:
     """sum(weights[k] * x[i - k]) for k = 0 .. len(weights) - 1; NaN where any term is."""
-    n = len(x)
-    acc = np.zeros(n)
+    acc = np.zeros(len(x))
     for k, w in enumerate(weights):
-        shifted = np.full(n, np.nan)
-        if k < n:
-            shifted[k:] = x[: n - k]
-        acc += w * shifted
+        acc += w * _lagged(x, k)
     return acc
 
 
@@ -299,3 +313,147 @@ def falling(values, n: int) -> pd.Series:
     for k in range(_whole(n, "n", 1)):
         out &= s.shift(k) < s.shift(k + 1)
     return out.astype(bool)
+
+
+# Oscillators and volatility
+
+
+def _aligned(*parts) -> list[pd.Series]:
+    """Several series of the same length (high, low, close), all with the first one's index."""
+    series = [_series(p) for p in parts]
+    if len({len(s) for s in series}) > 1:
+        raise ValueError(f"the series differ in length ({', '.join(str(len(s)) for s in series)})")
+    for s in series[1:]:
+        s.index = series[0].index
+    return series
+
+
+def _window_moments(x: np.ndarray, length: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Per window of `length`: the mean, the population variance and the mean absolute
+    deviation from the mean. NaN where the window has a gap or is not full yet."""
+    mean = _weighted_sum(x, np.ones(length)) / length
+    squares = np.zeros(len(x))
+    absolutes = np.zeros(len(x))
+    for k in range(length):
+        d = _lagged(x, k) - mean
+        squares += d * d
+        absolutes += np.abs(d)
+    return mean, squares / length, absolutes / length
+
+
+def rsi(values, length: int) -> pd.Series:
+    """Relative strength index: `100 - 100 / (1 + up / down)`, where `up` and `down` are the
+    `rma` of the gains and of the losses of each bar's change. Between 0 and 100.
+
+    A window with no loss at all gives 100 (also when nothing moved at all: 0 / 0), one with
+    no gain gives 0. The first value is at bar `length` (it needs `length` changes).
+
+    Warmup: `length` bars for the first value; the `rma` inside fades slowly, so about
+    `20 * length` earlier bars agree with a longer history to 1e-8.
+    """
+    length = _length(length)
+    s = _series(values)
+    d = s.diff()
+    up = rma(d.clip(lower=0), length).to_numpy()
+    down = rma((-d).clip(lower=0), length).to_numpy()
+    with np.errstate(divide="ignore", invalid="ignore"):
+        out = np.where(down == 0, 100.0, np.where(up == 0, 0.0, 100 - 100 / (1 + up / down)))
+    out[np.isnan(up) | np.isnan(down)] = np.nan
+    return pd.Series(out, index=s.index)
+
+
+def tr(high, low, close) -> pd.Series:
+    """True range: the greatest of `high - low`, `|high - previous close|` and
+    `|low - previous close|`. The first bar, and a bar whose previous close is missing, has
+    `high - low`. Warmup: none, valid from the first bar."""
+    h, low_, c = _aligned(high, low, close)
+    prev = c.shift(1)
+    full = np.maximum(h - low_, np.maximum((h - prev).abs(), (low_ - prev).abs()))
+    return pd.Series(np.where(prev.isna(), h - low_, full), index=h.index)
+
+
+def atr(high, low, close, length: int) -> pd.Series:
+    """Average true range: `rma(tr, length)`, seeded with the simple average of the first
+    `length` true ranges, the first being `high - low`.
+
+    Warmup: `length` bars for the first value (at bar `length - 1`); about `20 * length`
+    earlier bars agree with a longer history to 1e-8.
+    """
+    return rma(tr(high, low, close), _length(length))
+
+
+def stoch(close, high, low, length: int) -> pd.Series:
+    """Stochastic %K, unsmoothed: `100 * (close - lowest low) / (highest high - lowest low)`
+    over the last `length` bars, current bar included. Smooth it yourself with `sma`. A window
+    with no range (high equals low throughout) is a gap.
+
+    Warmup: `length` bars. Exact from the first value.
+    """
+    length = _length(length)
+    c, h, low_ = _aligned(close, high, low)
+    hh = h.rolling(length, min_periods=length).max()
+    ll = low_.rolling(length, min_periods=length).min()
+    span = hh - ll
+    return (100 * (c - ll) / span).where(span > 0)
+
+
+def cci(values, length: int) -> pd.Series:
+    """Commodity channel index: `(x - sma) / (0.015 * mean absolute deviation)` over the last
+    `length` values. A window with no deviation is a gap. Warmup: `length` bars."""
+    length = _length(length)
+    s = _series(values)
+    x = s.to_numpy()
+    mean, _, mad = _window_moments(x, length)
+    # "No deviation" with a little room for the rounding of the mean (0.1 * 3 is not 0.3).
+    flat = mad <= 1e-12 * np.maximum(1.0, np.abs(mean))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        out = np.where(flat, np.nan, (x - mean) / (0.015 * mad))
+    return pd.Series(out, index=s.index)
+
+
+def stdev(values, length: int) -> pd.Series:
+    """Standard deviation of the last `length` values, population form (divided by `length`,
+    not `length - 1`), TradingView's default. Warmup: `length` bars."""
+    length = _length(length)
+    s = _series(values)
+    _, variance, _ = _window_moments(s.to_numpy(), length)
+    return pd.Series(np.sqrt(variance), index=s.index)
+
+
+def bb(values, length: int, mult: float = 2.0) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """Bollinger Bands: `(basis, upper, lower)` with the `sma` as basis and `mult`
+    population standard deviations above and below it. Warmup: `length` bars."""
+    if isinstance(mult, bool) or not isinstance(mult, int | float) or not math.isfinite(mult):
+        raise ValueError(f"mult must be a number, not {mult!r}")
+    basis = sma(values, length)
+    spread = mult * stdev(values, length)
+    return basis, basis + spread, basis - spread
+
+
+def macd(values, fast: int, slow: int, signal: int) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """MACD: `(macd, signal, histogram)`: `macd = ema(x, fast) - ema(x, slow)`,
+    `signal = ema(macd, signal)` and `histogram = macd - signal`.
+
+    The MACD line starts at bar `max(fast, slow) - 1`, the signal `signal - 1` bars later.
+    Warmup: about `10 * (slow + signal)` earlier bars agree with a longer history to 1e-8.
+    """
+    fast = _whole(fast, "fast length", 1)
+    slow = _whole(slow, "slow length", 1)
+    signal = _whole(signal, "signal length", 1)
+    line = ema(values, fast) - ema(values, slow)
+    smoothed = ema(line, signal)
+    return line, smoothed, line - smoothed
+
+
+def mom(values, length: int) -> pd.Series:
+    """Momentum: `x - x[length]`. Warmup: first value at bar `length`."""
+    s = _series(values)
+    return s - s.shift(_length(length))
+
+
+def roc(values, length: int) -> pd.Series:
+    """Rate of change in percent: `100 * (x - x[length]) / x[length]`. A change from zero is
+    a gap. Warmup: first value at bar `length`."""
+    s = _series(values)
+    before = s.shift(_length(length))
+    return (100 * (s - before) / before).where(before != 0)

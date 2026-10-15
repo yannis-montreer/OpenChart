@@ -125,11 +125,25 @@ one starts.
 | `barssince(cond)` | bars since `cond` was True (0 on a True bar); NaN before the first | none (it counts from the first bar it sees) |
 | `valuewhen(cond, x, n=0)` | `x` on the bar where `cond` was True the `n`-th time back | until `cond` has been True `n + 1` times |
 | `rising(x, n)`, `falling(x, n)` | each of the last `n` steps went up (down): `x[0] > x[1] > ... > x[n]` | `n + 1` bars |
+| `rsi(x, n)` | `100 - 100 / (1 + up / down)`, `up`/`down` the `rma` of gains/losses; 100 with no loss in the window (also when nothing moved), 0 with no gain | first value at bar `n`; about `20 * n` to agree to 1e-8 |
+| `tr(high, low, close)` | greatest of `high - low`, `abs(high - previous close)`, `abs(low - previous close)`; the first bar (or a missing previous close) is `high - low` | none |
+| `atr(high, low, close, n)` | `rma(tr, n)`, seeded with the average of the first `n` true ranges | first value at bar `n - 1`; about `20 * n` to agree to 1e-8 |
+| `stoch(close, high, low, n)` | raw %K: `100 * (close - lowest low) / (highest high - lowest low)` over the last `n` bars; a window with no range is a gap. Smooth with `sma` | `n` bars |
+| `cci(x, n)` | `(x - sma) / (0.015 * mean absolute deviation)`; no deviation is a gap | `n` bars |
+| `macd(x, fast, slow, signal)` | `(macd, signal, hist)`: `ema(fast) - ema(slow)`, `ema` of that, and their difference | MACD from bar `max(fast, slow) - 1`, signal `signal - 1` bars later; about `10 * (slow + signal)` to agree to 1e-8 |
+| `mom(x, n)`, `roc(x, n)` | `x - x[n]`; `100 * (x - x[n]) / x[n]` (from zero is a gap) | first value at bar `n` |
+| `stdev(x, n)` | population deviation (divided by `n`), TradingView's default | `n` bars |
+| `bb(x, n, mult=2.0)` | `(basis, upper, lower)`: `sma` and `mult` population deviations either side | `n` bars |
 
 A gap in the input: `ema` and `rma` give NaN at the gap and start again, with a new
 seed, once `n` values in a row are back; windowed helpers give NaN while the gap is in
-the window. The rest of the first set (oscillators, volatility, windows, pivots) follows
-in the next steps.
+the window. `rsi`, `atr` and `macd` are built on them, so a gap acts the same way.
+The rest of the first set (windows and pivots: `highest`, `lowest`, `highestbars`,
+`lowestbars`, `sum`, `cum`, `pivothigh`, `pivotlow`) follows in the next step.
+
+Speed (this PC, 5,000 bars): the recursive and series helpers take 0.1 to 1.2 ms. The
+window helpers cost bars x length: `wma`, `vwma`, `hma`, `cci`, `stdev` and `bb` are 0.4 to
+3 ms at length 20 to 200 and about 10 to 30 ms at length 2000.
 
 ## Not yet
 
