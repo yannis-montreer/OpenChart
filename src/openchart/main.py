@@ -18,7 +18,7 @@ from pathlib import Path
 
 from openchart import __version__
 from openchart.config import Config, ConfigError, load_config
-from openchart.lock import in_use
+from openchart.lock import DataFolderInUse, DataFolderLock, exclusive
 from openchart.market.backfill import (
     CLOSURE_MINUTES,
     deep_fill,
@@ -40,6 +40,7 @@ from openchart.settings import (
     open_secrets,
 )
 from openchart.store.candles import CandleStore
+from openchart.store.migrate import UpgradeNeeded
 from openchart.store.sqlite import Database
 
 log = logging.getLogger("openchart")
@@ -77,9 +78,60 @@ async def _saved_config(config: Config, db: Database) -> Config:
     return effective_config(config, await load_app_settings(settings, config), secrets)
 
 
+EXIT_DATA_IN_USE = 4  # a server (or another command that writes) holds the data folder
+
+
 @asynccontextmanager
-async def _context(config: Config, need_provider: bool = True) -> AsyncIterator[Context]:
-    db = await Database.open(config.db_path)
+async def _database(config: Config, *, writes: bool, what: str) -> AsyncIterator[Database]:
+    """The data folder's database for one command.
+
+    A command that writes holds the folder's lock throughout, so it refuses while a server
+    runs (and a server refuses to start meanwhile). A command that only reads runs beside
+    a server, but opening the database can upgrade it: that happens only while nobody
+    else holds the folder; with a server running, a pending upgrade makes it refuse.
+    `what` names the command for the message ("run openchart stats").
+    """
+    if writes:
+        with exclusive(config.data_dir, what):
+            async with await Database.open(config.db_path) as db:
+                yield db
+        return
+    lock = DataFolderLock(config.data_dir)
+    if lock.acquire():
+        try:
+            db = await Database.open(config.db_path)  # may upgrade: nobody else uses it
+        finally:
+            lock.release()
+    else:
+        try:
+            db = await Database.open(config.db_path, upgrade=False)
+        except UpgradeNeeded as exc:
+            raise DataFolderInUse(
+                f"{str(exc).capitalize()}, and an OpenChart server is running on "
+                f"{config.data_dir}: stop it, run `openchart migrate`, then {what} again. "
+                "Nothing was changed."
+            ) from None
+    try:
+        yield db
+    finally:
+        await db.close()
+
+
+@asynccontextmanager
+async def _context(
+    config: Config, need_provider: bool = True, *, writes: bool, what: str
+) -> AsyncIterator[Context]:
+    async with (
+        _database(config, writes=writes, what=what) as db,
+        _provider_context(config, db, need_provider) as ctx,
+    ):
+        yield ctx
+
+
+@asynccontextmanager
+async def _provider_context(
+    config: Config, db: Database, need_provider: bool
+) -> AsyncIterator[Context]:
     provider = None
     try:
         # Any failure here must still close the database: an open aiosqlite
@@ -91,18 +143,17 @@ async def _context(config: Config, need_provider: bool = True) -> AsyncIterator[
     finally:
         if provider is not None:
             await provider.aclose()
-        await db.close()
 
 
 async def _cmd_migrate(config: Config, args: argparse.Namespace) -> int:
-    async with await Database.open(config.db_path):
+    async with _database(config, writes=True, what="run openchart migrate"):
         pass
     print(f"Database ready at {config.db_path}")
     return 0
 
 
 async def _cmd_test_connection(config: Config, args: argparse.Namespace) -> int:
-    async with _context(config) as ctx:
+    async with _context(config, writes=False, what="test the connection") as ctx:
         result = await ctx.provider.test_connection()
     print(("OK: " if result.ok else "FAILED: ") + result.message)
     return 0 if result.ok else 1
@@ -123,7 +174,7 @@ async def _cmd_backfill(config: Config, args: argparse.Namespace) -> int:
     """Newest first, like the server: H1 (with --deep), then M1 back to `--years`."""
     years = args.years if args.years is not None else config.backfill_years
     start = datetime.now(UTC) - timedelta(days=365.25 * years)
-    async with _context(config) as ctx:
+    async with _context(config, writes=True, what="run openchart backfill") as ctx:
         await _ensure_instrument(ctx, args.instrument)
         before = await ctx.store.count(ctx.provider.name, args.instrument)
 
@@ -154,7 +205,9 @@ async def _cmd_backfill(config: Config, args: argparse.Namespace) -> int:
 
 
 async def _cmd_rebuild_cache(config: Config, args: argparse.Namespace) -> int:
-    async with _context(config, need_provider=False) as ctx:
+    async with _context(
+        config, need_provider=False, writes=True, what="run openchart rebuild-cache"
+    ) as ctx:
         cache = CandleCache(ctx.store)
         rows = await ctx.store.instruments()
         for row in rows:
@@ -167,7 +220,9 @@ async def _cmd_rebuild_cache(config: Config, args: argparse.Namespace) -> int:
 
 async def _cmd_stats(config: Config, args: argparse.Namespace) -> int:
     config = _data_dir(config, args)
-    async with _context(config, need_provider=False) as ctx:
+    async with _context(
+        config, need_provider=False, writes=False, what="run openchart stats"
+    ) as ctx:
         rows = await ctx.store.instruments()
         if not rows:
             print("No instruments yet. Run `openchart backfill <INSTRUMENT>` first.")
@@ -219,15 +274,10 @@ async def _cmd_stats(config: Config, args: argparse.Namespace) -> int:
 async def _cmd_purge(config: Config, args: argparse.Namespace) -> int:
     """Delete one instrument and its stored prices, to download it again from scratch."""
     config = _data_dir(config, args)
-    if in_use(config.data_dir):
-        print(
-            f"An OpenChart server is running on {config.data_dir}: stop it first "
-            "(it would keep the instrument in memory and download it again).",
-            file=sys.stderr,
-        )
-        return 1
     name, source = args.instrument.strip().upper(), args.source
-    async with _context(config, need_provider=False) as ctx:
+    async with _context(
+        config, need_provider=False, writes=True, what="run openchart purge"
+    ) as ctx:
         conn = ctx.store.conn
         if await ctx.store.instrument(source, name) is None:
             print(f"No instrument {source}/{name} in {config.db_path}.")
@@ -271,7 +321,9 @@ async def _cmd_purge(config: Config, args: argparse.Namespace) -> int:
 
 
 async def _cmd_gaps(config: Config, args: argparse.Namespace) -> int:
-    async with _context(config, need_provider=False) as ctx:
+    async with _context(
+        config, need_provider=False, writes=False, what="run openchart gaps"
+    ) as ctx:
         source = args.source
         row = await ctx.store.instrument(source, args.instrument)
         if row is None:
@@ -290,7 +342,7 @@ async def _cmd_gaps(config: Config, args: argparse.Namespace) -> int:
 
 
 async def _cmd_repair(config: Config, args: argparse.Namespace) -> int:
-    async with _context(config) as ctx:
+    async with _context(config, writes=True, what="run openchart repair") as ctx:
         source = ctx.provider.name
         row = await ctx.store.instrument(source, args.instrument)
         if row is None:
@@ -353,7 +405,9 @@ async def _cmd_run(config: Config, args: argparse.Namespace) -> int:
 
     if args.data_dir:
         config = replace(config, data_dir=Path(args.data_dir))
-    async with await Database.open(config.db_path) as db:
+    # Refuse before anything else if another server (or a command) holds the folder; the
+    # server then holds the lock itself for as long as it runs.
+    async with _database(config, writes=True, what="start the server") as db:
         settings = SettingsStore(db.conn)
         app_settings = await load_app_settings(settings, config)
         instance_id = await settings.instance_id()
@@ -422,11 +476,12 @@ async def _cmd_reset_password(config: Config, args: argparse.Namespace) -> int:
 
     from openchart.api.auth import Auth, PasswordError
 
-    first = getpass.getpass("New password: ")
-    if getpass.getpass("Repeat it: ") != first:
-        print("The two passwords differ.", file=sys.stderr)
-        return 1
-    async with await Database.open(config.db_path) as db:
+    # Checked before asking for the password: the server must be stopped.
+    async with _database(config, writes=True, what="run openchart reset-password") as db:
+        first = getpass.getpass("New password: ")
+        if getpass.getpass("Repeat it: ") != first:
+            print("The two passwords differ.", file=sys.stderr)
+            return 1
         try:
             await Auth(db.conn, SettingsStore(db.conn)).set_password(first)
         except PasswordError as exc:
@@ -473,10 +528,7 @@ async def _cmd_secrets(config: Config, args: argparse.Namespace) -> int:
         SECRET_NAMES,
         SECRETS_FILE,
         EncryptedFileSecrets,
-        KeyringSecrets,
         new_secret_key,
-        secret_key_from_env,
-        secrets_to_file,
     )
 
     if args.action == "new-key":
@@ -486,7 +538,10 @@ async def _cmd_secrets(config: Config, args: argparse.Namespace) -> int:
     if not config.db_path.is_file():
         print(f"No database in {config.data_dir}.", file=sys.stderr)
         return 1
-    async with await Database.open(config.db_path) as db:
+    if args.action == "to-file":  # writes secrets.enc: the server must be stopped
+        with exclusive(config.data_dir, "run openchart secrets to-file"):
+            return await _secrets_to_file(config, args)
+    async with _database(config, writes=False, what="run openchart secrets status") as db:
         instance_id = await SettingsStore(db.conn).instance_id()
 
     if args.action == "status":
@@ -512,9 +567,22 @@ async def _cmd_secrets(config: Config, args: argparse.Namespace) -> int:
             print(f"  {name}: {mask_secret(value) if value else 'not set'}")
         return 0
 
-    # to-file: copy the tokens from this user's credential store into secrets.enc, with a
-    # key kept in --key-file (created if missing). The install script then locks the key
-    # file down to SYSTEM and Administrators.
+    raise AssertionError(f"unknown secrets action {args.action!r}")
+
+
+async def _secrets_to_file(config: Config, args: argparse.Namespace) -> int:
+    """Copy the tokens from this user's credential store into secrets.enc, with a key kept
+    in --key-file (created if missing). The install script then locks the key file down to
+    SYSTEM and Administrators."""
+    from openchart.settings import (
+        SECRETS_FILE,
+        KeyringSecrets,
+        secret_key_from_env,
+        secrets_to_file,
+    )
+
+    async with await Database.open(config.db_path) as db:  # the caller holds the lock
+        instance_id = await SettingsStore(db.conn).instance_id()
     if secret_key_from_env():
         print("OPENCHART_SECRET_KEY(_FILE) is set in this shell; unset it first.", file=sys.stderr)
         return 1
@@ -722,6 +790,9 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(COMMANDS[args.command](config, args))
     except KeyboardInterrupt:
         return 130
+    except DataFolderInUse as exc:
+        print(str(exc), file=sys.stderr)
+        return EXIT_DATA_IN_USE
     except (ConfigError, AuthError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2

@@ -18,7 +18,7 @@ from openchart.api.auth import Auth
 from openchart.api.hub import Hub
 from openchart.config import Config, OandaConfig
 from openchart.indicators._registry import Registry, load_indicators
-from openchart.lock import DataFolderLock
+from openchart.lock import DataFolderInUse, DataFolderLock, in_use_message
 from openchart.market.cache import CandleCache
 from openchart.market.candle_builder import CandleBuilder
 from openchart.market.feed import Feed
@@ -107,13 +107,12 @@ class Server:
 
     async def _start(self) -> None:
         cfg = self.config
-        self.lock = DataFolderLock(cfg.data_dir)
-        if not self.lock.acquire():
-            log.warning(
-                "another OpenChart server seems to use %s: two servers on one data folder "
-                "download and alert twice",
-                cfg.data_dir,
-            )
+        lock = DataFolderLock(cfg.data_dir)
+        if not lock.acquire():
+            # Two servers on one folder would download and alert twice; a command that
+            # writes (migrate, repair...) must not run underneath either.
+            raise DataFolderInUse(in_use_message(cfg.data_dir, "start the server"))
+        self.lock = lock
         self.db = await Database.open(cfg.db_path)
         self.store = CandleStore(self.db.conn)
         self.settings = SettingsStore(self.db.conn)

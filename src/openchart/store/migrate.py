@@ -36,6 +36,10 @@ class MigrationError(RuntimeError):
     """A migration cannot run; nothing was changed."""
 
 
+class UpgradeNeeded(RuntimeError):
+    """Migrations are pending, and the caller may not apply them (a server is running)."""
+
+
 @dataclass(frozen=True)
 class Migration:
     version: int
@@ -63,6 +67,23 @@ async def applied_versions(conn: aiosqlite.Connection) -> set[int]:
     )
     async with conn.execute("SELECT version FROM schema_migrations") as cur:
         return {row[0] for row in await cur.fetchall()}
+
+
+async def pending_migrations(
+    conn: aiosqlite.Connection, migrations: list[Migration] | None = None
+) -> list[Migration]:
+    """The migrations not applied yet, found without writing anything."""
+    if migrations is None:
+        migrations = discover_migrations()
+    async with conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
+    ) as cur:
+        exists = await cur.fetchone() is not None
+    done: set[int] = set()
+    if exists:
+        async with conn.execute("SELECT version FROM schema_migrations") as cur:
+            done = {row[0] for row in await cur.fetchall()}
+    return [m for m in migrations if m.version not in done]
 
 
 async def migrate(

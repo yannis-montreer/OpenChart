@@ -1,13 +1,17 @@
 """A lock file in the data folder, held while a server uses it.
 
-Commands that change stored history behind the server's back (`openchart purge`) check
-it, whatever port the server listens on. The operating system releases the lock when
-the process ends, even after a crash, so a stale file never blocks anything.
+The server holds it while it runs, and every command that writes holds it while it works
+(`exclusive`), so the two never change the data behind each other's back: one refuses
+with an explanation instead. The file stays when nobody holds the lock; the operating
+system releases the lock when the process ends, even after a crash, so a stale file
+never blocks anything.
 """
 
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 LOCK_NAME = "server.lock"
@@ -38,6 +42,30 @@ class DataFolderLock:
         finally:
             os.close(self._fd)
             self._fd = None
+
+
+class DataFolderInUse(RuntimeError):
+    """Another OpenChart process (a server, or a command that writes) holds the folder."""
+
+
+def in_use_message(data_dir: Path, what: str) -> str:
+    return (
+        f"OpenChart is running on {data_dir} (another process holds {Path(data_dir) / LOCK_NAME}): "
+        f"stop it first, then {what} again. Nothing was changed."
+    )
+
+
+@contextmanager
+def exclusive(data_dir: Path, what: str) -> Iterator[DataFolderLock]:
+    """Hold the folder's lock for a command that writes; refuse if someone else holds it.
+    `what` names the command for the message ("run openchart migrate")."""
+    lock = DataFolderLock(data_dir)
+    if not lock.acquire():
+        raise DataFolderInUse(in_use_message(data_dir, what))
+    try:
+        yield lock
+    finally:
+        lock.release()
 
 
 def in_use(data_dir: Path) -> bool:
