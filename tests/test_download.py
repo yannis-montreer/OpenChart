@@ -288,7 +288,7 @@ def test_purge_deletes_one_instrument_and_leaves_the_others(tmp_path, monkeypatc
     lock = DataFolderLock(tmp_path)  # as a running server holds it
     assert lock.acquire()
     try:
-        assert cli.main(["purge", "XAU_USD", "--yes"]) == 1  # the server must be stopped
+        assert cli.main(["purge", "XAU_USD", "--yes"]) == cli.EXIT_DATA_IN_USE  # server running
         assert "stop it first" in capsys.readouterr().err
     finally:
         lock.release()

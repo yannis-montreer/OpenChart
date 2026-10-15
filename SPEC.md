@@ -148,13 +148,18 @@ instruments(
   hours_json TEXT,              -- expected trading hours, for the watchdog
   PRIMARY KEY (source, instrument))
 
-candles_m1(
-  source TEXT, instrument TEXT, ts INT,
-  bid_o REAL, bid_h REAL, bid_l REAL, bid_c REAL,
-  ask_o REAL, ask_h REAL, ask_l REAL, ask_c REAL,
-  mid_o REAL, mid_h REAL, mid_l REAL, mid_c REAL,
+series(
+  id INTEGER PRIMARY KEY, source TEXT, instrument TEXT,
+  scale INT,                    -- prices are stored as price * scale: 10^(decimals + 1)
+  UNIQUE (source, instrument))
+
+candles_m1(                     -- candles_h1 and candles_cache (+ timeframe) alike
+  series INT, ts INT,
+  bid_o INT, bid_h INT, bid_l INT, bid_c INT,
+  ask_o INT, ask_h INT, ask_l INT, ask_c INT,
+  mid_o INT, mid_h INT, mid_l INT, mid_c INT,
   volume INT,                   -- tick volume
-  PRIMARY KEY (source, instrument, ts))
+  PRIMARY KEY (series, ts)) WITHOUT ROWID
 
 drawings(
   id TEXT PRIMARY KEY, instrument TEXT, type TEXT,   -- hline | trendline | ray | extended

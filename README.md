@@ -2,7 +2,7 @@
 
 Self-hosted charting and alerting server for forex and metals. It runs 24/7 on your own PC, pulls prices from your own broker account, and pushes alerts on drawn lines (including sloped trendlines) to your phone, even when no chart is open.
 
-> **Status:** usable for charting and alerts on gold (XAU_USD) with an OANDA account; still young. See [What works](#what-works).
+> **Status:** version 0.1.0, a pre-release: usable for charting and alerts with an OANDA account (gold, currency pairs and other OANDA instruments); still young. See [What works](#what-works).
 
 ![OpenChart: gold, 1 hour, an EMA and a trendline with an alert](docs/images/chart.png)
 
@@ -146,6 +146,15 @@ docker compose logs openchart                              # shows the setup cod
 
 By default it listens on `127.0.0.1:8000` of the host. Set `OPENCHART_BIND` in `.env` to your Tailscale IP (or `0.0.0.0`) to reach it from other devices, and `OPENCHART_PORT` to change the port. The key in `.env` encrypts the tokens you enter in the setup page; keep it. Back up with `docker compose exec openchart openchart backup` (the zip lands in `/data/backups` inside the volume).
 
+Good to know in a container:
+
+- **The setup page asks for the setup code even on the same PC.** Requests reach the server through Docker's network, not from `127.0.0.1`, so every browser counts as another device. The code is in `docker compose logs openchart`.
+- **The log says "listening on 0.0.0.0:8000 inside the container".** That is the container's own address; who can connect is decided by the published port (`OPENCHART_BIND`), `127.0.0.1` unless you change it.
+- **If the key in `.env` changes, the server stops instead of starting without your tokens.** The log explains it: `secrets.enc` was encrypted with another key. Put the old key back, or move `secrets.enc` out of the volume and enter the tokens again in Settings. Docker restarts the container with growing pauses until then.
+- **`secrets.enc` and the backups are readable by their owner only** (mode 600) inside the volume.
+- **A folder instead of the volume** (`./data:/data` under `volumes:`) works too; on Docker Desktop for Windows it was tested with the server, `migrate` and `backup`. On Linux the folder must be writable by the container's user: `sudo chown -R 10001 ./data`. Do not open the database from the host while the container runs: the server's lock on the data folder is not visible across that boundary. The named volume is the faster choice on Docker Desktop.
+- **Memory:** the server used about 90 MB (at most 110 MB) on a small test database and more with years of history; 2 GB and 2 CPUs for Docker Desktop leave ample room.
+
 ### Running the service from a source checkout
 
 If you run OpenChart from a clone of this repository (see Development setup below), the same script installs the service around it, keeping your data folder and copying your tokens from the Credential Manager:
@@ -169,7 +178,7 @@ NSSM 2.24 is at https://nssm.cc/download (or `winget install NSSM.NSSM`). Stop a
 | M5 Drawings | done |
 | M6 Alerts and Telegram | done |
 | M7 Indicators, chart types, layouts | done (reduced scope: EMA only) |
-| M8 Packaging and deployment | done, waiting on owner acceptance checks |
+| M8 Packaging and deployment | done |
 | M9 Second instrument (EURUSD) | done |
 
 ## Development setup
@@ -233,8 +242,9 @@ openchart secrets status           # where the tokens are kept, and which are se
 openchart self-test                # check offline that every part of this install works
 ```
 
+- **One process at a time writes to a data folder.** The server holds the folder's lock while it runs. `migrate`, `backfill`, `rebuild-cache`, `repair`, `purge`, `reset-password` and `secrets to-file` hold it while they work and refuse while a server runs (exit code 4, "stop it first"); a second server refuses to start. `stats`, `gaps`, `test-connection`, `secrets status` and `backup` run beside the server, but if the database needs upgrading (a newer version of OpenChart than the server) they refuse instead of upgrading it underneath.
 - `backfill` downloads newest first, is idempotent and resumable: run it again and it only fetches what is missing. A larger `--years` later extends history backwards.
-- `purge` deletes one instrument with its candles, cached bars, learned closures and tick files, so it can be added again and downloaded afresh. Without `--yes` it only shows what it would delete; drawings and alerts are kept unless you add `--drawings-and-alerts`. It refuses while a server runs on the data folder.
+- `purge` deletes one instrument with its candles, cached bars, learned closures and tick files, so it can be added again and downloaded afresh. Without `--yes` it only shows what it would delete; drawings and alerts are kept unless you add `--drawings-and-alerts`.
 - `run` starts the server on http://127.0.0.1:8000 (change with `--host`/`--port`). It fills any gap since the last stored candle, streams ticks, builds live candles for every timeframe, saves closed M1 bars and raw ticks, and logs feed status every minute. If the link drops or goes silent for 15 s, it reconnects with backoff and gap-fills from REST. Once a minute it re-fetches the last 15 minutes of M1 from OANDA so stored history matches the broker's candles exactly.
 - By default the server only accepts connections from this computer. To reach it from your phone or another PC (over Tailscale), turn on Settings, Network, "Allow other devices to connect" and restart the server, or start it with `--host 0.0.0.0`.
 - Run **one** server per OANDA account. OANDA limits concurrent price streams per account (about two on practice); an extra stream request is left unanswered and the log says "no answer to the stream request".

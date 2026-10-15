@@ -5,6 +5,7 @@ import json
 import sqlite3
 import threading
 import time
+import warnings
 import zipfile
 from datetime import datetime
 
@@ -199,3 +200,21 @@ def test_secrets_cli(tmp_path, monkeypatch, capsys):
     assert "encrypted file" in out and "oanda_token: not set" in out
     with pytest.raises(SystemExit):
         main(["secrets", "to-file"])  # needs --key-file
+
+
+def test_a_restored_folder_backs_up_without_a_second_manifest(tmp_path):
+    """Restoring is unzipping into an empty folder, which leaves the old backup.json
+    there; the next backup wrote it a second time next to its own."""
+    data = tmp_path / "data"
+    make_data(data)
+    first = backup(data, tmp_path / "zips").path
+    restored = tmp_path / "restored"
+    with zipfile.ZipFile(first) as zf:
+        zf.extractall(restored)
+    assert (restored / "backup.json").exists()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # zipfile warns on a duplicate name
+        second = backup(restored, tmp_path / "zips2").path
+    with zipfile.ZipFile(second) as zf:
+        assert zf.namelist().count("backup.json") == 1
+        assert json.loads(zf.read("backup.json"))["data_dir"] == str(restored.resolve())

@@ -50,13 +50,20 @@ def aggregate_candles(candles: list[Candle], seconds: int) -> list[Candle]:
 
 
 def synthetic_m1(
-    start_ts: int, end_ts: int, hours: TradingHours | None = None, base: float = 2000.0
+    start_ts: int,
+    end_ts: int,
+    hours: TradingHours | None = None,
+    base: float = 2000.0,
+    decimals: int | None = None,
 ) -> list[Candle]:
     """Plausible M1 candles for every open minute in `[start_ts, end_ts)`.
 
     Moves scale with `base` (at 2000: a swing of 10, bars 1 high, a spread of 0.2), so
-    any instrument's prices look like its own.
+    any instrument's prices look like its own. Like a broker's, bid and ask have
+    `decimals` digits (default: 3 from a base of 100, else 5) and the mid one more.
     """
+    if decimals is None:
+        decimals = 3 if base >= 100 else 5
     out = []
     swing, bar, spread = base / 200, base / 4000, base / 10000
     for ts in range((start_ts // 60) * 60, end_ts, 60):
@@ -64,8 +71,9 @@ def synthetic_m1(
             continue
         mid = base + swing * math.sin(ts / 3600)
         m = OHLC(mid, mid + bar, mid - bar, mid + bar / 5)
-        b = OHLC(*(p - spread / 2 for p in m))
-        a = OHLC(*(p + spread / 2 for p in m))
+        b = OHLC(*(round(p - spread / 2, decimals) for p in m))
+        a = OHLC(*(round(p + spread / 2, decimals) for p in m))
+        m = OHLC(*(round((x + y) / 2, decimals + 1) for x, y in zip(b, a, strict=True)))
         out.append(Candle(ts, b, a, m, volume=10))
     return out
 

@@ -22,11 +22,13 @@ from datetime import datetime
 from pathlib import Path
 
 from openchart import __version__
+from openchart.files import open_private
 
 DB_NAME = "openchart.db"
 LOCK_NAME = "server.lock"  # held by a running server (openchart.lock); never copied
 BACKUP_DIR = "backups"
 LOG_DIR = "logs"
+MANIFEST = "backup.json"  # written into every zip; a restored folder still holds the old one
 # Never copied: the live database files (the snapshot replaces them) and leftovers.
 SKIP_SUFFIXES = (".db-wal", ".db-shm", ".tmp", ".part")
 
@@ -63,7 +65,11 @@ def backup(
     try:
         _snapshot(db_path, snapshot)
         result = BackupResult(path=target, size=0, files=1, tick_files=0)
-        with zipfile.ZipFile(partial, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
+        # The zip holds the database and secrets.enc: readable by its owner only.
+        with (
+            open_private(partial) as raw,
+            zipfile.ZipFile(raw, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf,
+        ):
             zf.write(snapshot, DB_NAME)
             for path in sorted(data_dir.rglob("*")):
                 rel = path.relative_to(data_dir)
@@ -83,7 +89,7 @@ def backup(
                 result.tick_files += is_tick
                 result.has_secrets |= rel.as_posix() == "secrets.enc"
             zf.writestr(
-                "backup.json",
+                MANIFEST,
                 json.dumps(
                     {
                         "openchart": __version__,
@@ -120,7 +126,7 @@ def _snapshot(db_path: Path, dest: Path) -> None:
 
 
 def _skipped(rel: Path, path: Path, data_dir: Path, out_dir: Path) -> bool:
-    if rel.parts[0] in (BACKUP_DIR, LOG_DIR) or rel.as_posix() in (DB_NAME, LOCK_NAME):
+    if rel.parts[0] in (BACKUP_DIR, LOG_DIR) or rel.as_posix() in (DB_NAME, LOCK_NAME, MANIFEST):
         return True
     if path.name.endswith(SKIP_SUFFIXES) or path.name.startswith(".snapshot-"):
         return True

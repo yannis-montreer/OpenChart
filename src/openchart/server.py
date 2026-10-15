@@ -18,7 +18,7 @@ from openchart.api.auth import Auth
 from openchart.api.hub import Hub
 from openchart.config import Config, OandaConfig
 from openchart.indicators._registry import Registry, load_indicators
-from openchart.lock import DataFolderLock
+from openchart.lock import DataFolderInUse, DataFolderLock, in_use_message
 from openchart.market.cache import CandleCache
 from openchart.market.candle_builder import CandleBuilder
 from openchart.market.feed import Feed
@@ -28,6 +28,7 @@ from openchart.providers.stream import StreamState
 from openchart.settings import (
     SECRET_NAMES,
     AppSettings,
+    SecretKeyChanged,
     Secrets,
     SecretStoreUnavailable,
     SettingsStore,
@@ -80,6 +81,9 @@ class Server:
         self._reconfigure_lock = asyncio.Lock()
         self.telegram_transport = None  # tests replace the HTTP transport
         self.indicators = Registry()
+        self.db: Database | None = None
+        self.lock: DataFolderLock | None = None
+        self.alerts: AlertService | None = None
 
     @property
     def indicators_dir(self) -> Path:
@@ -91,14 +95,24 @@ class Server:
         return self.provider.name if self.provider else DEFAULT_SOURCE
 
     async def start(self) -> None:
+        """Open everything and start the feed. If anything fails, what was opened is
+        closed again before the error goes up: an open database connection would keep
+        the process alive, a server that never answers (found in the M8 Docker test)."""
+        try:
+            await self._start()
+        except BaseException:
+            with contextlib.suppress(Exception):
+                await self.stop()
+            raise
+
+    async def _start(self) -> None:
         cfg = self.config
-        self.lock = DataFolderLock(cfg.data_dir)
-        if not self.lock.acquire():
-            log.warning(
-                "another OpenChart server seems to use %s: two servers on one data folder "
-                "download and alert twice",
-                cfg.data_dir,
-            )
+        lock = DataFolderLock(cfg.data_dir)
+        if not lock.acquire():
+            # Two servers on one folder would download and alert twice; a command that
+            # writes (migrate, repair...) must not run underneath either.
+            raise DataFolderInUse(in_use_message(cfg.data_dir, "start the server"))
+        self.lock = lock
         self.db = await Database.open(cfg.db_path)
         self.store = CandleStore(self.db.conn)
         self.settings = SettingsStore(self.db.conn)
@@ -116,8 +130,11 @@ class Server:
                     self.secrets.backend,
                     ", ".join(f"{n} {'set' if ok else 'not set'}" for n, ok in present.items()),
                 )
+            except SecretKeyChanged:
+                raise  # see SecretKeyChanged: `openchart run` stops with an explanation
             except SecretStoreUnavailable as exc:
                 self.secrets_error = str(exc)
+                self.secrets = None
                 log.error("secrets: %s", exc)
 
         self.builder = CandleBuilder()
@@ -255,8 +272,10 @@ class Server:
         return status
 
     async def stop(self) -> None:
+        """Also safe after a start that failed half way."""
         await self._stop_feed()
-        await self.alerts.stop()
+        if self.alerts is not None:
+            await self.alerts.stop()
         for task in self._tasks:
             task.cancel()
         for task in self._tasks:
@@ -265,5 +284,9 @@ class Server:
         self._tasks.clear()
         if self._fixed_provider is not None:
             await self._fixed_provider.aclose()
-        await self.db.close()
-        self.lock.release()
+        if self.db is not None:
+            await self.db.close()
+            self.db = None
+        if self.lock is not None:
+            self.lock.release()
+            self.lock = None
