@@ -2,13 +2,15 @@
 fraction of a second (tests/test_worker_runner.py).
 
 What a "script" does is written in its source: `HANG` loops, `SLEEP` sleeps, `CRASH`
-ends the process, `RAISE` raises, `SLOWRAISE` raises after 0.4 s; anything else
-describes one output and echoes the closes.
+ends the process, `RAISE` raises, `SLOWRAISE` raises after 0.4 s, `FILL <folder>` and
+`FILLIDLE <folder>` fill a folder (during the job, or from a thread after it); anything
+else describes one output and echoes the closes.
 """
 
 import os
 import site
 import sys
+import threading
 import time
 
 for i, arg in enumerate(sys.argv):
@@ -88,6 +90,19 @@ def main():
                     time.sleep(3600)
                 if "CRASH" in source:
                     os._exit(3)
+                if source.startswith(("FILL ", "FILLIDLE ")):  # write 1 MB a step into a folder
+                    folder = source.split(" ", 1)[1].strip()
+
+                    def fill(folder=folder):
+                        for i in range(10_000):
+                            with open(os.path.join(folder, f"f{i}.bin"), "wb") as f:
+                                f.write(b"x" * 2**20)
+                            time.sleep(0.02)
+
+                    if source.startswith("FILL "):
+                        fill()
+                    else:  # after the answer, from a thread: the job itself is done
+                        threading.Thread(target=fill, daemon=True).start()
                 if "SLOWRAISE" in source:
                     time.sleep(0.4)
                 if "RAISE" in source:

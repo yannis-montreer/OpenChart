@@ -19,6 +19,7 @@ import asyncio
 import collections
 import contextlib
 import logging
+import os
 import threading
 import time
 from collections.abc import Mapping
@@ -34,6 +35,7 @@ log = logging.getLogger("openchart.indicators.worker")
 START_TIMEOUT = 60.0  # seconds for a new worker to say it is ready (pandas import, ~1-2 s)
 STDERR_LINES_PER_MINUTE = 30
 RETRY_AFTER_FAILED_START = 10.0  # seconds before trying to start a worker again
+FOLDER_POLL = 0.5  # seconds between two measurements of a worker's own folder (B1)
 NEED_SOURCE = "NeedSource"
 
 
@@ -42,6 +44,7 @@ class Limits:
     memory_mb: int = 512
     cpu_percent: float = 50.0  # of one core
     timeout_s: float = 5.0
+    folder_mb: int = 50  # what a worker may write into its own folder, where it can (B1)
 
 
 class Handle(Protocol):
@@ -117,6 +120,7 @@ class _Live:
     hello: dict[str, Any]
     known: set[str] = field(default_factory=set)  # script hashes it has the source of
     started: float = field(default_factory=time.monotonic)
+    over_folder: str | None = None  # why the folder watch killed it
 
 
 class IndicatorRunner:
@@ -266,6 +270,10 @@ class IndicatorRunner:
                     if not died.sent and not retried:
                         retried = True  # it was gone before this job reached it
                         continue
+                    if live.over_folder:
+                        raise ScriptFailed(
+                            "crash", {"type": "FolderLimit", "message": live.over_folder}
+                        ) from None
                     memory = code is not None and (code & 0xFFFFFFFF) == 0xC0000017
                     raise ScriptFailed(
                         "memory" if memory else "crash",
@@ -388,7 +396,32 @@ class IndicatorRunner:
             live.hello.get("pid"),
             self.start_seconds,
         )
+        folder = getattr(self.launcher, "own_folder", lambda: None)()
+        if folder:
+            loop.create_task(self._watch_folder(live, folder), name="worker-folder")
         return live
+
+    async def _watch_folder(self, live: _Live, folder: str) -> None:
+        """B1 (owner): where a worker can write into its own folder (the AppContainer's,
+        when that write cannot be removed), the folder is emptied before each start, and
+        while the worker lives it is measured every FOLDER_POLL seconds: past the limit,
+        the worker is killed. A job running then fails as a crash ("wrote more than ...").
+        Between two measurements it can write at disk speed: the limit is the budget plus
+        what it writes in FOLDER_POLL seconds."""
+        limit = self.limits.folder_mb * 2**20
+        while live.handle.alive():
+            try:
+                size = await asyncio.to_thread(folder_size, folder)
+            except OSError:
+                size = 0
+            if size > limit:
+                live.over_folder = (
+                    f"wrote {size / 2**20:.0f} MB into its own folder "
+                    f"(limit {self.limits.folder_mb} MB)"
+                )
+                self._replace(live, live.over_folder)
+                return
+            await asyncio.sleep(FOLDER_POLL)
 
     async def _ask(
         self, live: _Live, header: dict[str, Any], arrays: Mapping[str, Any], wait: float
@@ -450,3 +483,13 @@ class IndicatorRunner:
                 elif count == STDERR_LINES_PER_MINUTE:
                     log.info("indicator worker: (more output this minute not logged)")
                 self._log_budget = (start, count + 1)
+
+
+def folder_size(folder: str) -> int:
+    """Bytes in the folder and below; links and junctions are not followed."""
+    total = 0
+    for root, _dirs, files in os.walk(folder, followlinks=False):
+        for name in files:
+            with contextlib.suppress(OSError):
+                total += os.lstat(os.path.join(root, name)).st_size
+    return total

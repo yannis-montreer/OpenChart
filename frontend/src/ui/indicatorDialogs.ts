@@ -93,6 +93,10 @@ export function openIndicatorPicker(opts: { catalog: IndicatorCatalog; onPick: (
     list,
     errors ?? "",
     notice ? h("div", { class: "ind-error ind-notice" }, icon("warn", 14), h("span", {}, notice)) : "",
+    // What the worker can still do here, for example its own folder (owner's decision B1).
+    ...(opts.catalog.isolation?.notes ?? [])
+      .filter((n) => n.startsWith("its own folder"))
+      .map((n) => h("div", { class: "ind-error ind-notice" }, icon("warn", 14), h("span", {}, n))),
     h(
       "div",
       { class: "ind-foot" },

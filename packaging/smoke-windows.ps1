@@ -8,10 +8,11 @@
     Checks the version, self-test, the indicator sandbox (sandbox check), that the server
     answers and serves the web page, the built-in EMA, the encrypted secrets file, and the
     indicator worker. Run by hand the release build is below the minimum isolation and must
-    say so: on an interactive window station it gets the restricted token; without one (a
-    CI runner, like a service) the restricted token cannot start a worker (found in CI-1,
-    as in CI-0 for SYSTEM), so it gets the job-limited process-only worker. Either way the
-    "weaker isolation" notice must show.
+    say so. It gets the restricted token; only where that worker was seen to die at start
+    with STATUS_DLL_INIT_FAILED (GitHub's runner, CI-1) the job-limited process-only worker
+    is accepted, and the server must have logged that very fallback (owner's decision A1).
+    Either way the "weaker isolation" notice must show. A service never falls back: that is
+    checked by tools\ci\service-reinstall-test.ps1 and the D7 (a) tests.
 
 .EXAMPLE
     .\packaging\smoke-windows.ps1 -ServerDir dist\OpenChart-Server-0.1.0-windows
@@ -34,11 +35,9 @@ function Run {
     if ($code -ne 0) { throw "$Program $($ProgramArgs -join ' ') failed (exit $code)" }
 }
 
-# The server's own test (worker/windows.py: interactive_window_station): is the window
-# station visible? GitHub's runner is session 2 but not interactive, like a service.
-$interactive = [Environment]::UserInteractive
-$expected = if ($interactive) { "restricted token" } else { "process only" }
-Write-Host "== Smoke test of the frozen server (temporary data folder, port $Port, no broker; interactive window station: $interactive, expecting '$expected')" -ForegroundColor Cyan
+Write-Host "== Smoke test of the frozen server (temporary data folder, port $Port, no broker)" -ForegroundColor Cyan
+# The one fallback A1 allows, exactly as the server logs it.
+$fallback = "indicator sandbox fallback: restricted: the worker ended before it was ready: exit code 0xc0000142 STATUS_DLL_INIT_FAILED"
 $exe = Join-Path (Resolve-Path $ServerDir) "openchart\openchart.exe"
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ("openchart-smoke-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
 New-Item -ItemType Directory $tmp | Out-Null
@@ -68,10 +67,15 @@ try {
     }
     $sandbox = [regex]::Match($logText, "indicator sandbox: [^\r\n]*").Value
     Write-Host "   $sandbox"
-    if ($sandbox -notmatch "ready \($([regex]::Escape($expected))\); weaker isolation: this install cannot isolate custom code") {
-        throw "Expected 'ready ($expected)' with the weaker-isolation notice; got: $sandbox"
+    $notice = "; weaker isolation: this install cannot isolate custom code"
+    if ($sandbox -match "ready \(restricted token\)$([regex]::Escape($notice))") {
+        $got = "restricted token"
+    } elseif ($sandbox -match "ready \(process only\)$([regex]::Escape($notice))" -and $logText.Contains($fallback)) {
+        $got = "process only, after the restricted worker died with STATUS_DLL_INIT_FAILED (A1)"
+    } else {
+        throw "Expected 'ready (restricted token)', or 'ready (process only)' after exactly the STATUS_DLL_INIT_FAILED fallback, with the weaker-isolation notice; got: $sandbox"
     }
-    Write-Host "   health ok, web page served, setup required: $($setup.setup_required), EMA loaded, secrets file used, indicator worker ready ($expected) with its notice" -ForegroundColor Green
+    Write-Host "   health ok, web page served, setup required: $($setup.setup_required), EMA loaded, secrets file used, indicator worker: $got, with its notice" -ForegroundColor Green
 } finally {
     Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
     Remove-Item Env:OPENCHART_SECRET_KEY -ErrorAction SilentlyContinue

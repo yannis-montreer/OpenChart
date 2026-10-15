@@ -265,3 +265,65 @@ async def test_an_isolated_level_that_fails_its_probes_never_falls_back(tmp_path
     assert runner is None and iso.level == "unavailable"
     assert "could read the database" in iso.reason
     assert isolated.started == 1 and weaker.started == 0
+
+
+class FolderLauncher(FakeLauncher):
+    """A worker with a writable folder of its own, emptied at each start, as the
+    AppContainer's when its write cannot be removed (B1)."""
+
+    def __init__(self, folder):
+        super().__init__()
+        self.folder = folder
+
+    def own_folder(self):
+        return str(self.folder)
+
+    def start(self):
+        for f in self.folder.iterdir():
+            f.unlink()
+        return super().start()
+
+
+def fill(folder, idle=False):
+    text = f"{'FILLIDLE' if idle else 'FILL'} {folder}"
+    return hashlib.sha256(text.encode()).hexdigest(), "fill.py", text
+
+
+async def test_the_own_folder_limit_kills_the_worker_during_a_job(tmp_path):
+    folder = tmp_path / "own"
+    folder.mkdir()
+    launcher = FolderLauncher(folder)
+    runner = IndicatorRunner(launcher, Limits(timeout_s=20, folder_mb=5))
+    await runner.start()
+    try:
+        t = time.perf_counter()
+        with pytest.raises(ScriptFailed) as failed:
+            await runner.compute(*fill(folder), {}, BARS)
+        assert failed.value.kind == "crash" and failed.value.counts_for_quarantine
+        assert "into its own folder (limit 5 MB)" in str(failed.value)
+        assert time.perf_counter() - t < 5  # long before the 20 s deadline
+        written = sum(f.stat().st_size for f in folder.iterdir())
+        assert written <= 5 * 2**20 + 2 * 26 * 2**20  # the limit + one poll at full speed
+        out = await runner.compute(*script("fine"), {}, BARS)  # a new worker: emptied first
+        assert out["out"].size == 5 and not list(folder.iterdir())
+    finally:
+        await runner.stop()
+
+
+async def test_the_own_folder_limit_holds_between_jobs(tmp_path):
+    """A script that keeps writing from a thread after its job returned."""
+    folder = tmp_path / "own"
+    folder.mkdir()
+    launcher = FolderLauncher(folder)
+    runner = IndicatorRunner(launcher, Limits(timeout_s=20, folder_mb=5))
+    await runner.start()
+    try:
+        assert (await runner.compute(*fill(folder, idle=True), {}, BARS))["out"].size == 5
+        end = time.monotonic() + 5
+        while runner.restarts == 0 and time.monotonic() < end:  # noqa: ASYNC110 (polls state)
+            await asyncio.sleep(0.1)
+        assert runner.restarts == 1  # killed while idle
+        assert (await runner.compute(*script("after"), {}, BARS))["out"].size == 5
+        assert not list(folder.iterdir()) and launcher.started == 2
+    finally:
+        await runner.stop()

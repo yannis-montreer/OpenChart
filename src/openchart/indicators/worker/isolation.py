@@ -37,6 +37,9 @@ log = logging.getLogger("openchart.indicators.worker")
 SANDBOX_SID_ENV = "OPENCHART_SANDBOX_SID"
 SOCKET_ENV = "OPENCHART_WORKER_SOCKET"
 MINIMUM_LEVELS = ("appcontainer", "sidecar")
+# The one failure of the restricted worker after which the plain job-limited worker may
+# run (owner's decision A1): it died at start without a usable desktop (CI runners).
+RESTRICTED_FALLBACK = "exit code 0xc0000142 STATUS_DLL_INIT_FAILED"
 WEAKER_NOTICE = (
     "weaker isolation: this install cannot isolate custom code from your data and tokens"
 )
@@ -58,6 +61,7 @@ def limits_from_env(env: dict[str, str] | None = None) -> Limits:
         memory_mb=int(number("OPENCHART_WORKER_MEMORY_MB", 512, 128, 8192)),
         cpu_percent=number("OPENCHART_WORKER_CPU_PERCENT", 50, 5, 100),
         timeout_s=number("OPENCHART_WORKER_TIMEOUT_S", 5, 1, 30),
+        folder_mb=int(number("OPENCHART_WORKER_FOLDER_MB", 50, 1, 1024)),
     )
 
 
@@ -234,6 +238,13 @@ class WindowsLauncher:
 
         return windows.profile_folder(self.sid_text())
 
+    def own_folder(self) -> str | None:
+        """The folder the runner watches (B1): the AppContainer's own, when it is
+        writable."""
+        if self.identity != "appcontainer" or self.profile_writes != "emptied":
+            return None
+        return self.profile_folder()
+
     def empty_profile(self) -> None:
         folder = self.profile_folder()
         if not folder or not Path(folder).is_dir():
@@ -325,14 +336,11 @@ def plan(limits: Limits) -> Plan:
                     [], f"{SANDBOX_SID_ENV} does not match the sandbox: rerun the installer"
                 )
             return Plan([WindowsLauncher("appcontainer", limits, private_desktop=True)])
-        if not windows.interactive_window_station():
-            # Not a service, but without an interactive window station (a CI runner): the
-            # restricted token cannot start a worker there, even on a desktop of its own
-            # (CI-0 as SYSTEM; CI-1 on GitHub's runner, session 2). The job-limited
-            # process: below the minimum, with the notice.
-            return Plan([WindowsLauncher("plain", limits)])
-        # A source install: Low integrity. A frozen build cannot start at Low outside an
-        # AppContainer (finding 9), so it keeps the server's level.
+        # A source install, or a release zip run by hand: Low integrity. A frozen build
+        # cannot start at Low outside an AppContainer (finding 9), so it keeps the server's
+        # level. The plain job-limited worker follows only when the restricted one was seen
+        # to die with STATUS_DLL_INIT_FAILED (owner's decision A1, start_worker): GitHub's
+        # runner, where no property of the session predicts it (CI-1).
         return Plan(
             [
                 WindowsLauncher("restricted", limits, low_integrity=not frozen()),
@@ -439,10 +447,14 @@ async def start_worker(
         runner, isolation = await _try(launcher, data_dir, limits)
         if runner is not None:
             isolation.notes[:0] = failures
+            if failures:
+                log.warning("indicator sandbox fallback: %s", "; ".join(failures))
             return runner, isolation
         failures.append(f"{launcher.level}: {isolation.reason}")
         if launcher.level in MINIMUM_LEVELS:  # D7 (a): never fall back below it
             break
+        if launcher.level == "restricted" and RESTRICTED_FALLBACK not in isolation.reason:
+            break  # A1: only that observed failure leads to the plain worker
     return None, Isolation("unavailable", False, "; ".join(failures) or "no worker")
 
 
@@ -478,6 +490,21 @@ async def _try(
     finally:
         listener.close()
     probes = started["probes"] or {}
+    if probes.get("write into its own folder", {}).get("result") == "allowed":
+        # The removal of that write did not hold (CI-1): say so, and from now on empty the
+        # folder before each start and cap it while the worker runs (owner's decision B1).
+        launcher.profile_writes = "emptied"
+        notes[:] = [n for n in notes if n != "writes to its own folder removed"]
+        notes.append(
+            f"its own folder is writable: emptied at each worker start and capped at "
+            f"{limits.folder_mb} MB while it runs"
+        )
+        await runner.stop()  # this worker started before the watch: start a watched one
+        runner = IndicatorRunner(launcher, limits)
+        try:
+            await runner.start()
+        except (WorkerUnavailable, OSError) as exc:
+            return None, Isolation("unavailable", False, str(exc), probes, notes)
     met, why = judge(launcher.level, probes)
     if launcher.level in MINIMUM_LEVELS and not met:
         await runner.stop()

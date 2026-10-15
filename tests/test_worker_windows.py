@@ -19,6 +19,7 @@ import pytest
 if os.name != "nt":  # before the Windows-only modules below (winreg)
     pytest.skip("Windows only", allow_module_level=True)
 
+import asyncio
 import contextlib
 import ctypes
 import hashlib
@@ -56,16 +57,33 @@ def script(body: str = "    pass"):
     return hashlib.sha256(text.encode()).hexdigest(), "s.py", text
 
 
-# Without an interactive window station (a service; GitHub's runner, session 2) the
-# restricted token cannot start a worker even on a desktop of its own (CI-0 as SYSTEM,
-# CI-1 on the runner). The job object's limits and the audit hook are the same for the
-# plain worker, so those tests run there with it; the tests of the restricted identity
-# itself run in interactive sessions.
-NOT_INTERACTIVE = not windows.interactive_window_station()
-JOB_IDENTITY = "plain" if NOT_INTERACTIVE else "restricted"
+def _restricted_blocked() -> str | None:
+    """Owner's decision A1: the restricted-token tests skip only where a restricted worker
+    was seen to die at start with exactly STATUS_DLL_INIT_FAILED (GitHub's runner, where no
+    property of the session predicts it). Any other failure is not a reason to skip: those
+    tests then fail and show it."""
+
+    async def attempt() -> str | None:
+        limits = Limits()
+        runner = IndicatorRunner(WindowsLauncher("restricted", limits), limits)
+        try:
+            await runner.start()
+        except Exception as exc:
+            text = str(exc)
+            return text if isolation.RESTRICTED_FALLBACK in text else None
+        await runner.stop()
+        return None
+
+    return asyncio.run(attempt())
+
+
+RESTRICTED_BLOCKED = _restricted_blocked()
+# The job object's limits and the audit hook are the same for the plain worker, so those
+# tests run with it where the restricted one cannot start.
+JOB_IDENTITY = "plain" if RESTRICTED_BLOCKED else "restricted"
 interactive_only = pytest.mark.skipif(
-    NOT_INTERACTIVE,
-    reason="the restricted token cannot start a worker without an interactive window station",
+    bool(RESTRICTED_BLOCKED),
+    reason=f"the restricted worker cannot start here: {RESTRICTED_BLOCKED}",
 )
 
 
@@ -344,9 +362,12 @@ async def test_appcontainer_probes_against_decoys(tmp_path):
                 "Credential Manager decoy",
                 "registry decoy (HKCU)",
                 "write into the data folder",
-                "write into its own folder",
             ):
                 assert probes[name]["result"] != "allowed", (name, probes[name])
+            # Its own folder: the probe runs and is reported (the table above). Where the
+            # removal does not hold, the server switches to B1 (emptied at each start,
+            # capped while it runs: tests/test_worker_runner.py); not a failure here.
+            assert probes["write into its own folder"]["result"] in ("allowed", "denied", "error")
             assert profile_note == "writes to its own folder removed"
             assert (await fresh.compute(*script(), {}, BARS))["out"].size == 10
         finally:
@@ -542,8 +563,62 @@ def test_the_catalog_shows_why_a_service_runs_no_custom_code(monkeypatch, tmp_pa
     assert set(started) == {"appcontainer"}
 
 
-def test_no_interactive_window_station_without_a_service_gets_the_plain_worker(monkeypatch):
-    monkeypatch.setattr(windows, "running_as_system", lambda: False)
-    monkeypatch.delenv(isolation.SANDBOX_SID_ENV, raising=False)
-    monkeypatch.setattr(windows, "interactive_window_station", lambda: False)
-    assert [x.identity for x in isolation.plan(Limits()).launchers] == ["plain"]
+# A1: the plain worker follows only an observed STATUS_DLL_INIT_FAILED -------------------
+
+
+def dying(code: int, limits: Limits) -> WindowsLauncher:
+    """A "restricted" worker that ends at start with this exit code."""
+    exit_process = f"import ctypes; ctypes.windll.kernel32.ExitProcess(ctypes.c_uint({code}))"
+    argv = [isolation.base_python(), "-I", "-c", exit_process]
+    return WindowsLauncher("restricted", limits, argv=argv, cwd=str(Path(argv[0]).parent))
+
+
+class Counting(WindowsLauncher):
+    started = 0
+
+    def start(self):
+        Counting.started += 1
+        return super().start()
+
+
+async def test_the_plain_worker_follows_exactly_the_desktop_failure(tmp_path):
+    limits = Limits()
+    Counting.started = 0
+    runner, iso = await start_worker(
+        tmp_path, limits, [dying(0xC0000142, limits), Counting("plain", limits)]
+    )
+    try:
+        assert runner is not None and iso.level == "process-only" and not iso.minimum_met
+        assert iso.notice == isolation.WEAKER_NOTICE
+        assert isolation.RESTRICTED_FALLBACK in iso.notes[0] and Counting.started == 1
+    finally:
+        await runner.stop()
+
+
+@pytest.mark.parametrize("code", [7, 0xC0000005, 0xC0000022])
+async def test_any_other_restricted_failure_runs_no_custom_code(tmp_path, code):
+    limits = Limits()
+    Counting.started = 0
+    runner, iso = await start_worker(
+        tmp_path, limits, [dying(code, limits), Counting("plain", limits)]
+    )
+    assert runner is None and iso.level == "unavailable" and Counting.started == 0
+
+
+async def test_a_service_never_takes_the_a1_fallback(monkeypatch, tmp_path):
+    """D7 (a) holds even for the one failure A1 accepts elsewhere: the AppContainer of a
+    service dying with STATUS_DLL_INIT_FAILED leaves no custom code running."""
+    service(monkeypatch)
+    started = []
+
+    def fake_start(argv, *, identity, **kwargs):
+        started.append(identity)
+        raise OSError(0, f"the worker ended before it was ready: {isolation.RESTRICTED_FALLBACK}")
+
+    monkeypatch.setattr(windows, "start", fake_start)
+    monkeypatch.setattr(WindowsLauncher, "container", lambda self: None)
+    monkeypatch.setattr(WindowsLauncher, "profile_folder", lambda self: None)
+    runner, iso = await start_worker(tmp_path, Limits())
+    assert runner is None and iso.level == "unavailable" and not iso.runs_custom_code
+    assert set(started) == {"appcontainer"}
+    assert iso.notice.startswith("custom indicators do not run on this install")
