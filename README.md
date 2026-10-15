@@ -178,7 +178,7 @@ NSSM 2.24 is at https://nssm.cc/download (or `winget install NSSM.NSSM`). Stop a
 | M5 Drawings | done |
 | M6 Alerts and Telegram | done |
 | M7 Indicators, chart types, layouts | done (reduced scope: EMA only) |
-| M8 Packaging and deployment | done, waiting on owner acceptance checks |
+| M8 Packaging and deployment | done |
 | M9 Second instrument (EURUSD) | done |
 
 ## Development setup
