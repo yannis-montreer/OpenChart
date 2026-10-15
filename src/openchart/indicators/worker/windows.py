@@ -288,6 +288,19 @@ def sid_to_string(sid: PVOID) -> str:
     return text
 
 
+ProcessIdToSessionId = _sig(k32, "ProcessIdToSessionId", BOOL, DWORD, C.POINTER(DWORD))
+
+
+def in_session_zero() -> bool:
+    """True for services and processes they start (a CI runner, the Windows service):
+    their desktop admits only SYSTEM and Administrators, so a restricted or AppContainer
+    worker needs a desktop of its own there (finding 7)."""
+    session = DWORD()
+    if not ProcessIdToSessionId(os.getpid(), C.byref(session)):
+        return False
+    return session.value == 0
+
+
 def running_as_system() -> bool:
     """True for a Windows service running as LocalSystem."""
     token = HANDLE()

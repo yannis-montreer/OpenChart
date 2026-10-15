@@ -12,10 +12,16 @@ Windows runner), never by default on someone's own PC. LocalSystem is CI's servi
 (tools/ci/service-reinstall-test.ps1).
 """
 
+import os
+
+import pytest
+
+if os.name != "nt":  # before the Windows-only modules below (winreg)
+    pytest.skip("Windows only", allow_module_level=True)
+
 import contextlib
 import ctypes
 import hashlib
-import os
 import shutil
 import subprocess
 import sys
@@ -26,10 +32,6 @@ from ctypes import wintypes
 from pathlib import Path
 
 import numpy as np
-import pytest
-
-if os.name != "nt":
-    pytest.skip("Windows only", allow_module_level=True)
 
 from openchart.indicators.worker import isolation, windows
 from openchart.indicators.worker.isolation import WindowsLauncher, start_worker
@@ -373,5 +375,20 @@ async def test_a_release_zip_run_by_hand_gets_the_weaker_isolation_notice(monkey
         assert iso.level == "restricted" and not iso.minimum_met
         assert iso.notice == isolation.WEAKER_NOTICE
         assert iso.to_json()["notice"].startswith("weaker isolation")
+    finally:
+        await runner.stop()
+
+
+async def test_the_restricted_worker_on_a_desktop_of_its_own(tmp_path):
+    """What a server in session 0 does (a service, GitHub's Windows runner, where the
+    restricted worker died with STATUS_DLL_INIT_FAILED on the session's own desktop)."""
+    limits = Limits()
+    launcher = WindowsLauncher("restricted", limits, private_desktop=True)
+    runner, iso = await start_worker(tmp_path, limits, [launcher])
+    assert runner is not None, iso.reason
+    try:
+        assert iso.level == "restricted" and not iso.minimum_met
+        assert any("a private desktop of its own" in n for n in iso.notes)
+        assert (await runner.compute(*script(), {}, BARS))["out"].size == 10
     finally:
         await runner.stop()

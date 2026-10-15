@@ -170,10 +170,13 @@ class WindowsLauncher:
         *,
         argv: list[str] | None = None,
         cwd: str | None = None,
-        private_desktop: bool = False,
+        private_desktop: bool | None = None,
         low_integrity: bool = True,
         container_name: str | None = None,
     ):
+        """`private_desktop`: None decides it: a sandboxed identity started from session 0
+        (a service, a CI runner) gets a desktop of its own (finding 7; found again on
+        GitHub's Windows runner in CI-1)."""
         from openchart.indicators.worker import windows
 
         self.identity = identity
@@ -183,6 +186,8 @@ class WindowsLauncher:
         self.limits = limits
         default_argv, default_cwd = worker_argv()
         self.argv, self.cwd = argv or default_argv, cwd or default_cwd
+        if private_desktop is None:
+            private_desktop = identity != "plain" and windows.in_session_zero()
         self.private_desktop = private_desktop
         self.low_integrity = low_integrity
         self.container_name = container_name or windows.CONTAINER_NAME

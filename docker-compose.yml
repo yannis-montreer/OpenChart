@@ -39,6 +39,7 @@ services:
     restart: unless-stopped
     command: ["openchart", "indicator-worker", "--listen", "/run/ocw/sock"]
     user: "10002"  # not the server's 10001
+    working_dir: /  # the image's /data is the server's only (mode 700)
     network_mode: none
     read_only: true
     cap_drop: [ALL]

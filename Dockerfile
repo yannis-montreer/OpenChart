@@ -33,8 +33,10 @@ RUN pip install . \
     && cp LICENSE NOTICE /usr/share/doc/openchart/ \
     && cd / && rm -rf /build \
     && useradd --system --uid 10001 --no-create-home --home-dir /data openchart \
-    && mkdir /data && chown openchart:openchart /data
+    && mkdir /data && chown openchart:openchart /data && chmod 700 /data
 
+# /data is the server's only (mode 700): the indicator sidecar (uid 10002) cannot even
+# list the image's empty folder, let alone a volume (docs/custom-indicators.md).
 USER openchart
 WORKDIR /data
 VOLUME ["/data"]
