@@ -28,7 +28,7 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from openchart.market.gaps import Gap, find_gaps
 from openchart.market.sessions import TradingHours
@@ -376,3 +376,102 @@ async def refresh_recent(
     end = datetime.now(UTC)
     candles = [c async for c in provider.fetch_candles(instrument, end - lookback, end)]
     return await store.upsert_m1(source, instrument, candles)
+
+
+# Live M1 built from ticks is replaced by the broker's own candles by `refresh_recent`, once
+# a minute, for the last 15 minutes. Minutes closed just before the server stops, the
+# stream drops or the computer sleeps miss those refreshes and would keep their tick-built
+# values for good (gap fill only adds newer candles, repair only fills holes). Two checks
+# replace them: the hour before such a stop, on every start, reconnect and wake-up, and the
+# whole previous day once a day. Each is one request per instrument.
+TAIL_CHECK = timedelta(hours=1)
+
+
+@dataclass(frozen=True)
+class CheckResult:
+    instrument: str
+    fetched: int  # the broker's candles in the range
+    replaced: int  # stored minutes that differed from the broker's
+    added: int  # broker minutes that were not stored
+
+
+async def check_against_broker(
+    provider: Provider,
+    store: CandleStore,
+    instrument: str,
+    start: datetime,
+    end: datetime,
+    *,
+    source: str | None = None,
+) -> CheckResult:
+    """Replace stored M1 in `[start, end)` that differs from the broker's candles, and add
+    the ones missing. Minutes the broker has none for are kept."""
+    source = source or provider.name
+    fetched = [c async for c in provider.fetch_candles(instrument, start, end)]
+    stored = {
+        c.ts: c
+        for c in await store.read_m1(
+            source, instrument, int(start.timestamp()), int(end.timestamp())
+        )
+    }
+    changed = [c for c in fetched if stored.get(c.ts) != c]
+    if changed:
+        await store.upsert_m1(source, instrument, changed)
+    replaced = sum(1 for c in changed if c.ts in stored)
+    return CheckResult(instrument, len(fetched), replaced, len(changed) - replaced)
+
+
+async def check_tail(
+    provider: Provider,
+    store: CandleStore,
+    instrument: str,
+    before: int | None = None,
+    *,
+    source: str | None = None,
+    lookback: timedelta = TAIL_CHECK,
+) -> CheckResult | None:
+    """The hour before `before` (default: up to the newest stored minute, which is where a
+    stop or a dropped stream left off). None without stored history."""
+    source = source or provider.name
+    if before is None:
+        last = await store.last_ts(source, instrument)
+        if last is None:
+            return None
+        before = last + M1_SECONDS
+    end = _dt(before)
+    result = await check_against_broker(
+        provider, store, instrument, end - lookback, end, source=source
+    )
+    if result.replaced or result.added:
+        log.info(
+            "%s: the hour before %s checked against the broker: %d minutes replaced, %d added",
+            instrument,
+            f"{end:%m-%d %H:%M}",
+            result.replaced,
+            result.added,
+        )
+    return result
+
+
+async def check_day(
+    provider: Provider,
+    store: CandleStore,
+    instrument: str,
+    day: date,
+    *,
+    source: str | None = None,
+) -> CheckResult:
+    """One UTC day of stored M1 against the broker's."""
+    start = datetime(day.year, day.month, day.day, tzinfo=UTC)
+    result = await check_against_broker(
+        provider, store, instrument, start, start + timedelta(days=1), source=source
+    )
+    log.info(
+        "%s: %s checked against the broker: %d minutes, %d replaced, %d added",
+        instrument,
+        day.isoformat(),
+        result.fetched,
+        result.replaced,
+        result.added,
+    )
+    return result

@@ -27,7 +27,7 @@ from openchart.market.backfill import (
     repair,
 )
 from openchart.market.cache import CandleCache
-from openchart.market.gaps import find_gaps
+from openchart.market.gaps import coverage, find_gaps
 from openchart.market.instruments import instrument_hours
 from openchart.providers.base import AuthError, Provider, ProviderError
 from openchart.providers.registry import create_provider
@@ -176,10 +176,15 @@ async def _cmd_stats(config: Config, args: argparse.Namespace) -> int:
             last = await ctx.store.last_ts(row.source, row.instrument)
             line = f"{row.source}/{row.instrument}: {n:,} M1 candles, {_fmt(first)} to {_fmt(last)}"
             if first and last and row.hours:
-                # Expected trading minutes in the stored range, sampled hourly.
-                open_hours = sum(1 for t in range(first, last, 3600) if row.hours.is_open(t))
-                if open_hours:
-                    line += f", {n / (open_hours * 60):.1%} of expected trading minutes"
+                cov = coverage(
+                    await ctx.store.timestamps(row.source, row.instrument),
+                    row.hours,
+                    await ctx.store.closures(row.source, row.instrument),
+                )
+                if cov.expected:
+                    line += f", {cov.ratio:.1%} of expected trading minutes"
+                if cov.outside:
+                    line += f" (and {cov.outside:,} outside the trading hours)"
             print(line)
             h1 = await ctx.store.count(row.source, row.instrument, "H1")
             if h1:
