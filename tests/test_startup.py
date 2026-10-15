@@ -146,10 +146,13 @@ def test_a_missing_secret_store_still_starts_without_tokens(tmp_path, monkeypatc
 @POSIX_ONLY
 def test_secrets_enc_is_private(tmp_path):
     path = tmp_path / "secrets.enc"
-    path.write_bytes(b"old")
-    path.chmod(0o644)  # written by an earlier version
-    EncryptedFileSecrets(path, Fernet.generate_key().decode()).set("oanda_token", "abc")
+    store = EncryptedFileSecrets(path, Fernet.generate_key().decode())
+    store.set("oanda_token", "abc")
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    path.chmod(0o644)  # as an earlier version wrote it
+    store.set("telegram_token", "def")
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert store.get("oanda_token") == "abc"
 
 
 @POSIX_ONLY
