@@ -38,6 +38,7 @@ image. Python 3.11 and 3.13 are both tested.
 
 - **Tell the owner before any API request** to OANDA or Telegram, with the exact request and the number of requests. Keep it to one script run.
 - **Never touch the owner's live data folder, `openchart.exe` or `.env`** without explicit permission for that one operation. Work on copies of the data.
+- **Never run `git pull`, switch branches or edit files in the live checkout while the server runs.** Do the work in a worktree.
 - **Never push or merge without the owner's go.** One branch per piece of work, from `main`; the owner reviews and merges the PRs. Never tag or publish a release.
 - **Use the fake broker and copies of data for tests**, never the owner's live server or price streams (OANDA practice allows only about two streams per account).
 - **Stop for the owner's review after each milestone** or step, and wait.

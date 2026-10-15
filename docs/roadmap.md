@@ -20,7 +20,7 @@ item are in `docs/decisions.md`. Updated 2026-10-15.
 | OANDA errors that explain themselves, unreadable tokens refused locally, an OANDA mock that enforces the API's rules | #12 |
 | Storage step 1: integer prices and series keys (migration 0007), 57% smaller, applied to the owner's data | #13 |
 | Data-folder lock: commands that write refuse while a server runs; the installer stops the service first (tested in CI) | #14 |
-| v0.1.0: version, release notes, draft release from the notes file | #15 (open) |
+| v0.1.0: version, release notes, draft release from the notes file | #15 |
 
 ## Parked on branches (not merged)
 
