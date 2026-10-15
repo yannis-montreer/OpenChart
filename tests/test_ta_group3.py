@@ -12,7 +12,7 @@ import random
 import pandas as pd
 import pytest
 
-from openchart.indicators import _ta, ta
+from openchart.indicators import ta
 from tests.test_ta import NAN, X, isnan, same, value_at
 
 
@@ -204,37 +204,37 @@ def test_a_pivot_is_reported_right_bars_late_and_never_earlier():
     assert moved.drop(index=6).isna().all()
 
 
-# UNCONFIRMED: how ties count in a pivot. Check these cases in TradingView; to flip the rule,
-# change `_PIVOT_STRICT` in _ta.py (one line) and keep the row of EXPECTED_BY_RULE that
-# TradingView agrees with as the one the first assert uses (it reads the library's setting).
-# The rule is (left side strict, right side strict): strict means a bar equal to the pivot on
-# that side stops it being a pivot.
-PLATEAU = [1.0, 5, 5, 1]  # two equal highs side by side, left = right = 1
-INSIDE = [5.0, 1, 5, 1, 5]  # equal highs on both sides of the middle one, left = right = 2
-EXPECTED_BY_RULE = {
-    # rule: (pivothigh(PLATEAU, 1, 1), pivothigh(INSIDE, 2, 2))
-    (True, True): ([NAN, NAN, NAN, NAN], [NAN] * 5),  # no tie ever makes a pivot
-    (False, False): ([NAN, NAN, 5.0, 5.0], [NAN, NAN, NAN, NAN, 5.0]),  # both plateau bars
-    (True, False): ([NAN, NAN, 5.0, NAN], [NAN] * 5),  # the first of equal highs
-    (False, True): ([NAN, NAN, NAN, 5.0], [NAN] * 5),  # the last of equal highs
-}
+# How equal prices count in a pivot high, per side: a bar to the LEFT may equal the pivot, a bar
+# to the RIGHT must be strictly lower, so a plateau of equal highs gives its last bar.
+# Checked in TradingView (pivothigh) at left = right = 1 for a plateau and for the right-side
+# tie at left = right = 2 (the first two cases); the rest follows by inference: mixed left
+# windows, and pivotlow as the mirror image (to be checked).
+CHECKED_IN_TRADINGVIEW = [
+    # (highs, left, right, pivothigh result: the pivot's price on its confirming bar)
+    ([1.0, 5, 5, 1], 1, 1, [NAN, NAN, NAN, 5.0]),  # the second 5 is a pivot, the first is not
+    ([5.0, 1, 5, 1, 5], 2, 2, [NAN] * 5),  # no pivot: the equal high on the right
+]
+INFERRED = [
+    ([5.0, 5, 1, 0], 1, 1, [NAN, NAN, 5.0, NAN]),  # an equal bar on the left is allowed
+    ([5.0, 2, 5, 1], 2, 1, [NAN, NAN, NAN, 5.0]),  # left window of 2, one equal bar and a lower
+    ([2.0, 5, 5, 1], 2, 1, [NAN, NAN, NAN, 5.0]),  # the same, the equal bar nearer
+    ([5.0, 5, 5, 1], 2, 1, [NAN, NAN, NAN, 5.0]),  # both left bars equal
+    ([6.0, 5, 5, 1], 2, 1, [NAN] * 4),  # one left bar higher: no pivot
+    ([1.0, 5, 5, 5, 1], 1, 2, [NAN] * 5),  # equal bars on the right (two of them): no pivot
+    ([1.0, 5, 5, 5, 1], 1, 1, [NAN, NAN, NAN, NAN, 5.0]),  # a plateau of three: its last bar
+]
 
 
-def test_pivot_tie_rule_unconfirmed_against_tradingview():
-    plateau, inside = EXPECTED_BY_RULE[_ta._PIVOT_STRICT]
-    same(ta.pivothigh(S(PLATEAU), 1, 1), plateau)
-    same(ta.pivothigh(S(INSIDE), 2, 2), inside)
-    assert _ta._PIVOT_STRICT == (True, True)  # the rule in force today; delete with the flip
+@pytest.mark.parametrize(("highs", "left", "right", "want"), CHECKED_IN_TRADINGVIEW + INFERRED)
+def test_pivot_ties_left_may_equal_right_must_be_lower(highs, left, right, want):
+    same(ta.pivothigh(S(highs), left, right), want)
 
 
-@pytest.mark.parametrize("rule", list(EXPECTED_BY_RULE))
-def test_every_tie_rule_works_by_changing_the_one_setting(rule, monkeypatch):
-    monkeypatch.setattr(_ta, "_PIVOT_STRICT", rule)
-    plateau, inside = EXPECTED_BY_RULE[rule]
-    same(ta.pivothigh(S(PLATEAU), 1, 1), plateau)
-    same(ta.pivothigh(S(INSIDE), 2, 2), inside)
-    # The low is the mirror image under the same rule.
-    same(ta.pivotlow(S([-v for v in PLATEAU]), 1, 1), [-v for v in plateau])
+@pytest.mark.parametrize(("highs", "left", "right", "want"), CHECKED_IN_TRADINGVIEW + INFERRED)
+def test_pivotlow_ties_are_the_mirror_image_inferred(highs, left, right, want):
+    same(ta.pivotlow(S([-v for v in highs]), left, right), [-v for v in want])
+    # Written out once: lows 5, 1, 1, 5 -> the second 1 is the pivot, confirmed a bar later.
+    same(ta.pivotlow(S([5.0, 1, 1, 5]), 1, 1), [NAN, NAN, NAN, 1.0])
 
 
 # Every helper: no lookahead at every cut, gaps, short inputs, index, bad arguments

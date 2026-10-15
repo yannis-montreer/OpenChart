@@ -138,7 +138,7 @@ one starts.
 | `highestbars(x, n)`, `lowestbars(x, n)` | where that extreme is, as Pine: `0` this bar, `-1` the bar before, down to `-(n - 1)`; on a tie the most recent bar | `n` bars |
 | `sum(x, n)` | sum of the last `n` | `n` bars |
 | `cum(x)` | running total from the first bar; a gap is a gap on its own bar and the total goes on | **no warmup helps**: it depends on where the history starts |
-| `pivothigh(x, left, right)`, `pivotlow` | the pivot's price on the bar where it is *confirmed*, `right` bars after the pivot, NaN elsewhere. A pivot high is higher than the `left` bars before it and the `right` bars after it | `left + right + 1` bars |
+| `pivothigh(x, left, right)`, `pivotlow` | the pivot's price on the bar where it is *confirmed*, `right` bars after the pivot, NaN elsewhere. A pivot high is at least as high as the `left` bars before it and higher than the `right` bars after it | `left + right + 1` bars |
 
 A gap in the input: `ema` and `rma` give NaN at the gap and start again, with a new
 seed, once `n` values in a row are back; windowed helpers (including `highest`, `lowest`,
@@ -149,9 +149,12 @@ seed, once `n` values in a row are back; windowed helpers (including `highest`, 
 cannot be known before the bar that is `right` bars later. `pivothigh` puts its value on that
 bar, so a marker or line drawn from it shows up `right` bars after the turn, and the value
 at a bar never changes when later bars arrive. Drawing it back at the pivot bar
-itself would need the future, so `ta` does not offer it. **How equal prices count is not confirmed against TradingView yet:** today
-a bar equal to the pivot on either side stops it being a pivot (so two equal highs side by
-side give none). It is one setting in the library (`_PIVOT_STRICT`) and one test.
+itself would need the future, so `ta` does not offer it.
+
+**Equal prices in a pivot** (as TradingView, checked for `pivothigh`): bars on the left may
+equal the pivot, bars on the right must be strictly lower. Of a run of equal highs the last
+one is the pivot, and an equal high on the right means no pivot. `pivotlow` is the mirror
+image (that part is inferred, not yet checked).
 
 Speed (this PC, 5,000 bars): the recursive and series helpers take 0.1 to 1.2 ms;
 `highest`/`lowest` 0.2 ms at any length. The rest cost bars x length: at length 20 they are

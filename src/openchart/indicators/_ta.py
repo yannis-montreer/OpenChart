@@ -527,40 +527,38 @@ def cum(values) -> pd.Series:
     return pd.Series(np.cumsum(np.nan_to_num(s.to_numpy())), index=s.index).where(s.notna())
 
 
-# Which ties make a bar a pivot. UNCONFIRMED against TradingView (docs/decisions.md): to
-# change the rule, change this one line. The pair is (left side strict, right side strict);
-# strict means a bar equal to the pivot on that side stops it being a pivot.
-_PIVOT_STRICT = (True, True)
-
-
 def _pivot(values, left: int, right: int, above: bool) -> pd.Series:
+    """How equal prices count, per side (checked in TradingView for `pivothigh`): bars to the
+    left may equal the pivot, bars to the right must be strictly beyond it. So of a plateau
+    of equal highs, the last bar is the pivot."""
     left = _whole(left, "left", 1)
     right = _whole(right, "right", 1)
     s = _series(values)
     x = s.to_numpy()
     centre = _lagged(x, right)  # the candidate for the bar `right` bars back
-    strict_left, strict_right = _PIVOT_STRICT
     found = ~np.isnan(centre)
     with np.errstate(invalid="ignore"):  # a gap compares False, so there is no pivot
         for k in range(left + right + 1):
             if k == right:
                 continue
             other = _lagged(x, k)
-            strict = strict_right if k < right else strict_left
+            on_the_right = k < right  # k bars before the confirming bar
             if above:
-                found &= (centre > other) if strict else (centre >= other)
+                found &= (centre > other) if on_the_right else (centre >= other)
             else:
-                found &= (centre < other) if strict else (centre <= other)
+                found &= (centre < other) if on_the_right else (centre <= other)
     return pd.Series(np.where(found, centre, np.nan), index=s.index)
 
 
 def pivothigh(values, left: int, right: int) -> pd.Series:
-    """Pivot highs: a bar higher than the `left` bars before it and the `right` bars after it.
+    """Pivot highs: a bar at least as high as the `left` bars before it and higher than the
+    `right` bars after it.
 
     The pivot's price is reported on the bar where it is confirmed, `right` bars after the
     pivot itself, and everywhere else the value is a gap. So the chart shows a pivot `right`
-    bars late, and never before it can be known. A gap among those bars means no pivot. How
-    equal values count: `_PIVOT_STRICT` (equal prices on either side stop a pivot).
+    bars late, and never before it can be known. A gap among those bars means no pivot.
+    Equal prices: they may equal the pivot on the left but not on the right, so of a run of
+    equal highs the last one is the pivot.
 
     Warmup: `left + right + 1` bars for the first possible pivot.
     """
