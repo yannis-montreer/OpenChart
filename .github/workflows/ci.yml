@@ -36,7 +36,8 @@ jobs:
       - run: pytest -q
 
   windows-package:
-    # The release build (server folder and viewer, without NSSM), smoke-tested; kept nowhere.
+    # The release build (server folder and viewer), smoke-tested; then the service installer on
+    # the runner, installed and reinstalled over the running service. Nothing is kept.
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -65,6 +66,23 @@ jobs:
               if ($names -notcontains $f) { throw "$f missing from $($zip.Name)" }
             }
           }
+      - name: NSSM 2.24 (checksum verified)
+        shell: pwsh
+        env:
+          NSSM_URL: https://nssm.cc/release/nssm-2.24.zip
+          NSSM_SHA256: 727d1e42275c605e0f04aba98095c38a8e1e46def453cdffce42869428aa6743
+        run: |
+          foreach ($i in 1..5) {
+            try { Invoke-WebRequest $env:NSSM_URL -OutFile nssm.zip; break } catch { Start-Sleep 10 }
+          }
+          $hash = (Get-FileHash nssm.zip -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne $env:NSSM_SHA256) { throw "nssm.zip has SHA-256 $hash, expected $env:NSSM_SHA256" }
+          Expand-Archive nssm.zip -DestinationPath nssm
+      - name: Install the service, then reinstall over it while it runs
+        shell: pwsh
+        run: |
+          $release = (Get-ChildItem dist -Directory -Filter "OpenChart-Server-*-windows").FullName
+          .\tools\ci\service-reinstall-test.ps1 -Release $release -Nssm nssm\nssm-2.24\win64\nssm.exe -Work $env:RUNNER_TEMP
 
   docker:
     # Builds the image and runs it on a test volume; nothing is pushed anywhere.
