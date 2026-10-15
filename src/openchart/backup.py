@@ -22,6 +22,7 @@ from datetime import datetime
 from pathlib import Path
 
 from openchart import __version__
+from openchart.files import open_private
 
 DB_NAME = "openchart.db"
 LOCK_NAME = "server.lock"  # held by a running server (openchart.lock); never copied
@@ -63,7 +64,11 @@ def backup(
     try:
         _snapshot(db_path, snapshot)
         result = BackupResult(path=target, size=0, files=1, tick_files=0)
-        with zipfile.ZipFile(partial, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
+        # The zip holds the database and secrets.enc: readable by its owner only.
+        with (
+            open_private(partial) as raw,
+            zipfile.ZipFile(raw, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf,
+        ):
             zf.write(snapshot, DB_NAME)
             for path in sorted(data_dir.rglob("*")):
                 rel = path.relative_to(data_dir)
