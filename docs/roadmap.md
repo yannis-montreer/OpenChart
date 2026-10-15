@@ -1,0 +1,70 @@
+# Roadmap
+
+What is merged, what is parked on a branch, and what comes next. Decisions behind each
+item are in `docs/decisions.md`. Updated 2026-10-15.
+
+## Merged into main
+
+| Work | PR |
+|---|---|
+| M0 Scaffolding, M1 OANDA provider, storage, backfill | #1 |
+| M2 Aggregation, live candles, API, websocket | #2 |
+| M3 Web chart | #3, #4 |
+| M4 Setup wizard, login, settings | #5 |
+| M5 Drawings (horizontal line, trendline, ray, extended line) | #6 |
+| M6 Alerts and Telegram | #7 |
+| M7 Indicators (EMA), chart types, layouts | #8 |
+| M9 Second instrument by metadata only; downloads newest first; FX rollover break | #9 |
+| M8 Packaging: Windows service, PyInstaller build, desktop viewer, Docker | #10 |
+| Fixes after M8: stale tick-built minutes replaced by the broker's (options A and B), exact `stats` coverage, a changed secret key stops the server, private `secrets.enc` and backups, Docker notes | #11 |
+| OANDA errors that explain themselves, unreadable tokens refused locally, an OANDA mock that enforces the API's rules | #12 |
+| Storage step 1: integer prices and series keys (migration 0007), 57% smaller, applied to the owner's data | #13 |
+| Data-folder lock: commands that write refuse while a server runs; the installer stops the service first (tested in CI) | #14 |
+| v0.1.0: version, release notes, draft release from the notes file | #15 (open) |
+
+## Parked on branches (not merged)
+
+- **`custom-indicators`** (local, not pushed): custom indicators written in Python.
+  - `docs/custom-indicators-design.md`: the approved design. Decisions D1 to D7 are at its top. D2 is the request-origin rule for browser editing; D7 (a) means no custom code on a service install without its AppContainer.
+  - `docs/ci0-spike-report.md`: the CI-0 spike, final. **GO** for the Windows service (AppContainer + job object + private desktop, proven as LocalSystem) and for Docker (sidecar container). The source install is a weaker mode with browser editing always off.
+  - `docs/ci1-plan.md`: the approved CI-1 plan (files, tests, installer steps, upgrade from M8, rollback).
+  - `tools/ci0_spike/` and `.github/workflows/ci0-spike.yml`: spike code, to be replaced by CI-1.
+  - **Before CI-1:** bring the branch up to date with main, since main moved a lot (storage, the lock, v0.1.0).
+- **`storage-review`** (local, not pushed): the storage analysis the owner decided from.
+  - `docs/storage-review.md`: layouts, retention, logs, replay, 5s candles, Dukascopy, cold storage.
+  - `docs/hosting-notes.md`: what multi-user hosting would need.
+  - `packaging/clean-build.ps1`.
+  - Step 1 of it is merged (#13). Keep the documents or fold them into `docs/`; the owner decides.
+
+## Queue
+
+In the owner's order. Each item is one branch from main and stops for review.
+
+1. **Custom indicators**, CI-1 to CI-5 (`docs/ci1-plan.md`; about 13 to 16 days in all):
+   - **CI-1** (4 to 5 days): the isolated worker and runner, isolation per install, the editing setting (request-origin rule, header check, behind-proxy setting, `openchart settings` command), the installer and uninstaller steps, the compose sidecar. Your own indicator files move out of the server process.
+   - **CI-2** (3 to 4 days): the `ta` helpers matching TradingView's definitions, new output kinds (histogram, area, fill, levels, markers, background), lookahead and warmup checks, `docs/custom-indicators.md` with examples and a Pine cheat sheet.
+   - **CI-3** (2 days): indicator instances per chart on the server (D1), with migration from `localStorage`, the menu's Built-in and Custom sections, deleting a definition that is in use.
+   - **CI-4** (3 days): the browser editor (CodeMirror), New/Edit/Duplicate/Rename/Delete/Import/Export, Save and Run with live preview, versions.
+   - **CI-5** (1 to 1.5 days): the cache and forming-bar updates, measured against the design's targets.
+2. **Storage steps 2 and later**, as decided:
+   - **tick retention:** 30 days by default (7/30/90 days, 1 year, forever, off);
+   - **M1 depth:** 2 years by default, with 3 months and 1 year as choices;
+   - **`purge`** runs VACUUM by default (`--no-vacuum` to skip);
+   - **logs:** access log off, 5 rotated service logs kept, compose `max-size 10m` / `max-file 3`.
+3. **5-second candles and bar replay**, as separate milestones. 5s candles use the spread/offsets layout and are kept 1 year by default.
+4. **More drawing tools:** rectangles, Fibonacci, channels, text labels (SPEC section 10).
+5. **More indicators,** indicator alerts, multi-timeframe indicators (deferred by the owner).
+6. **Multi-source providers:** MT5, cTrader. Dukascopy is opt-in, for personal installs only, never bundled or hosted; revisit it with this item.
+7. **Later (SPEC section 13):** backtester, paper trading, economic calendar, webhook notifier.
+
+## Housekeeping
+
+- **Merged branches still present locally:** `data-folder-lock`, `fixes-after-m8`, `m0-scaffolding` to `m9-second-instrument`, `oanda-request-errors`, `storage-1-candle-format`, and `release-0.1.0` once merged.
+  - Delete them locally and on GitHub when convenient.
+  - Remove their worktrees with `git worktree remove` (see `LOCAL-NOTES.md`).
+- **Note on the lock file:** `server.lock` stays in the data folder by design; the lock on it is what counts. So "is the server stopped?" means:
+  - nothing listening on the port;
+  - no `openchart run` process;
+  - no `-wal`/`-shm` files next to the database.
+
+  Not "no lock file". `migrate` refuses (exit code 4) while it is held.
