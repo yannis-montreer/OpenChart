@@ -1,7 +1,7 @@
 # Roadmap
 
 What is merged, what is parked on a branch, and what comes next. Decisions behind each
-item are in `docs/decisions.md`. Updated 2026-10-15.
+item are in `docs/decisions.md`. Updated 2026-10-16.
 
 ## Merged into main
 
@@ -21,16 +21,15 @@ item are in `docs/decisions.md`. Updated 2026-10-15.
 | Storage step 1: integer prices and series keys (migration 0007), 57% smaller, applied to the owner's data | #13 |
 | Data-folder lock: commands that write refuse while a server runs; the installer stops the service first (tested in CI) | #14 |
 | v0.1.0: version, release notes, draft release from the notes file | #15 |
+| Handoff: CLAUDE.md, this roadmap, local notes kept out of git | #16 |
+| Custom indicators CI-1: your indicator files run in an isolated worker (AppContainer for the service, compose sidecar, restricted token or a job-limited process below the minimum, with a notice), the D2 editing gate and `openchart settings`, `openchart sandbox`, installer and uninstaller sandbox steps, CI as LocalSystem. Design, CI-0 report and CI-1 plan in `docs/` | #17 |
+| Custom indicators CI-2 step (a): the `ta` helper library, 34 helpers matching TradingView's definitions (averages, series, oscillators, volatility, windows, pivots), each with a no-lookahead test and loop references; pivot and `highestbars` ties and `rising`/`falling` checked in TradingView. Warmup per helper in `docs/indicators.md` | #19 |
+| Tests on one fixed clock (`tests/clock.py`): removes the time-of-day failure that broke every Windows job of #18 (a run crossing 17:00 New York) and seven failures on a Saturday or a Sunday before the open; a regression test runs the time-sensitive tests at moments around the breaks and the weekly close and open | #20 |
 
 **v0.1.0 is released as a pre-release** (owner, 2026-10-15).
 
 ## Parked on branches (not merged)
 
-- **`custom-indicators`** (local, not pushed): custom indicators written in Python. Main merged in on 2026-10-15; **CI-1 is on it**, waiting for the owner's review.
-  - `docs/custom-indicators-design.md`: the approved design. Decisions D1 to D7 are at its top. D2 is the request-origin rule for browser editing; D7 (a) means no custom code on a service install without its AppContainer.
-  - `docs/ci0-spike-report.md`: the CI-0 spike, final. **GO** for the Windows service (AppContainer + job object + private desktop, proven as LocalSystem) and for Docker (sidecar container). The source install is a weaker mode with browser editing always off.
-  - `docs/ci1-plan.md`: the approved CI-1 plan (files, tests, installer steps, upgrade from M8, rollback).
-  - `tools/ci0_spike/` and `.github/workflows/ci0-spike.yml`: spike code, to be replaced by CI-1.
 - **`storage-review`** (local, not pushed): the storage analysis the owner decided from.
   - `docs/storage-review.md`: layouts, retention, logs, replay, 5s candles, Dukascopy, cold storage.
   - `docs/hosting-notes.md`: what multi-user hosting would need.
@@ -41,9 +40,13 @@ item are in `docs/decisions.md`. Updated 2026-10-15.
 
 In the owner's order. Each item is one branch from main and stops for review.
 
-1. **Custom indicators**, CI-1 to CI-5 (`docs/ci1-plan.md`; about 13 to 16 days in all):
-   - **CI-1** (4 to 5 days): the isolated worker and runner, isolation per install, the editing setting (request-origin rule, header check, behind-proxy setting, `openchart settings` command), the installer and uninstaller steps, the compose sidecar. Your own indicator files move out of the server process.
-   - **CI-2** (3 to 4 days): the `ta` helpers matching TradingView's definitions, new output kinds (histogram, area, fill, levels, markers, background), lookahead and warmup checks, `docs/custom-indicators.md` with examples and a Pine cheat sheet.
+1. **Custom indicators**, CI-2 to CI-5 (design: `docs/custom-indicators-design.md`). CI-1 is merged (#17), and so is step (a) of CI-2 (#19).
+   - **CI-2, steps (b) to (e) (next)** (the rest of its 3 to 4 days), one reviewable branch each:
+     - **(b)** the new input and output kinds with schema validation: `String` input, `info`, long column names, and the histogram, area, fill, level, marker and background declarations;
+     - **(c)** the save-time lookahead and warmup checks (`cum` will be reported by the warmup check, by design);
+     - **(d)** drawing the new output kinds in the chart;
+     - **(e)** `docs/custom-indicators.md` with the four examples and the Pine cheat sheet.
+   - **To check in TradingView** (inferred so far, in `docs/decisions.md`): `pivotlow` ties and pivots with several equal bars on the left, `rising`/`falling` for n other than 2, and `rsi` on a window where nothing moved (100).
    - **CI-3** (2 days): indicator instances per chart on the server (D1), with migration from `localStorage`, the menu's Built-in and Custom sections, deleting a definition that is in use.
    - **CI-4** (3 days): the browser editor (CodeMirror), New/Edit/Duplicate/Rename/Delete/Import/Export, Save and Run with live preview, versions.
    - **CI-5** (1 to 1.5 days): the cache and forming-bar updates, measured against the design's targets.
@@ -60,7 +63,7 @@ In the owner's order. Each item is one branch from main and stops for review.
 
 ## Housekeeping
 
-- **Merged branches still present locally:** `data-folder-lock`, `fixes-after-m8`, `m0-scaffolding` to `m9-second-instrument`, `oanda-request-errors`, `storage-1-candle-format`, and `release-0.1.0` once merged.
+- **Merged branches still present locally:** `data-folder-lock`, `fixes-after-m8`, `m0-scaffolding` to `m9-second-instrument`, `oanda-request-errors`, `storage-1-candle-format`, `release-0.1.0`, `handoff` and `custom-indicators`.
   - Delete them locally and on GitHub when convenient.
   - Remove their worktrees with `git worktree remove` (see `LOCAL-NOTES.md`).
 - **Note on the lock file:** `server.lock` stays in the data folder by design; the lock on it is what counts. So "is the server stopped?" means:
