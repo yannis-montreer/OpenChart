@@ -304,7 +304,9 @@ def plan(limits: Limits) -> Plan:
     if os.name == "nt":
         from openchart.indicators.worker import windows
 
-        if windows.running_as_system():
+        # A service install: LocalSystem, or one the installer recorded a sandbox for. It
+        # gets the AppContainer or no custom code at all (D7 a); never a fallback.
+        if windows.running_as_system() or os.environ.get(SANDBOX_SID_ENV, "").strip():
             if not frozen():
                 return Plan(
                     [],
@@ -323,6 +325,11 @@ def plan(limits: Limits) -> Plan:
                     [], f"{SANDBOX_SID_ENV} does not match the sandbox: rerun the installer"
                 )
             return Plan([WindowsLauncher("appcontainer", limits, private_desktop=True)])
+        if windows.in_session_zero():
+            # Not a service, but in session 0 (a CI runner): the restricted token cannot
+            # start a worker there, even on a desktop of its own (CI-0 as SYSTEM; CI-1 on
+            # GitHub's runner). The job-limited process: below the minimum, with the notice.
+            return Plan([WindowsLauncher("plain", limits)])
         # A source install: Low integrity. A frozen build cannot start at Low outside an
         # AppContainer (finding 9), so it keeps the server's level.
         return Plan(

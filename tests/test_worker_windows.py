@@ -23,6 +23,7 @@ import contextlib
 import ctypes
 import hashlib
 import shutil
+import socket
 import subprocess
 import sys
 import sysconfig
@@ -55,15 +56,26 @@ def script(body: str = "    pass"):
     return hashlib.sha256(text.encode()).hexdigest(), "s.py", text
 
 
-async def restricted(timeout_s=1.0, memory_mb=512):
+# In session 0 (GitHub's runner, like a service) the restricted token cannot start a
+# worker even on a desktop of its own (CI-0 as SYSTEM, CI-1 on the runner). The job
+# object's limits and the audit hook are the same for the plain worker, so those tests run
+# there with it; the tests of the restricted identity itself run in interactive sessions.
+SESSION_ZERO = windows.in_session_zero()
+JOB_IDENTITY = "plain" if SESSION_ZERO else "restricted"
+interactive_only = pytest.mark.skipif(
+    SESSION_ZERO, reason="the restricted token cannot start a worker in session 0"
+)
+
+
+async def job_worker(timeout_s=1.0, memory_mb=512):
     limits = Limits(timeout_s=timeout_s, memory_mb=memory_mb)
-    runner = IndicatorRunner(WindowsLauncher("restricted", limits), limits)
+    runner = IndicatorRunner(WindowsLauncher(JOB_IDENTITY, limits), limits)
     await runner.start()
     return runner
 
 
 async def test_the_memory_limit_raises_memory_error_and_the_worker_keeps_answering():
-    runner = await restricted(timeout_s=10, memory_mb=512)
+    runner = await job_worker(timeout_s=10, memory_mb=512)
     try:
         with pytest.raises(ScriptFailed) as failed:
             await runner.compute(*script("    x = bytearray(2 * 2**30)"), {}, BARS)
@@ -78,7 +90,7 @@ async def test_the_memory_limit_raises_memory_error_and_the_worker_keeps_answeri
     "body", ["    while True:\n        pass", "    import time\n    time.sleep(3600)"]
 )
 async def test_a_hang_or_a_sleep_is_killed_at_the_deadline(body):
-    runner = await restricted(timeout_s=1.0)
+    runner = await job_worker(timeout_s=1.0)
     try:
         t = time.perf_counter()
         with pytest.raises(ScriptFailed) as failed:
@@ -89,6 +101,7 @@ async def test_a_hang_or_a_sleep_is_killed_at_the_deadline(body):
         await runner.stop()
 
 
+@interactive_only
 async def test_restricted_probes(tmp_path):
     """Below the minimum, and the notice must stay honest: reads are allowed."""
     data = tmp_path / "data"
@@ -119,7 +132,7 @@ async def test_restricted_probes(tmp_path):
 
 
 async def test_the_audit_hook_refuses_files_and_sockets_with_a_message():
-    runner = await restricted(timeout_s=5)
+    runner = await job_worker(timeout_s=5)
     try:
         for body, words in (
             ("    open(r'C:\\Windows\\win.ini').read()", "cannot open files"),
@@ -143,7 +156,7 @@ def test_the_worker_dies_with_the_server(tmp_path):
         "from openchart.indicators.worker.isolation import WindowsLauncher\n"
         "from openchart.indicators.worker.runner import IndicatorRunner, Limits\n"
         "async def main():\n"
-        "    r = IndicatorRunner(WindowsLauncher('restricted', Limits()), Limits())\n"
+        f"    r = IndicatorRunner(WindowsLauncher({JOB_IDENTITY!r}, Limits()), Limits())\n"
         "    out = await r.start()\n"
         "    print(out['hello']['pid'], flush=True)\n"
         "    await asyncio.sleep(3600)\n"
@@ -185,7 +198,7 @@ async def test_a_worker_that_dies_before_it_is_ready_reports_its_exit_code(tmp_p
         "-c",
         "import sys; sys.stderr.write('no luck'); sys.exit(7)",
     ]
-    launcher = WindowsLauncher("restricted", limits, argv=argv, cwd=str(Path(argv[0]).parent))
+    launcher = WindowsLauncher(JOB_IDENTITY, limits, argv=argv, cwd=str(Path(argv[0]).parent))
     runner, iso = await start_worker(tmp_path, limits, [launcher])
     assert runner is None and iso.level == "unavailable"
     assert "exit code 0x00000007" in iso.reason and "no luck" in iso.reason
@@ -287,13 +300,21 @@ async def test_appcontainer_probes_against_decoys(tmp_path):
         os.environ["OPENCHART_SECRET_KEY_FILE"] = str(tmp_path / ".env")  # a key file to probe
         try:
             fresh = IndicatorRunner(launcher, limits)
-            targets = isolation.probe_targets(data, 9, "appcontainer")
+            # A port that answers (as in CI-0 and in the server): "denied" then means the
+            # container was stopped, not that nobody listened.
+            listener = isolation._Listener()
+            with socket.create_connection(("127.0.0.1", listener.port), timeout=2):
+                pass  # reachable from outside the container
+            targets = isolation.probe_targets(data, listener.port, "appcontainer")
             targets["read"]["read a .env in a user folder"] = str(tmp_path / ".env")
             targets["list"]["list the user profile"] = os.environ["USERPROFILE"]
             targets["credential"] = {"Credential Manager decoy": CREDENTIAL}
             targets["registry"] = {"registry decoy (HKCU)": REGISTRY}
             targets["write"] = {"write into the data folder": str(data)}
-            started = await fresh.start(targets)
+            try:
+                started = await fresh.start(targets)
+            finally:
+                listener.close()
         finally:
             del os.environ["OPENCHART_SECRET_KEY_FILE"]
         try:
@@ -364,6 +385,7 @@ def delete_credential(target: str) -> None:
     advapi.CredDeleteW(target, 1, 0)
 
 
+@interactive_only
 async def test_a_release_zip_run_by_hand_gets_the_weaker_isolation_notice(monkeypatch, tmp_path):
     """Owner's decision 1: not the service, so the restricted token at the build's own
     integrity (PyInstaller cannot start at Low), below the minimum, with the notice."""
@@ -387,6 +409,7 @@ async def test_a_release_zip_run_by_hand_gets_the_weaker_isolation_notice(monkey
         await runner.stop()
 
 
+@interactive_only
 async def test_the_restricted_worker_on_a_desktop_of_its_own(tmp_path):
     """What a server in session 0 does (a service, GitHub's Windows runner, where the
     restricted worker died with STATUS_DLL_INIT_FAILED on the session's own desktop)."""
@@ -400,3 +423,117 @@ async def test_the_restricted_worker_on_a_desktop_of_its_own(tmp_path):
         assert (await runner.compute(*script(), {}, BARS))["out"].size == 10
     finally:
         await runner.stop()
+
+
+# D7 (a): a service install runs custom code in the AppContainer or not at all ------------
+
+
+def service(monkeypatch, *, system=True, frozen_build=True, sid="real"):
+    monkeypatch.setattr(windows, "running_as_system", lambda: system)
+    monkeypatch.setattr(isolation, "frozen", lambda: frozen_build)
+    if sid == "real":
+        sid = windows.container_sid()
+    if sid:
+        monkeypatch.setenv(isolation.SANDBOX_SID_ENV, sid)
+    else:
+        monkeypatch.delenv(isolation.SANDBOX_SID_ENV, raising=False)
+
+
+def test_a_service_install_gets_the_appcontainer_and_nothing_else(monkeypatch):
+    service(monkeypatch)
+    launchers = isolation.plan(Limits()).launchers
+    assert [x.identity for x in launchers] == ["appcontainer"]
+    assert launchers[0].private_desktop
+
+
+@pytest.mark.parametrize(
+    ("system", "frozen_build", "sid", "why"),
+    [
+        (True, False, "real", "need the release build"),  # a service on a source checkout
+        (True, True, "", "not set up"),  # the installer's sandbox step did not run or failed
+        (True, True, "S-1-15-2-1-2-3-4-5-6-7", "does not match"),
+        (False, True, "real", None),  # installer-made but not LocalSystem: still a service
+    ],
+)
+def test_a_service_install_without_its_sandbox_has_no_fallback(
+    monkeypatch, system, frozen_build, sid, why
+):
+    service(monkeypatch, system=system, frozen_build=frozen_build, sid=sid)
+    decided = isolation.plan(Limits())
+    if why is None:
+        assert [x.identity for x in decided.launchers] == ["appcontainer"]
+    else:
+        assert decided.launchers == [] and why in decided.unavailable
+
+
+def failing_appcontainer(monkeypatch):
+    """The AppContainer cannot be created: record every start, create nothing."""
+    started = []
+
+    def fake_start(argv, *, identity, **kwargs):
+        started.append(identity)
+        raise OSError(5, "CreateProcess: Access is denied")
+
+    monkeypatch.setattr(windows, "start", fake_start)
+    monkeypatch.setattr(WindowsLauncher, "container", lambda self: None)
+    monkeypatch.setattr(WindowsLauncher, "profile_folder", lambda self: None)
+    return started
+
+
+async def test_when_the_appcontainer_cannot_start_a_service_runs_no_custom_code(
+    monkeypatch, tmp_path
+):
+    from openchart.indicators._custom import CustomIndicators
+
+    service(monkeypatch)
+    started = failing_appcontainer(monkeypatch)
+    runner, iso = await start_worker(tmp_path, Limits())
+    assert runner is None and iso.level == "unavailable" and not iso.runs_custom_code
+    assert set(started) == {"appcontainer"}  # never a restricted or plain worker
+    assert "Access is denied" in iso.reason
+    assert iso.notice.startswith("custom indicators do not run on this install")
+    # The Custom section says why.
+    folder = tmp_path / "indicators"
+    folder.mkdir()
+    (folder / "mine.py").write_text("NAME = 'Mine'\n")
+    registry = CustomIndicators(folder)
+    registry.worker_ready(None, iso)
+    d = await registry.get("mine")
+    assert d.status == "not_run" and d.reason == iso.notice
+
+
+def test_the_catalog_shows_why_a_service_runs_no_custom_code(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+
+    from openchart.api.app import create_app
+    from tests.conftest import Harness, run_setup
+
+    service(monkeypatch)
+    started = failing_appcontainer(monkeypatch)
+    harness = Harness(tmp_path)
+    harness.server._indicator_worker = True  # the real decision, through plan()
+    (tmp_path / "indicators").mkdir()
+    (tmp_path / "indicators" / "mine.py").write_text("NAME = 'Mine'\n")
+    harness.seed_candles()
+    with TestClient(create_app(harness.server)) as c:
+        c.server = harness.server
+        assert run_setup(c).status_code == 200
+        end = time.monotonic() + 30
+        while harness.server.isolation is None and time.monotonic() < end:
+            time.sleep(0.1)
+        body = c.get("/api/indicators").json()
+        mine = {d["id"]: d for d in body["custom"]}["mine"]
+        assert body["isolation"]["level"] == "unavailable"
+        assert body["isolation"]["notice"].startswith("custom indicators do not run")
+        assert mine["status"] == "not_run" and mine["reason"] == body["isolation"]["notice"]
+        assert {"file": "mine.py", "error": mine["reason"]} in body["errors"]
+        assert c.get("/api/indicators/mine", params={"instrument": "XAU_USD"}).status_code == 503
+        assert body["editing"]["allowed"] is False
+    assert set(started) == {"appcontainer"}
+
+
+def test_session_zero_without_a_service_gets_the_plain_worker(monkeypatch):
+    monkeypatch.setattr(windows, "running_as_system", lambda: False)
+    monkeypatch.delenv(isolation.SANDBOX_SID_ENV, raising=False)
+    monkeypatch.setattr(windows, "in_session_zero", lambda: True)
+    assert [x.identity for x in isolation.plan(Limits()).launchers] == ["plain"]

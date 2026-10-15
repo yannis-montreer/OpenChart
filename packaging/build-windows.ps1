@@ -11,7 +11,8 @@
         dist\OpenChart-Viewer-<version>-windows.zip   OpenChart-Viewer.exe
         dist\SHA256SUMS.txt
     Both zips carry LICENSE, NOTICE and THIRD-PARTY-LICENSES.txt. The frozen server is
-    smoke-tested on a temporary data folder and port (no broker credentials).
+    smoke-tested on a temporary data folder and port (no broker credentials;
+    packaging\smoke-windows.ps1).
 
 .EXAMPLE
     .\packaging\build-windows.ps1 -Python .\buildenv\Scripts\python.exe -Nssm C:\tools\nssm-2.24\win64\nssm.exe
@@ -21,7 +22,8 @@ param(
     [string]$Nssm = "",
     [string]$Version = "",
     [string]$WebView2Licence = "",   # LICENSE.txt of the Microsoft.Web.WebView2 NuGet package
-    [int]$SmokePort = 8798
+    [int]$SmokePort = 8798,
+    [switch]$SkipSmoke   # CI runs packaging\smoke-windows.ps1 as a step of its own
 )
 
 $ErrorActionPreference = "Stop"
@@ -99,43 +101,10 @@ foreach ($d in $serverDir, $viewerDir) {
     foreach ($f in "LICENSE", "NOTICE") { Copy-Item (Join-Path $Root $f) (Join-Path $d "$f.txt") }
 }
 
-Step "Smoke test of the frozen server (temporary data folder, port $SmokePort, no broker)"
-$exe = Join-Path $serverDir "openchart\openchart.exe"
-$tmp = Join-Path ([IO.Path]::GetTempPath()) ("openchart-smoke-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
-New-Item -ItemType Directory $tmp | Out-Null
-Run $exe --version
-Run $exe self-test
-Run $exe sandbox check --data-dir $tmp   # the indicator worker of the frozen build, as this user
-$env:OPENCHART_SECRET_KEY = (& $exe secrets new-key).Trim()   # the file store, as in the service
-$log = Join-Path $tmp "server.log"
-$proc = Start-Process $exe -ArgumentList @("run", "--data-dir", "`"$tmp`"", "--port", "$SmokePort") -PassThru -WindowStyle Hidden -RedirectStandardError $log -RedirectStandardOutput (Join-Path $tmp "out.log")
-try {
-    $ok = $false
-    foreach ($i in 1..60) {
-        Start-Sleep -Seconds 1
-        try { if ((Invoke-WebRequest "http://127.0.0.1:$SmokePort/api/health" -UseBasicParsing -TimeoutSec 2).StatusCode -eq 200) { $ok = $true; break } } catch { }
-    }
-    if (-not $ok) { Get-Content $log | Write-Host; throw "The frozen server did not start." }
-    $page = Invoke-WebRequest "http://127.0.0.1:$SmokePort/" -UseBasicParsing
-    if ($page.Content -notmatch "<div id=`"app`"") { throw "The web page is missing from the build." }
-    $setup = Invoke-RestMethod "http://127.0.0.1:$SmokePort/api/setup/status"
-    $logText = Get-Content $log -Raw
-    if ($logText -notmatch "indicators: ema") { throw "The built-in EMA indicator was not loaded." }
-    if ($logText -notmatch "secrets: encrypted file") { throw "The encrypted secrets file was not used." }
-    foreach ($i in 1..30) {
-        if ($logText -match "indicator sandbox: ") { break }
-        Start-Sleep -Seconds 1
-        $logText = Get-Content $log -Raw
-    }
-    $sandbox = [regex]::Match($logText, "indicator sandbox: [^\r\n]*").Value
-    # Run by hand, the release build is below the minimum isolation and must say so.
-    if ($sandbox -notmatch "ready \(restricted token\); weaker isolation") { throw "The indicator worker did not start, or without its notice: $sandbox" }
-    Write-Host "   health ok, web page served, setup required: $($setup.setup_required), EMA loaded, secrets file used, indicator worker ready" -ForegroundColor Green
-} finally {
-    Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-    Remove-Item Env:OPENCHART_SECRET_KEY -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 1
-    Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+if ($SkipSmoke) {
+    Write-Host "   -SkipSmoke: run packaging\smoke-windows.ps1 -ServerDir $serverDir yourself." -ForegroundColor Yellow
+} else {
+    & (Join-Path $PSScriptRoot "smoke-windows.ps1") -ServerDir $serverDir -Port $SmokePort
 }
 foreach ($f in "LICENSE.txt", "NOTICE.txt", "THIRD-PARTY-LICENSES.txt") {
     foreach ($d in $serverDir, $viewerDir) { if (-not (Test-Path (Join-Path $d $f))) { throw "$f missing in $d" } }

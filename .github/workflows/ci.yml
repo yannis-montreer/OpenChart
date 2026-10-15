@@ -45,7 +45,8 @@ jobs:
         run: cat "$RUNNER_TEMP/appcontainer-probes.txt" || echo "no probe table (the test did not run)"
 
   windows-package:
-    # The release build (server folder and viewer), smoke-tested; then the service installer on
+    # The release build (server folder and viewer), then its smoke test and, after the
+    # build alone (a failed smoke test never hides it), the service installer on
     # the runner, installed and reinstalled over the running service, with the indicator
     # sandbox checked as LocalSystem (AppContainer, probes, private desktop, uninstall
     # proof). Nothing is kept.
@@ -65,10 +66,16 @@ jobs:
         with:
           python-version: "3.13"
       - run: python -m pip install . pyinstaller pywebview packaging
-      - name: Build and smoke-test
+      - name: Build
+        id: build
         shell: pwsh
-        run: .\packaging\build-windows.ps1 -Python python
+        run: .\packaging\build-windows.ps1 -Python python -SkipSmoke
+      - name: Smoke test of the frozen server
+        shell: pwsh
+        run: .\packaging\smoke-windows.ps1 -ServerDir (Get-ChildItem dist -Directory -Filter "OpenChart-Server-*-windows").FullName
+      # The steps below need only the build: a failed smoke test must not hide them.
       - name: Licence files in both zips
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: pwsh
         run: |
           foreach ($zip in Get-ChildItem dist\*.zip) {
@@ -78,6 +85,8 @@ jobs:
             }
           }
       - name: NSSM 2.24 (checksum verified)
+        id: nssm
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: pwsh
         env:
           NSSM_URL: https://nssm.cc/release/nssm-2.24.zip
@@ -90,6 +99,7 @@ jobs:
           if ($hash -ne $env:NSSM_SHA256) { throw "nssm.zip has SHA-256 $hash, expected $env:NSSM_SHA256" }
           Expand-Archive nssm.zip -DestinationPath nssm
       - name: Install the service, then reinstall over it while it runs
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.nssm.outcome == 'success' }}
         shell: pwsh
         run: |
           $release = (Get-ChildItem dist -Directory -Filter "OpenChart-Server-*-windows").FullName

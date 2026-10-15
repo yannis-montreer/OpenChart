@@ -65,7 +65,11 @@ def main():
         if cmd == "arm":
             head = {"armed": True}
         elif cmd == "probe":
-            head = {"probes": {"environment": {"result": "clean", "detail": ""}}}
+            # A plain process reads whatever it is asked to: "allowed".
+            probes = {"environment": {"result": "clean", "detail": ""}}
+            for label in (req.get("targets") or {}).get("read") or {}:
+                probes[label] = {"result": "allowed", "detail": "fake"}
+            head = {"probes": probes}
         else:
             if req.get("source") is not None:
                 sources[req["hash"]] = req["source"]

@@ -249,3 +249,19 @@ async def test_the_deadline_still_applies_to_every_job(custom):
     with pytest.raises(ScriptFailed) as failed:
         await registry.compute(d, FRAME, {})
     assert failed.value.kind == "timeout" and time.perf_counter() - t < 2
+
+
+async def test_an_isolated_level_that_fails_its_probes_never_falls_back(tmp_path):
+    """D7 (a): when the AppContainer (or the sidecar) does not meet the minimum, custom
+    code does not run at all; the launchers after it are never started."""
+    from openchart.indicators.worker.isolation import start_worker
+
+    class Isolated(FakeLauncher):
+        level = "appcontainer"
+
+    isolated, weaker = Isolated(), FakeLauncher()
+    (tmp_path / "openchart.db").write_bytes(b"x")
+    runner, iso = await start_worker(tmp_path, Limits(), [isolated, weaker])
+    assert runner is None and iso.level == "unavailable"
+    assert "could read the database" in iso.reason
+    assert isolated.started == 1 and weaker.started == 0
