@@ -462,49 +462,33 @@ async def _try(
     launcher: Any, data_dir: Path, limits: Limits
 ) -> tuple[IndicatorRunner | None, Isolation]:
     notes: list[str] = []
-    if getattr(launcher, "identity", None) == "appcontainer":
-        notes.append(_restrict_profile(launcher))
+    appcontainer = getattr(launcher, "identity", None) == "appcontainer"
+    if appcontainer:
+        # Finding 2 and the CI-1 investigation: its own folder (also its TEMP) stays
+        # writable; a deny entry for the container is written but does not hold. So it is
+        # treated as writable, emptied before every start and watched while the worker
+        # runs (owner's decision B1).
+        launcher.profile_writes = "emptied"
     runner = IndicatorRunner(launcher, limits)
     listener = _Listener()
     try:
         targets = probe_targets(data_dir, listener.port, launcher.level)
-        if getattr(launcher, "identity", None) == "appcontainer" and (
-            folder := launcher.profile_folder()
-        ):
+        if appcontainer and (folder := launcher.profile_folder()):
             targets["write"] = {"write into its own folder": folder}
         try:
             started = await runner.start(targets)
         except (WorkerUnavailable, OSError) as exc:
-            if launcher.level == "appcontainer" and launcher.profile_writes == "denied":
-                # Finding 2: if it cannot start without writing its folder, let it write
-                # there and empty the folder at each start instead.
-                _allow_profile(launcher)
-                notes.append("its folder is writable again, and emptied at each start")
-                runner = IndicatorRunner(launcher, limits)
-                try:
-                    started = await runner.start(targets)
-                except (WorkerUnavailable, OSError) as exc2:
-                    return None, Isolation("unavailable", False, str(exc2), notes=notes)
-            else:
-                return None, Isolation("unavailable", False, str(exc), notes=notes)
+            return None, Isolation("unavailable", False, str(exc), notes=notes)
     finally:
         listener.close()
     probes = started["probes"] or {}
-    if probes.get("write into its own folder", {}).get("result") == "allowed":
-        # The removal of that write did not hold (CI-1): say so, and from now on empty the
-        # folder before each start and cap it while the worker runs (owner's decision B1).
-        launcher.profile_writes = "emptied"
-        notes[:] = [n for n in notes if n != "writes to its own folder removed"]
+    if appcontainer:
+        seen = probes.get("write into its own folder", {}).get("result", "not probed")
         notes.append(
-            f"its own folder is writable: emptied at each worker start and capped at "
-            f"{limits.folder_mb} MB while it runs"
+            "its own folder is writable: all scripts of one worker share it, and what they "
+            "write stays there until the folder is emptied at the next worker start; "
+            f"capped at {limits.folder_mb} MB while the worker runs (write probe: {seen})"
         )
-        await runner.stop()  # this worker started before the watch: start a watched one
-        runner = IndicatorRunner(launcher, limits)
-        try:
-            await runner.start()
-        except (WorkerUnavailable, OSError) as exc:
-            return None, Isolation("unavailable", False, str(exc), probes, notes)
     met, why = judge(launcher.level, probes)
     if launcher.level in MINIMUM_LEVELS and not met:
         await runner.stop()
@@ -536,28 +520,3 @@ _LEVEL_NAMES = {
     "restricted": "restricted token",
     "process-only": "process only",
 }
-
-
-def _restrict_profile(launcher: WindowsLauncher) -> str:
-    try:
-        folder = launcher.profile_folder()
-        if not folder:
-            launcher.profile_writes = "unchanged"
-            return "the container has no folder of its own yet"
-        from openchart.indicators.worker import windows
-
-        windows.deny_profile_writes(folder, launcher.sid_text())
-        launcher.profile_writes = "denied"
-        return "writes to its own folder removed"
-    except OSError as exc:
-        launcher.profile_writes = "emptied"
-        return f"could not remove writes to its own folder ({exc}); emptied at each start"
-
-
-def _allow_profile(launcher: WindowsLauncher) -> None:
-    from openchart.indicators.worker import windows
-
-    folder = launcher.profile_folder()
-    if folder:
-        windows.allow_profile_writes(folder, launcher.sid_text())
-    launcher.profile_writes = "emptied"

@@ -360,24 +360,6 @@ def profile_folder(sid_text: str) -> str | None:
         CoTaskMemFree(C.cast(out, PVOID))
 
 
-def _icacls(*args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["icacls", *args], capture_output=True, text=True, errors="replace", check=False
-    )
-
-
-def deny_profile_writes(folder: str, sid_text: str) -> None:
-    """Finding 2: the one write an AppContainer has is its own folder; a script could fill
-    the disk there. The worker does not need it."""
-    r = _icacls(folder, "/deny", f"*{sid_text}:(OI)(CI)(W,D,DC)", "/C", "/Q")
-    if r.returncode:
-        raise OSError(r.returncode, f"icacls {folder}: {(r.stdout + r.stderr).strip()}")
-
-
-def allow_profile_writes(folder: str, sid_text: str) -> None:
-    _icacls(folder, "/remove:d", f"*{sid_text}", "/C", "/Q")
-
-
 def restricted_token(*, low: bool) -> HANDLE:
     """This process's token without privileges, Administrators and SYSTEM deny-only, and
     with `low`, at Low integrity."""

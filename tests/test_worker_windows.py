@@ -331,8 +331,7 @@ async def test_appcontainer_probes_against_decoys(tmp_path):
             targets["credential"] = {"Credential Manager decoy": CREDENTIAL}
             targets["registry"] = {"registry decoy (HKCU)": REGISTRY}
             targets["write"] = {"write into the data folder": str(data)}
-            # Finding 2, as the server does it: writes to its own folder removed.
-            profile_note = isolation._restrict_profile(launcher)
+            # Its own folder: probed and reported (writable: docs/custom-indicators.md).
             own = launcher.profile_folder()
             assert own, "the test container has no folder of its own"
             targets["write"]["write into its own folder"] = own
@@ -349,7 +348,6 @@ async def test_appcontainer_probes_against_decoys(tmp_path):
                 rows = [
                     f"{k}: {v.get('result')} ({v.get('detail', '')})" for k, v in probes.items()
                 ]
-                rows.append(f"(own folder: {profile_note})")
                 (Path(report) / "appcontainer-probes.txt").write_text(
                     "".join(r + "\n" for r in rows)
                 )
@@ -364,11 +362,10 @@ async def test_appcontainer_probes_against_decoys(tmp_path):
                 "write into the data folder",
             ):
                 assert probes[name]["result"] != "allowed", (name, probes[name])
-            # Its own folder: the probe runs and is reported (the table above). Where the
-            # removal does not hold, the server switches to B1 (emptied at each start,
-            # capped while it runs: tests/test_worker_runner.py); not a failure here.
+            # Its own folder is writable (CI-1 investigation): the probe runs and is
+            # reported (the table above); the server empties and caps it (B1,
+            # tests/test_worker_runner.py).
             assert probes["write into its own folder"]["result"] in ("allowed", "denied", "error")
-            assert profile_note == "writes to its own folder removed"
             assert (await fresh.compute(*script(), {}, BARS))["out"].size == 10
         finally:
             await fresh.stop()
@@ -567,10 +564,15 @@ def test_the_catalog_shows_why_a_service_runs_no_custom_code(monkeypatch, tmp_pa
 
 
 def dying(code: int, limits: Limits) -> WindowsLauncher:
-    """A "restricted" worker that ends at start with this exit code."""
+    """The restricted launcher, ending at start with this exit code. Started with the plain
+    identity: where a restricted process cannot start at all (GitHub's runner), it would
+    die with STATUS_DLL_INIT_FAILED before reaching the given code (found in CI-1). The
+    decision under test only reads the launcher's level and the exit code."""
     exit_process = f"import ctypes; ctypes.windll.kernel32.ExitProcess(ctypes.c_uint({code}))"
     argv = [isolation.base_python(), "-I", "-c", exit_process]
-    return WindowsLauncher("restricted", limits, argv=argv, cwd=str(Path(argv[0]).parent))
+    launcher = WindowsLauncher("plain", limits, argv=argv, cwd=str(Path(argv[0]).parent))
+    launcher.level = "restricted"
+    return launcher
 
 
 class Counting(WindowsLauncher):
