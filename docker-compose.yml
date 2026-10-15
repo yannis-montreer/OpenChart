@@ -9,6 +9,10 @@
 # Start: docker compose up -d. First visit: the setup page asks for a setup code, printed
 # by: docker compose logs openchart. Data: the "openchart-data" volume (back it up with
 # docker compose exec openchart openchart backup; the zip lands in /data/backups).
+#
+# Custom indicators run in the second container, indicator-worker (docs/custom-indicators.md):
+# another user, no network, no data volume, a read-only root, its own limits. The two share
+# only a small in-memory folder for the worker's socket.
 services:
   openchart:
     build: .
@@ -20,12 +24,35 @@ services:
       # Encrypts the tokens saved in the web page (/data/secrets.enc). Keep it: without it
       # they cannot be read and must be entered again.
       OPENCHART_SECRET_KEY: ${OPENCHART_SECRET_KEY:?set OPENCHART_SECRET_KEY in .env (see the comment at the top of docker-compose.yml)}
+      OPENCHART_WORKER_SOCKET: /run/ocw/sock
       # Optional: credentials from the environment instead of the setup page.
       # OPENCHART_OANDA_ENV: practice
       # OPENCHART_OANDA_ACCOUNT_ID: ${OPENCHART_OANDA_ACCOUNT_ID:-}
       # OPENCHART_OANDA_TOKEN: ${OPENCHART_OANDA_TOKEN:-}
     volumes:
       - openchart-data:/data
+      - worker-socket:/run/ocw
+    depends_on: [indicator-worker]
+
+  indicator-worker:
+    image: openchart:local
+    restart: unless-stopped
+    command: ["openchart", "indicator-worker", "--listen", "/run/ocw/sock"]
+    user: "10002"  # not the server's 10001
+    working_dir: /  # the image's /data is the server's only (mode 700)
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: 1.0
+    pids_limit: 32
+    volumes:
+      - worker-socket:/run/ocw  # the socket only, never the data volume
 
 volumes:
   openchart-data:
+  worker-socket:
+    driver: local
+    driver_opts: { type: tmpfs, device: tmpfs, o: "mode=1777,size=1m" }

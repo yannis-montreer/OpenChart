@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import shutil
@@ -602,6 +603,197 @@ async def _secrets_to_file(config: Config, args: argparse.Namespace) -> int:
     return 0
 
 
+SETTINGS_BUSY_SECONDS = 2.0  # how long `settings set` waits for a busy database
+
+
+class SettingsRefused(RuntimeError):
+    pass
+
+
+def _open_for_settings(db_path: Path, *, write: bool) -> sqlite3.Connection:
+    """The database for `settings get/set`, which run beside a server and never take the
+    data folder's lock: no upgrade (a pending migration refuses), a short busy timeout (a
+    locked database fails; it never waits for long)."""
+    from openchart.store.migrate import discover_migrations
+
+    conn = sqlite3.connect(
+        f"{db_path.resolve().as_uri()}?mode={'rw' if write else 'ro'}",
+        uri=True,
+        timeout=SETTINGS_BUSY_SECONDS,
+        isolation_level=None,
+    )
+    try:
+        conn.execute(f"PRAGMA busy_timeout={int(SETTINGS_BUSY_SECONDS * 1000)}")
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        done = (
+            {r[0] for r in conn.execute("SELECT version FROM schema_migrations")}
+            if "schema_migrations" in tables
+            else set()
+        )
+        pending = [m for m in discover_migrations() if m.version not in done]
+        if pending:
+            names = ", ".join(f"{m.version:04d} {m.name}" for m in pending)
+            raise SettingsRefused(
+                f"The database needs upgrading ({names}). Stop the server, run "
+                "`openchart migrate`, start it, then try again. Nothing was changed."
+            )
+    except BaseException:
+        conn.close()
+        raise
+    return conn
+
+
+def _shown(value: object) -> str:
+    return value if isinstance(value, str) else ("on" if value else "off")
+
+
+async def _cmd_settings(config: Config, args: argparse.Namespace) -> int:
+    """`openchart settings get|set`: the settings only the server's own machine may change
+    (decision D2). The one command that writes beside a running server: one row, in its
+    own short transaction, without the data folder's lock (docs/decisions.md)."""
+    from openchart.settings import LOCAL_SETTINGS
+
+    config = _data_dir(config, args)
+    if not config.db_path.is_file():
+        print(f"No database in {config.data_dir}.", file=sys.stderr)
+        return 1
+    if args.key is not None and args.key not in LOCAL_SETTINGS:
+        print(
+            f"Unknown setting {args.key!r}; these can be set here: {', '.join(LOCAL_SETTINGS)}",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        if args.action == "set":
+            if args.key is None or args.value is None:
+                print("Usage: openchart settings set <key> <value>", file=sys.stderr)
+                return 2
+            column, parse, _default = LOCAL_SETTINGS[args.key]
+            try:
+                value = parse(args.value)
+            except ValueError as exc:
+                print(f"{exc}. Nothing was changed.", file=sys.stderr)
+                return 2
+            conn = _open_for_settings(config.db_path, write=True)
+            try:
+                conn.execute(
+                    "INSERT INTO settings (key, value) VALUES (?, ?)"
+                    " ON CONFLICT (key) DO UPDATE SET value=excluded.value",
+                    (column, json.dumps(value)),
+                )
+            finally:
+                conn.close()
+            print(f"{args.key} is now {_shown(value)}.")
+            print("A running server uses it from its next request: no restart needed.")
+            if args.key == "indicator-editing" and value != "off":
+                print(
+                    "Editing still needs the minimum isolation (the Indicators menu says "
+                    "whether this install has it)."
+                )
+            return 0
+        conn = _open_for_settings(config.db_path, write=False)
+        try:
+            rows = dict(conn.execute("SELECT key, value FROM settings").fetchall())
+        finally:
+            conn.close()
+        for name, (column, _parse, default) in LOCAL_SETTINGS.items():
+            if args.key not in (None, name):
+                continue
+            stored = column in rows
+            value = json.loads(rows[column]) if stored else default
+            print(f"{name}: {_shown(value)}{'' if stored else ' (default)'}")
+        return 0
+    except SettingsRefused as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except sqlite3.OperationalError as exc:
+        busy = "locked" in str(exc) or "busy" in str(exc)
+        print(
+            f"The database is busy ({exc}); nothing was changed. Try again in a moment."
+            if busy
+            else f"Cannot use the database: {exc}. Nothing was changed.",
+            file=sys.stderr,
+        )
+        return 1
+
+
+async def _cmd_sandbox(config: Config, args: argparse.Namespace) -> int:
+    """The custom-indicator sandbox: `sid` (Windows: the AppContainer's SID, for the
+    installer's grant), `check` (start the worker this install gets, probe it, run a
+    script), `remove` (Windows: delete this account's AppContainer profile)."""
+    if args.action in ("sid", "remove") and os.name != "nt":
+        print("Only on Windows.", file=sys.stderr)
+        return 2
+    if args.action == "sid":
+        from openchart.indicators.worker import windows
+
+        print(windows.container_sid())
+        return 0
+    if args.action == "remove":
+        from openchart.indicators.worker import windows
+
+        hr = windows.delete_profile()
+        if hr < 0 and (hr & 0xFFFF) not in (2, 3, 1168):  # not found: nothing to remove
+            print(f"Could not remove the AppContainer profile: HRESULT {hr & 0xFFFFFFFF:#010x}")
+            return 1
+        print(f"AppContainer profile {windows.CONTAINER_NAME}: removed (or there was none)")
+        return 0
+    return await _sandbox_check(_data_dir(config, args))
+
+
+async def _sandbox_check(config: Config) -> int:
+    import hashlib
+
+    import numpy as np
+
+    from openchart.indicators.worker.isolation import start_worker
+    from openchart.indicators.worker.runner import ScriptFailed
+
+    t = time.perf_counter()
+    runner, isolation = await start_worker(config.data_dir)
+    print(f"Indicator worker: {isolation.level} ({isolation.reason})")
+    for note in isolation.notes:
+        print(f"  note: {note}")
+    for name, probe in isolation.probes.items():
+        print(f"  {name}: {probe.get('result')}  {probe.get('detail', '')}")
+    if runner is None:
+        print("Custom indicators would not run on this install.")
+        return 1
+    try:
+        print(f"  started and probed in {time.perf_counter() - t:.2f} s")
+        digest = hashlib.sha256(_SANDBOX_SCRIPT.encode()).hexdigest()
+        n = 5000
+        bars = {k: np.linspace(100, 101, n) for k in ("o", "h", "l", "c", "v")}
+        bars["ts"] = np.arange(n, dtype="f8") * 60
+        try:
+            await runner.describe(digest, "sandbox_check.py", _SANDBOX_SCRIPT)
+            t = time.perf_counter()
+            out = await runner.compute(digest, "sandbox_check.py", _SANDBOX_SCRIPT, {}, bars)
+            print(f"  a script on {n:,} bars: {(time.perf_counter() - t) * 1000:.1f} ms round trip")
+            assert len(out["avg"]) == n
+        except ScriptFailed as exc:
+            print(f"  the test script failed: {exc}")
+            return 1
+    finally:
+        await runner.stop()
+    minimum = "met" if isolation.minimum_met else "NOT met (browser editing stays off)"
+    print(f"Minimum isolation: {minimum}")
+    return 0
+
+
+_SANDBOX_SCRIPT = """from openchart.indicators import Color, Output, Width, sma
+
+NAME = "Check"
+OVERLAY = True
+PARAMS = [Color("color", "#2962ff"), Width("width", 1)]
+OUTPUTS = [Output("avg", "Avg", color="color", width="width")]
+
+
+def compute(bars, params):
+    return {"avg": sma(bars["c"], 20)}
+"""
+
+
 async def _cmd_self_test(config: Config, args: argparse.Namespace) -> int:
     """Check, offline, that every part this install needs works (a frozen build, Docker)."""
     import tempfile
@@ -659,9 +851,29 @@ async def _cmd_self_test(config: Config, args: argparse.Namespace) -> int:
     def indicators() -> str:
         from openchart.indicators._registry import load_indicators
 
-        registry = load_indicators(None)
+        registry = load_indicators()
         assert registry.indicators and not registry.errors, registry.errors
         return ", ".join(registry.indicators)
+
+    async def worker() -> str:
+        import hashlib
+
+        import numpy as np
+
+        from openchart.indicators.worker.isolation import start_worker
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runner, isolation = await start_worker(Path(tmp))
+            assert runner is not None, isolation.reason
+            try:
+                digest = hashlib.sha256(_SANDBOX_SCRIPT.encode()).hexdigest()
+                bars = {k: np.ones(50) for k in ("ts", "o", "h", "l", "c", "v")}
+                out = await runner.compute(digest, "self_test.py", _SANDBOX_SCRIPT, {}, bars)
+                assert len(out["avg"]) == 50
+            finally:
+                await runner.stop()
+        minimum = "minimum isolation met" if isolation.minimum_met else "below the minimum"
+        return f"{isolation.level}, {minimum}"
 
     def web() -> str:
         from openchart.api.app import WEB_DIR
@@ -677,6 +889,7 @@ async def _cmd_self_test(config: Config, args: argparse.Namespace) -> int:
         ("time zones", timezones),
         ("database", database),
         ("indicators", indicators),
+        ("indicator worker", worker),
         ("web page", web),
     ]
     failed = 0
@@ -707,6 +920,8 @@ COMMANDS = {
     "backup": _cmd_backup,
     "secrets": _cmd_secrets,
     "self-test": _cmd_self_test,
+    "settings": _cmd_settings,
+    "sandbox": _cmd_sandbox,
 }
 
 
@@ -772,10 +987,33 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--data-dir", help="the data folder (default data/, from config)")
     p.add_argument("--key-file", help="to-file: the key file to use or create")
     sub.add_parser("self-test", help="check offline that every part of this install works")
+    p = sub.add_parser(
+        "settings",
+        help="settings only this machine may change (works while the server runs)",
+        description="indicator-editing (auto, on, off): editing custom indicators in a "
+        "browser; behind-proxy (on, off): a reverse proxy is in front of the server.",
+    )
+    p.add_argument("action", choices=["get", "set"])
+    p.add_argument("key", nargs="?", help="indicator-editing or behind-proxy")
+    p.add_argument("value", nargs="?")
+    p.add_argument("--data-dir", help="the data folder (default data/, from config)")
+    p = sub.add_parser("sandbox", help="the custom-indicator sandbox: sid, check, remove")
+    p.add_argument(
+        "action",
+        choices=["sid", "check", "remove"],
+        help="sid: the AppContainer SID (Windows); check: start and probe the worker; "
+        "remove: delete the AppContainer profile of this account (Windows)",
+    )
+    p.add_argument("--data-dir", help="check: the data folder the probes aim at")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["indicator-worker"]:  # the worker itself: nothing of the server
+        from openchart.indicators.worker.child import main as worker_main
+
+        return worker_main(argv[1:])
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command == "secrets" and args.action == "to-file" and not args.key_file:

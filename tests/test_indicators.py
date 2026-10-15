@@ -4,7 +4,6 @@ discovery, and values from the API aligned to the candles of the chart's price t
 import json
 import math
 import random
-import textwrap
 
 import numpy as np
 import pandas as pd
@@ -66,29 +65,13 @@ def test_sources():
     assert got == {"open": 1.0, "hl2": 2.0, "hlc3": 2.0, "ohlc4": 1.75, "hlcc4": 2.0}
 
 
-# Files and discovery
-
-GOOD = """
-from openchart.indicators import Color, Int, Output, Source, Width, sma, source
-
-NAME = "Mid"
-TITLE = "Middle line"
-OVERLAY = False
-PARAMS = [Int("length", 5, min=2), Source(), Color("color", "#ff0000"), Width("width", 2)]
-OUTPUTS = [Output("mid", "Mid", color="color", width="width")]
-
-def compute(bars, params):
-    return {"mid": sma(source(bars, params["source"]), params["length"])}
-"""
-
-
-def write(folder, name, text):
-    (folder / name).write_text(textwrap.dedent(text), encoding="utf-8")
+# The built-in files (yours: tests/test_custom_indicators.py)
 
 
 def test_the_builtin_ema_and_its_schema():
-    registry = load_indicators(None)
+    registry = load_indicators()
     assert registry.errors == []
+    assert list(registry.indicators) == ["ema"]  # built-in only: your files go to the worker
     described = registry.get("ema").to_json()
     assert described["overlay"] is True
     assert [(p["name"], p["type"], p["default"], p["group"]) for p in described["params"]] == [
@@ -102,39 +85,8 @@ def test_the_builtin_ema_and_its_schema():
     ]
 
 
-def test_files_in_the_indicators_folder_are_discovered(tmp_path):
-    write(tmp_path, "mid.py", GOOD)
-    write(tmp_path, "broken.py", "NAME = 'Broken'\nraise RuntimeError('oops')\n")
-    write(tmp_path, "no_outputs.py", GOOD.replace("OUTPUTS = [", "OUTPUTS = [] and ["))
-    write(tmp_path, "bad_ref.py", GOOD.replace('color="color"', 'color="length"'))
-    write(tmp_path, "_helper.py", "raise SystemExit('helpers are not indicators')\n")
-    registry = load_indicators(tmp_path)
-
-    assert set(registry.indicators) == {"ema", "mid"}
-    mid = registry.get("mid")
-    assert mid.builtin is False and mid.overlay is False and mid.title == "Middle line"
-    errors = {e["file"].replace("\\", "/").rsplit("/", 1)[-1]: e["error"] for e in registry.errors}
-    assert set(errors) == {"broken.py", "no_outputs.py", "bad_ref.py"}
-    assert "oops" in errors["broken.py"]
-    assert "'length' is not a color parameter" in errors["bad_ref.py"]
-
-
-def test_files_can_use_the_helpers_named_like_builtin_indicators(tmp_path):
-    # ema.py is a built-in indicator and ema() a helper: loading the first must not
-    # replace the second for the files that import it.
-    write(tmp_path, "double.py", GOOD.replace("sma", "ema"))
-    registry = load_indicators(tmp_path)
-    assert registry.errors == []
-    bars = pd.DataFrame({"o": 1.0, "h": 2.0, "l": 0.0, "c": [float(x) for x in range(10)]})
-    out = registry.get("double").run(bars, registry.get("double").normalize({"length": 3}))
-    assert out["mid"].iloc[2] == pytest.approx(1.0)
-    from openchart import indicators
-
-    assert callable(indicators.ema)
-
-
 def test_parameters_are_validated_and_completed():
-    ema_ind = load_indicators(None).get("ema")
+    ema_ind = load_indicators().get("ema")
     assert ema_ind.normalize({"length": 20.0}) == {
         "length": 20,
         "source": "close",
@@ -170,6 +122,9 @@ def test_the_catalog(client):
     body = client.get("/api/indicators").json()
     assert [i["id"] for i in body["indicators"]] == ["ema"]
     assert body["errors"] == [] and body["folder"].endswith("indicators")
+    assert [i["id"] for i in body["builtin"]] == ["ema"] and body["custom"] == []
+    assert body["isolation"]["level"] == "unavailable"  # the test server runs no worker
+    assert body["editing"]["allowed"] is False
 
 
 def test_values_are_aligned_to_the_candles_and_settle_with_warm_up(client):
@@ -211,33 +166,12 @@ def test_bid_and_ask_values_differ(client):
     assert ask > bid
 
 
-def test_a_user_indicator_in_a_separate_pane(harness):
-    from fastapi.testclient import TestClient
-
-    from openchart.api.app import create_app
-    from tests.conftest import run_setup
-
-    folder = harness.config.data_dir / "indicators"
-    folder.mkdir()
-    write(folder, "mid.py", GOOD)
-    harness.seed_candles()
-    with TestClient(create_app(harness.server)) as c:
-        c.server = harness.server
-        assert run_setup(c).status_code == 200
-        catalog = c.get("/api/indicators").json()["indicators"]
-        assert [(i["id"], i["overlay"], i["builtin"]) for i in catalog] == [
-            ("mid", False, False),  # by title: "Middle line", "Moving Average Exponential"
-            ("ema", True, True),
-        ]
-        body = values(c, "mid", params={"length": 3}, **{"from": 0, "limit": 10}).json()
-        closes = [b["c"] for b in candles(c, **{"from": 0, "limit": 10})]
-        assert body["values"]["mid"][2] == pytest.approx(sum(closes[:3]) / 3)
-
-
 @pytest.mark.parametrize(
     ("indicator", "query", "status"),
     [
         ("nope", {}, 404),
+        ("ema", {"kind": "custom"}, 404),
+        ("ema", {"kind": "neither"}, 400),
         ("ema", {"params": json.dumps({"length": 0})}, 400),
         ("ema", {"params": "[1]"}, 400),
         ("ema", {"params": "{"}, 400),

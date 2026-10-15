@@ -17,6 +17,11 @@
        service runs again (a new process) and answers.
     4. Uninstalls and checks the cleanup (service gone, no process, port free).
 
+    The indicator sandbox (CI-1) is checked as LocalSystem along the way: the installer
+    reports "Indicator sandbox: ready (AppContainer)", the service log shows every probe
+    the minimum needs denied and a private desktop, one worker process runs, and after the
+    uninstall the proof list is all zeros.
+
 .EXAMPLE
     .\tools\ci\service-reinstall-test.ps1 -Release dist\OpenChart-Server-0.1.0-windows -Nssm nssm\nssm-2.24\win64\nssm.exe -Work $env:RUNNER_TEMP
 #>
@@ -101,6 +106,27 @@ try {
     Check (Healthy) "it answers on 127.0.0.1:$Port"
     $pidBefore = ServicePid
 
+    Section "1b. the indicator sandbox, as LocalSystem"
+    Check ((Index $first.Lines "Indicator sandbox: ready \(AppContainer\)") -ge 0) "the installer reports the sandbox ready (AppContainer)"
+    $serviceLog = Get-Content (Join-Path $DataDir "logs\service.log") -Raw
+    $probes = [regex]::Match($serviceLog, "indicator sandbox probes: ([^\r\n]*)").Groups[1].Value
+    Write-Host "    probes: $probes"
+    foreach ($p in "read the database", "list the data folder", "read the key file", "open the server process", "connect to 127.0.0.1", "connect out \(192.0.2.1:9\)", "start a program") {
+        Check ($probes -match "$p (denied|absent|error|timed out)") "probe '$p' is refused"
+    }
+    Check ($probes -match "environment clean") "the worker's environment holds no secrets"
+    Write-Host "    notes: $([regex]::Match($serviceLog, 'indicator sandbox notes: ([^\r\n]*)').Groups[1].Value)"
+    # Finding 2: the one write an AppContainer has is its own folder; it stays writable
+    # (CI-1 investigation). The probe still runs; the note must say so truthfully and the
+    # cap must be on (owner's decision B1).
+    $notes = [regex]::Match($serviceLog, 'indicator sandbox notes: ([^\r\n]*)').Groups[1].Value
+    Check ($probes -match "write into its own folder (allowed|denied|error)") "the write probe on its own folder ran"
+    Check ($notes -match "its own folder is writable: all scripts of one worker share it, and what they write stays there until the folder is emptied at the next worker start; capped at \d+ MB") "the note says its own folder is writable, shared, emptied at each start and capped"
+    Check ($serviceLog -match "indicator sandbox notes: [^\r\n]*a private desktop of its own") "the worker has a private desktop"
+    Check ($serviceLog -match "indicator worker ready \(appcontainer") "the worker runs in the AppContainer"
+    $workers = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like "$Release*" -and $_.CommandLine -like "*indicator-worker*" })
+    Check ($workers.Count -eq 1) "one worker process runs ($($workers.Count))"
+
     Section "2. negative control: commands beside the running service"
     $m = Run "openchart migrate" @("migrate")
     Check ($m.Code -eq 4) "migrate is refused while the service holds the folder (exit 4)"
@@ -126,8 +152,13 @@ try {
     Check ($pidAfter -ne 0 -and $pidAfter -ne $pidBefore) "with a new process ($pidBefore -> $pidAfter)"
 } finally {
     Section "4. uninstall and cleanup"
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Release "uninstall-service.ps1") -Name $Name -Nssm $Nssm 2>&1 |
-        ForEach-Object { Write-Host "    | $_" }
+    $removal = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Release "uninstall-service.ps1") -Name $Name -Nssm $Nssm 2>&1 |
+        ForEach-Object { "$_" })
+    $removal | ForEach-Object { Write-Host "    | $_" }
+    $proof = $removal -join "`n"
+    Check ($proof -match "profile mappings for SYSTEM: 0") "no AppContainer profile left for SYSTEM"
+    Check ($proof -match "package folder exists: False") "no AppContainer folder left"
+    Check ($proof -match "grants left on the release folder: 0") "no sandbox grant left on the release folder"
     Start-Sleep -Seconds 2
     $saved = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     sc.exe query $Name | Out-Null; $sc = $LASTEXITCODE

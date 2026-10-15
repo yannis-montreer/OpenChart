@@ -50,5 +50,9 @@ Thumbs.db
 reference/*
 !reference/.gitkeep
 
+# TradingView chart exports (the owner's, for comparison tests; never committed)
+OANDA_*.csv
+*tradingview*.csv
+
 # Local notes for Claude Code sessions: the owner's paths and setup (see CLAUDE.md)
 LOCAL-NOTES.md

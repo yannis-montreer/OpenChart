@@ -1,4 +1,11 @@
-"""Finding the indicator files at startup and turning each into an `Indicator`."""
+"""The built-in indicators: found at startup and turned each into an `Indicator`.
+
+Built-in indicators run inside the server (decision D5): they are code we ship and test.
+Your own files in `<data dir>/indicators/` are never imported here; the worker reads
+them (`_custom.py`, `worker/`). The two are separate namespaces: a file of yours named
+`ema.py` no longer replaces the built-in EMA. `from_module` checks what a file declares,
+for both.
+"""
 
 from __future__ import annotations
 
@@ -31,24 +38,20 @@ class Registry:
         return sorted(self.indicators.values(), key=lambda i: i.title.lower())
 
 
-def load_indicators(user_dir: Path | None = None) -> Registry:
-    """The built-in indicators, then the owner's files in `user_dir` (which win on a
-    clash of names). A file that fails to load is reported, not fatal."""
+def load_indicators() -> Registry:
+    """The built-in indicators. A file that fails to load is reported, not fatal."""
     registry = Registry()
     for path in _files(BUILTIN_DIR):
         where = f"openchart/indicators/{path.name}"
-        _add(
-            registry, path.stem, where, builtin=True, load=lambda p=path: _import_file(p, "builtin")
-        )
-    if user_dir is not None and user_dir.is_dir():
-        for path in _files(user_dir):
-            _add(
-                registry,
-                path.stem,
-                str(path),
-                builtin=False,
-                load=lambda p=path: _import_file(p, "user"),
-            )
+        try:
+            if not _ID.match(path.stem):
+                raise ValueError("the file name must be lowercase letters, digits and _")
+            indicator = from_module(path.stem, _import_file(path), builtin=True)
+        except Exception as exc:  # anything a broken file can raise
+            log.error("indicator %s not loaded: %s", where, exc)
+            registry.errors.append({"file": where, "error": f"{type(exc).__name__}: {exc}"})
+            continue
+        registry.indicators[path.stem] = indicator
     return registry
 
 
@@ -56,25 +59,11 @@ def _files(folder: Path) -> list[Path]:
     return [p for p in sorted(folder.glob("*.py")) if not p.stem.startswith("_")]
 
 
-def _add(registry: Registry, stem: str, where: str, *, builtin: bool, load) -> None:
-    try:
-        if not _ID.match(stem):
-            raise ValueError("the file name must be lowercase letters, digits and _")
-        indicator = from_module(stem, load(), builtin=builtin)
-    except Exception as exc:  # anything a broken file can raise
-        log.error("indicator %s not loaded: %s", where, exc)
-        registry.errors.append({"file": where, "error": f"{type(exc).__name__}: {exc}"})
-        return
-    if stem in registry.indicators:
-        log.warning("indicator %s replaces the built-in one", where)
-    registry.indicators[stem] = indicator
-
-
-def _import_file(path: Path, kind: str) -> ModuleType:
-    """Run an indicator file as a module of its own. Not as `openchart.indicators.<name>`:
-    importing a submodule sets an attribute of the package, so `ema.py` would replace the
-    `ema` function that indicator files import from it."""
-    name = f"openchart_indicator_files.{kind}.{path.stem}"
+def _import_file(path: Path) -> ModuleType:
+    """Run a built-in indicator file as a module of its own. Not as
+    `openchart.indicators.<name>`: importing a submodule sets an attribute of the package,
+    so `ema.py` would replace the `ema` function that indicator files import from it."""
+    name = f"openchart_indicator_files.builtin.{path.stem}"
     spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load {path}")
