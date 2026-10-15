@@ -266,3 +266,35 @@ def test_the_builtin_ema_over_the_api_has_the_same_values_and_the_new_fields(wc)
             "style": "solid",
         }
     ]
+
+
+WARM = """
+from openchart.indicators import Color, Float, Line, Marker, Width
+
+NAME = "Warm"
+OVERLAY = False
+PARAMS = [Float("t0", 0), Color("color", "#ff0000"), Width("width", 1)]
+OUTPUTS = [
+    Line("v", "V", color="color", width="width"),
+    Marker("m", "M", color="color"),
+]
+
+def warmup(params):
+    return 10
+
+def compute(bars, params):
+    return {"v": bars.close, "m": bars.time >= params["t0"]}
+"""
+
+
+def test_hits_and_values_start_at_the_first_bar_asked_for_not_at_the_warmup(wc):
+    # An indicator with a warmup is computed on 10 earlier bars; `t` and every index into it
+    # leave them out (a mutation check found this unpinned).
+    write(wc.folder, "warm.py", WARM)
+    bars = candles(wc, **{"from": 0, "limit": 40})
+    start, third = bars[20]["t"], bars[22]["t"]
+    got = values(wc, "warm", params={"t0": third}, **{"from": start, "limit": 8}).json()
+    assert got["t"] == [b["t"] for b in bars[20:28]]
+    assert got["hits"]["m"] == [2, 3, 4, 5, 6, 7]
+    assert got["values"]["v"] == [b["c"] for b in bars[20:28]]
+    (wc.folder / "warm.py").unlink()

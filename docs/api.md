@@ -109,7 +109,8 @@ Errors: `400` unknown timeframe or price, `404` unknown instrument, `422` invali
   - `hits`: for each `marker` and `background` output, the ascending list of positions **in `t`** (0-based) where it is on. `[]` when never. A thousand bars with a marker every tenth bar is 100 integers, not 1,000 booleans.
   - `levels`: `{name: number}` for each `level`, already resolved with this request's `params`.
   - Every key of `values`, `hits` and `levels` is the `name` of an output; `fill` outputs have none (the browser draws them from the two outputs they name).
-  - 404 for an unknown indicator or instrument, 400 for bad `params`. **422 when the indicator's code fails or returns something that cannot be drawn** (a missing or undeclared output, the wrong number of values, text in a line, numbers in a marker, ...): `{"detail": "SMA cross failed: ResultError: output 'up' must be true/false values ..."}`. The server checks every answer itself, also those of the worker.
+  - 404 for an unknown indicator or instrument, 400 for bad `params`. **422 when the indicator's code fails or returns something that cannot be drawn** (a missing or undeclared output, the wrong number of values, text in a line, numbers in a marker, ...): `{"detail": "SMA cross failed: ResultError: output 'up' must be true/false values ..."}`. The server checks every answer itself, also those of the worker. A bad result is not counted toward the quarantine (it is not a crash or a timeout), and the worker keeps running; the cost of repeating one is bounded by the job deadline and by the server remembering the same error for the same script, parameters and bars.
+  - **A marker or background is only checked to be 0 or 1** on the server (booleans reach it as numbers); the worker's own check that the script returned real `True/False` is the only one that can tell them apart.
 
 ## Layouts
 
