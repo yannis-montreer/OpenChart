@@ -122,6 +122,19 @@ $KeyFile = [IO.Path]::GetFullPath($KeyFile)
 Ok "Data folder: $DataDir"
 Ok "Port: $Port (listening on $BindAddress)"
 
+# --- An existing service ---------------------------------------------------------------
+# Stopped before anything touches the data folder: a running server holds the folder's
+# lock, and `openchart migrate` and `secrets to-file` refuse while it does.
+$existing = Get-Service -Name $Name -ErrorAction SilentlyContinue
+if ($existing -and $existing.Status -ne "Stopped") {
+    Step "Stopping the running service '$Name'"
+    if ($PSCmdlet.ShouldProcess($Name, "Stop the running service before updating")) {
+        $r = Exec $script:NssmExe stop $Name
+        if ($r.Code -ne 0) { Fail "Could not stop the service: $($r.Text)" }
+        Ok "Stopped."
+    }
+}
+
 # --- Data folder ------------------------------------------------------------------------
 Step "Data folder"
 $env:OPENCHART_DATA_DIR = $DataDir   # for the openchart commands this script runs
@@ -161,10 +174,9 @@ if ($PSCmdlet.ShouldProcess($KeyFile, "Copy the tokens into $DataDir\secrets.enc
 Step "Windows service '$Name'"
 $existing = Get-Service -Name $Name -ErrorAction SilentlyContinue
 if ($existing) {
-    if ($PSCmdlet.ShouldProcess($Name, "Stop and update the existing service")) {
-        if ($existing.Status -ne "Stopped") { Exec $script:NssmExe stop $Name | Out-Null }
+    if ($PSCmdlet.ShouldProcess($Name, "Update the existing service")) {
         Invoke-Nssm set $Name Application $Exe
-        Ok "Existing service stopped; updating it."
+        Ok "Existing service updated (it was stopped above)."
     }
 } elseif ($PSCmdlet.ShouldProcess($Name, "Register the service")) {
     Invoke-Nssm install $Name $Exe
