@@ -1,7 +1,8 @@
 # Builds the release files. Started by hand (Actions > Release > Run workflow: the files
 # are kept as workflow artifacts) or by pushing a tag v<version> (then also a DRAFT
 # GitHub release with the files; you publish it yourself). Nothing is published here.
-# Before tagging, set __version__ in src/openchart/__init__.py to the same version.
+# Before tagging, set __version__ in src/openchart/__init__.py to the same version and write
+# docs/release-notes/v<version>.md: the draft release uses it as its text.
 name: Release
 
 on:
@@ -46,6 +47,9 @@ jobs:
           $v = (python -c "import openchart; print(openchart.__version__)").Trim()
           if ($env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME -ne "v$v") {
             throw "The tag $env:GITHUB_REF_NAME does not match __version__ $v in src/openchart/__init__.py"
+          }
+          if ($env:GITHUB_REF_TYPE -eq "tag" -and -not (Test-Path "docs/release-notes/v$v.md")) {
+            throw "No release notes: write docs/release-notes/v$v.md before tagging"
           }
           "version=$v" >> $env:GITHUB_OUTPUT
 
@@ -95,6 +99,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: docs/release-notes
       - uses: actions/download-artifact@v4
         with:
           path: files
@@ -106,5 +113,5 @@ jobs:
           ls -la files files/python || true
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft \
             --title "OpenChart ${GITHUB_REF_NAME#v}" \
-            --notes "Windows: OpenChart-Server (service, see README Quickstart) and OpenChart-Viewer. The .exe files are not signed: Windows SmartScreen warns on first launch. SHA-256 sums in SHA256SUMS.txt." \
+            --notes-file "docs/release-notes/$GITHUB_REF_NAME.md" \
             files/*.zip files/SHA256SUMS.txt files/python/*
