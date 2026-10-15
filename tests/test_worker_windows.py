@@ -298,6 +298,14 @@ async def test_appcontainer_probes_against_decoys(tmp_path):
             del os.environ["OPENCHART_SECRET_KEY_FILE"]
         try:
             probes = started["probes"]
+            report = os.environ.get("OPENCHART_TEST_REPORT_DIR")
+            if report:  # CI prints it: every probe, as the worker saw it
+                rows = [
+                    f"{k}: {v.get('result')} ({v.get('detail', '')})" for k, v in probes.items()
+                ]
+                (Path(report) / "appcontainer-probes.txt").write_text(
+                    "".join(r + "\n" for r in rows)
+                )
             met, why = isolation.judge("appcontainer", probes)
             assert met, (why, probes)
             assert probes["identity"]["detail"].endswith("appcontainer yes")

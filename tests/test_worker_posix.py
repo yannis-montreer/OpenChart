@@ -13,7 +13,7 @@ import pytest
 
 from openchart.indicators.worker import isolation
 from openchart.indicators.worker.isolation import ProcessLauncher, SidecarLauncher, start_worker
-from openchart.indicators.worker.runner import Limits, ScriptFailed
+from openchart.indicators.worker.runner import IndicatorRunner, Limits, ScriptFailed
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="Linux and macOS only")
 
@@ -57,14 +57,19 @@ def sidecar(tmp_path):
     proc.wait(10)
 
 
-async def test_the_sidecar_cleans_its_environment_and_survives_hangs(sidecar, tmp_path):
-    runner, iso = await start_worker(
-        tmp_path, Limits(timeout_s=1, memory_mb=256), [SidecarLauncher(sidecar)]
-    )
-    assert runner is not None, iso.reason
+async def sidecar_runner(sock: str, limits: Limits) -> tuple[IndicatorRunner, dict]:
+    """The sidecar's own mechanics, as a host process. Its minimum isolation (no data
+    volume, no network, another uid) is the container's and is proven by CI's Docker job:
+    a host process shares this machine's files and network, so it is not judged here."""
+    runner = IndicatorRunner(SidecarLauncher(sock), limits)
+    started = await runner.start({"read": {}, "list": {}, "connect": {}})
+    return runner, started["probes"]
+
+
+async def test_the_sidecar_cleans_its_environment_and_survives_hangs(sidecar):
+    runner, probes = await sidecar_runner(sidecar, Limits(timeout_s=1, memory_mb=256))
     try:
-        assert iso.probes["environment"]["result"] == "clean"  # OPENCHART_* removed
-        assert iso.level == "sidecar"
+        assert probes["environment"]["result"] == "clean"  # OPENCHART_* removed
         out = await runner.compute(*script(), {}, BARS)
         assert out["out"][1:3].tolist() == [0.5, 1.5]
         t = time.perf_counter()
@@ -80,9 +85,9 @@ async def test_the_sidecar_cleans_its_environment_and_survives_hangs(sidecar, tm
         await runner.stop()
 
 
-async def test_two_connections_at_once(sidecar, tmp_path):
-    first, _ = await start_worker(tmp_path, Limits(timeout_s=2), [SidecarLauncher(sidecar)])
-    second, _ = await start_worker(tmp_path, Limits(timeout_s=2), [SidecarLauncher(sidecar)])
+async def test_two_connections_at_once(sidecar):
+    first, _ = await sidecar_runner(sidecar, Limits(timeout_s=2))
+    second, _ = await sidecar_runner(sidecar, Limits(timeout_s=2))
     try:
         got = await asyncio.gather(
             first.compute(*script(), {}, BARS), second.compute(*script(), {}, BARS)

@@ -38,6 +38,11 @@ jobs:
           # tests/test_worker_windows.py: an AppContainer with decoys in Credential Manager
           # and the registry, on the runner only (never on someone's own PC by default).
           OPENCHART_TEST_APPCONTAINER: ${{ runner.os == 'Windows' && '1' || '' }}
+          OPENCHART_TEST_REPORT_DIR: ${{ runner.temp }}
+      - name: The AppContainer probe table
+        if: always() && runner.os == 'Windows'
+        shell: bash
+        run: cat "$RUNNER_TEMP/appcontainer-probes.txt" || echo "no probe table (the test did not run)"
 
   windows-package:
     # The release build (server folder and viewer), smoke-tested; then the service installer on
