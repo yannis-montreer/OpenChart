@@ -73,10 +73,35 @@ def parse_stream_line(line: str) -> StreamEvent | None:
 
 
 def _error_text(resp: httpx.Response) -> str:
+    """OANDA's `errorMessage`, else the start of the body. Never headers (the token)."""
     try:
-        return str(resp.json().get("errorMessage") or resp.text)
+        text = str(resp.json().get("errorMessage") or resp.text)
     except ValueError:
-        return resp.text[:200]
+        text = resp.text[:300]
+    if text.strip():
+        return text
+    # OANDA's API answers its own errors in JSON; an empty answer comes from in front of
+    # it, typically a request it could not read at all (a malformed Authorization header).
+    return "empty response body (the request was refused before OANDA's API read it)"
+
+
+def _request_text(path: str, params: dict[str, Any] | None) -> str:
+    """The request as safe to log: path and query parameters only."""
+    query = "&".join(f"{k}={v}" for k, v in (params or {}).items())
+    return f"{path}?{query}" if query else path
+
+
+def token_problem(token: str) -> str | None:
+    """Why a token cannot be one, without showing it. A token is printable text without
+    spaces; a paste that went wrong (Ctrl+V typed as a character, a line break) is not."""
+    if not token:
+        return "the OANDA token is empty"
+    if any(not ch.isprintable() or ch.isspace() for ch in token):
+        return (
+            f"the OANDA token ({len(token)} characters) contains spaces or control "
+            "characters: a paste that went wrong? Enter it again"
+        )
+    return None
 
 
 class OandaProvider:
@@ -95,6 +120,7 @@ class OandaProvider:
         if not config.configured:
             raise AuthError("OANDA token and account ID are not configured")
         self.config = config
+        self.token_problem = token_problem(config.token)
         self.request_delay = request_delay
         self.max_retries = max_retries
         headers = {
@@ -121,6 +147,8 @@ class OandaProvider:
         await self._stream.aclose()
 
     async def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        if self.token_problem:  # it would only be refused, without saying why
+            raise AuthError(self.token_problem)
         delay = 1.0
         for attempt in range(self.max_retries + 1):
             try:
@@ -133,7 +161,10 @@ class OandaProvider:
                 if resp.status_code in (401, 403):
                     raise AuthError(f"OANDA rejected the credentials: {_error_text(resp)}")
                 if resp.status_code not in (429, 500, 502, 503, 504):
-                    raise RequestError(f"OANDA HTTP {resp.status_code}: {_error_text(resp)}")
+                    raise RequestError(
+                        f"OANDA HTTP {resp.status_code} for {_request_text(path, params)}: "
+                        f"{_error_text(resp)}"
+                    )
                 err = f"HTTP {resp.status_code}"
             if attempt == self.max_retries:
                 raise ProviderError(f"OANDA request failed after retries: {err}")
@@ -216,6 +247,8 @@ class OandaProvider:
     async def stream_ticks(self, instruments: list[str]) -> AsyncIterator[StreamEvent]:
         path = f"/v3/accounts/{self.config.account_id}/pricing/stream"
         params = {"instruments": ",".join(instruments)}
+        if self.token_problem:
+            raise AuthError(self.token_problem)
         async with self._stream.stream("GET", path, params=params) as resp:
             if resp.status_code in (401, 403):
                 await resp.aread()
