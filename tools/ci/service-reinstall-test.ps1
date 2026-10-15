@@ -52,6 +52,17 @@ function Healthy {
     try { return (Invoke-WebRequest "http://127.0.0.1:$Port/api/health" -UseBasicParsing -TimeoutSec 2).StatusCode -eq 200 }
     catch { return $false }
 }
+# NSSM reports START_PENDING until the program has run for its throttle period (up to about
+# 30 s), even when the server already answers; Windows shows "Running" only after that.
+function WaitRunning([int]$Seconds = 60) {
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    do {
+        $status = [string](Get-Service $Name -ErrorAction SilentlyContinue).Status
+        if ($status -eq "Running") { return $status }
+        Start-Sleep -Seconds 1
+    } while ((Get-Date) -lt $deadline)
+    return $status
+}
 function ServicePid {
     $s = Get-CimInstance Win32_Service -Filter "Name='$Name'" -ErrorAction SilentlyContinue
     if ($s) { return [int]$s.ProcessId } else { return 0 }
@@ -85,7 +96,8 @@ try {
     Section "1. first install"
     $first = Install "first"
     Check ($first.Code -eq 0) "the installer finished (exit $($first.Code))"
-    Check ((Get-Service $Name).Status -eq "Running") "the service runs"
+    $st = WaitRunning
+    Check ($st -eq "Running") "Windows reports the service Running ($st)"
     Check (Healthy) "it answers on 127.0.0.1:$Port"
     $pidBefore = ServicePid
 
@@ -97,7 +109,8 @@ try {
     Check ($s.Code -eq 0) "stats runs beside the service"
 
     Section "3. reinstall over the running service"
-    Check ((Get-Service $Name).Status -eq "Running") "the service runs before the reinstall"
+    $st = WaitRunning
+    Check ($st -eq "Running") "the service runs before the reinstall ($st)"
     $again = Install "reinstall"
     $lines = $again.Lines
     $stop = Index $lines "Stopping the running service"
@@ -106,7 +119,8 @@ try {
     Check ($again.Code -eq 0) "the reinstall finished (exit $($again.Code)); its migrate would have been refused had the service still run"
     Check ($stop -ge 0 -and $stop -lt $migrated) "the service was stopped before the database was touched (step order)"
     Check ($migrated -ge 0 -and $migrated -lt $tokens) "the migration ran, before the tokens were moved"
-    Check ((Get-Service $Name).Status -eq "Running") "the service runs again"
+    $st = WaitRunning
+    Check ($st -eq "Running") "Windows reports the service Running again ($st)"
     Check (Healthy) "and answers"
     $pidAfter = ServicePid
     Check ($pidAfter -ne 0 -and $pidAfter -ne $pidBefore) "with a new process ($pidBefore -> $pidAfter)"
