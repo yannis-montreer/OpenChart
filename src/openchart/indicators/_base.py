@@ -53,7 +53,8 @@ MAX_FILE_BYTES = 256 * 1024
 MAX_STRING_LENGTH = 1000
 
 _COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
-_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,39}$")
+MAX_NAME = 40
+_IDENT = re.compile(rf"^[A-Za-z_][A-Za-z0-9_]{{0,{MAX_NAME - 1}}}$")
 
 
 class SchemaError(ValueError):
@@ -489,12 +490,8 @@ def validate_schema(
     by_name: dict[str, Param] = {}
     for p in params:
         where = f"input {p.name!r}"
-        if not isinstance(p.name, str) or not _IDENT.match(p.name):
-            raise bad(
-                where,
-                "the name must be an identifier (letters, digits and _, starting with a "
-                "letter or _, at most 40 characters)",
-            )
+        if not isinstance(p.name, str) or not _IDENT.fullmatch(p.name):
+            raise bad(where, _identifier_rule(p.name))
         if p.name in by_name:
             raise bad(where, "name used twice")
         by_name[p.name] = p
@@ -506,12 +503,8 @@ def validate_schema(
         if o.data is None:
             continue
         where = f"output {o.name!r}"  # type: ignore[union-attr]
-        if not isinstance(o.name, str) or not _IDENT.match(o.name):  # type: ignore[union-attr]
-            raise bad(
-                where,
-                "the name must be an identifier (letters, digits and _, starting with a "
-                "letter or _, at most 40 characters)",
-            )
+        if not isinstance(o.name, str) or not _IDENT.fullmatch(o.name):  # type: ignore[union-attr]
+            raise bad(where, _identifier_rule(o.name))  # type: ignore[union-attr]
         if o.name in names:  # type: ignore[union-attr]
             raise bad(where, "name used twice")
         names[o.name] = o  # type: ignore[union-attr]
@@ -524,6 +517,24 @@ def validate_schema(
         else:
             where = f"output {o.name!r}"  # type: ignore[union-attr]
         _check_output(bad, where, o, by_name, names)
+
+
+def _identifier_rule(name: Any) -> str:
+    """Why `name` is not an identifier: the rule, and the first character that breaks it."""
+    rule = (
+        "the name must be an identifier (letters, digits and _, starting with a letter or _, "
+        f"at most {MAX_NAME} characters)"
+    )
+    if not isinstance(name, str):
+        return f"{rule}; it is {_describe(name)}, not text"
+    if not name:
+        return f"{rule}; it is empty"
+    for i, ch in enumerate(name):
+        allowed = ch.isascii() and (ch.isalpha() or ch == "_" or (ch.isdigit() and i > 0))
+        if not allowed:
+            why = "cannot start a name" if ch.isdigit() else "is not allowed"
+            return f"{rule}; {ch!r} at position {i + 1} {why}"
+    return f"{rule}; it has {len(name)}"
 
 
 def _check_label(bad: Callable[[str, str], SchemaError], where: str, label: Any) -> None:
