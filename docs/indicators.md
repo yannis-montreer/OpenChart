@@ -102,6 +102,35 @@ Each `Output` is one line, drawn with the colour and width parameters it names.
 They take and return series, so they compose: `ema(sma(source(bars, "close"), 5), 9)`.
 Leading NaN (another indicator's warm-up) are skipped before an EMA is seeded.
 
+### `ta`: the helper library (in progress, CI-2 step a)
+
+`from openchart.indicators import ta`. Helpers take series (or lists) and return a series
+with the same index. The value at a bar uses that bar and earlier ones only. Not enough
+bars, or a gap in the window, gives NaN (False for the true/false helpers), never an error.
+Written from the public formulas; TradingView's documented definitions, including how each
+one starts.
+
+| Helper | What it returns | Needs (warmup) |
+|---|---|---|
+| `sma(x, n)` | simple average of the last `n` | `n` bars |
+| `ema(x, n)` | alpha 2/(n+1), seeded with the SMA of the first `n` | `n` bars for the first value; about `10 * n` more to agree with a longer history to 1e-8 |
+| `rma(x, n)` | Wilder's, alpha 1/n, seeded the same way | `n` bars; about `20 * n` to agree to 1e-8 |
+| `wma(x, n)` | newest weighs `n`, down to 1 | `n` bars |
+| `vwma(x, volume, n)` | sum(x * volume) / sum(volume); NaN if no volume (volume is OANDA's tick count) | `n` bars |
+| `hma(x, n)` | `wma(2 * wma(x, n // 2) - wma(x, n), round(sqrt(n)))` | `n + round(sqrt(n)) - 1` bars |
+| `shift(x, n)` | the value `n` bars ago (Pine's `x[n]`); `n >= 1` only, a zero or negative offset is refused | `n` bars |
+| `change(x, n=1)` | `x - shift(x, n)` | `n` bars |
+| `nz(x, r=0)` | gaps replaced by `r` | none |
+| `crossover(a, b)`, `crossunder`, `cross` | `a > b` now and `a <= b` on the bar before; either side may be a number (`crossover(rsi, 30)`) | one bar after the inputs' own |
+| `barssince(cond)` | bars since `cond` was True (0 on a True bar); NaN before the first | none (it counts from the first bar it sees) |
+| `valuewhen(cond, x, n=0)` | `x` on the bar where `cond` was True the `n`-th time back | until `cond` has been True `n + 1` times |
+| `rising(x, n)`, `falling(x, n)` | `x` higher (lower) than each of the previous `n` values | `n + 1` bars |
+
+A gap in the input: `ema` and `rma` give NaN at the gap and start again, with a new
+seed, once `n` values in a row are back; windowed helpers give NaN while the gap is in
+the window. The rest of the first set (oscillators, volatility, windows, pivots) follows
+in the next steps.
+
 ## Not yet
 
 Multi-timeframe indicators (an H1 EMA on an M5 chart), alerts on indicators and the rest

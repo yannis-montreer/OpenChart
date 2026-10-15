@@ -6,6 +6,7 @@ described in `_base.py` and docs/indicators.md. Indicator files import what they
 from here.
 """
 
+from openchart.indicators import _ta as ta
 from openchart.indicators._base import (
     SOURCES,
     Bool,
@@ -20,7 +21,7 @@ from openchart.indicators._base import (
     Width,
     source,
 )
-from openchart.indicators._lib import ema, sma
+from openchart.indicators._ta import ema, sma
 
 __all__ = [
     "SOURCES",
@@ -37,4 +38,5 @@ __all__ = [
     "ema",
     "sma",
     "source",
+    "ta",
 ]
