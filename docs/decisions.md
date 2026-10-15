@@ -273,3 +273,4 @@ decimals, easier for contributors).
   the rewrite, the database stays at version 6 untouched and the next start migrates;
   during VACUUM, the migration is already committed (version 7, every row) and only the
   shrinking is lost until a later VACUUM. Integrity checks pass in both cases.
+- **Re-checked after merging main (PR #11), 2026-10-15,** on a fresh read-only copy of the owner's database (3 instruments, 1,943,386 M1, 398,252 H1 and 126,707 cached rows): every row bit for bit, 1h from M1 against OANDA's H1 unchanged (the one gold hour is 2026-10-13 18:00, the tick-built minute the daily check of PR #11 will replace), 380.0 to 163.4 MB, 15.8 s with VACUUM. Release build with 7 migrations: self-test and smoke passed. The daily and start-up checks of PR #11 compare stored minutes with the broker's: integer prices read back exactly, so unchanged minutes are not rewritten.
