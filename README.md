@@ -2,7 +2,7 @@
 
 Self-hosted charting and alerting server for forex and metals. It runs 24/7 on your own PC, pulls prices from your own broker account, and pushes alerts on drawn lines (including sloped trendlines) to your phone, even when no chart is open.
 
-> **Status:** usable for charting and alerts on gold (XAU_USD) with an OANDA account; still young. See [What works](#what-works).
+> **Status:** version 0.1.0, a pre-release: usable for charting and alerts with an OANDA account (gold, currency pairs and other OANDA instruments); still young. See [What works](#what-works).
 
 ![OpenChart: gold, 1 hour, an EMA and a trendline with an alert](docs/images/chart.png)
 
