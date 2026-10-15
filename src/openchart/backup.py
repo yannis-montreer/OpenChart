@@ -28,6 +28,7 @@ DB_NAME = "openchart.db"
 LOCK_NAME = "server.lock"  # held by a running server (openchart.lock); never copied
 BACKUP_DIR = "backups"
 LOG_DIR = "logs"
+MANIFEST = "backup.json"  # written into every zip; a restored folder still holds the old one
 # Never copied: the live database files (the snapshot replaces them) and leftovers.
 SKIP_SUFFIXES = (".db-wal", ".db-shm", ".tmp", ".part")
 
@@ -88,7 +89,7 @@ def backup(
                 result.tick_files += is_tick
                 result.has_secrets |= rel.as_posix() == "secrets.enc"
             zf.writestr(
-                "backup.json",
+                MANIFEST,
                 json.dumps(
                     {
                         "openchart": __version__,
@@ -125,7 +126,7 @@ def _snapshot(db_path: Path, dest: Path) -> None:
 
 
 def _skipped(rel: Path, path: Path, data_dir: Path, out_dir: Path) -> bool:
-    if rel.parts[0] in (BACKUP_DIR, LOG_DIR) or rel.as_posix() in (DB_NAME, LOCK_NAME):
+    if rel.parts[0] in (BACKUP_DIR, LOG_DIR) or rel.as_posix() in (DB_NAME, LOCK_NAME, MANIFEST):
         return True
     if path.name.endswith(SKIP_SUFFIXES) or path.name.startswith(".snapshot-"):
         return True
