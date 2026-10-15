@@ -114,7 +114,9 @@ def test_websocket_higher_timeframe_starts_from_history(client):
             {"type": "subscribe", "instrument": "XAU_USD", "timeframe": "1D", "price": "bid"}
         )
         receive_until(ws, "subscribed")
-        push(client, Tick("XAU_USD", time.time(), 1900.0, 1900.4))
+        # Half a minute after the last stored minute: the same trading day as the stored
+        # history by construction, whatever the time of day (the clock is tests/clock.py's).
+        push(client, Tick("XAU_USD", NOW + 30, 1900.0, 1900.4))
         candle = receive_until(ws, "candle")["candle"]
         assert candle["v"] > 1  # stored M1 of today's session plus the new tick
         assert candle["l"] <= 1900.0
