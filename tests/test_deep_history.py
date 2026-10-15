@@ -89,9 +89,13 @@ class Clock:
 
 
 async def full_cache(store, tf) -> pd.DataFrame:
+    """Every cached bar of `tf` (one instrument in these tests), prices decoded."""
+    prices = ", ".join(
+        f"c.{side}_{x} / CAST(s.scale AS REAL)" for side in ("bid", "ask", "mid") for x in "ohlc"
+    )
     rows = await store.conn.execute_fetchall(
-        "SELECT ts, bid_o, bid_h, bid_l, bid_c, ask_o, ask_h, ask_l, ask_c,"
-        " mid_o, mid_h, mid_l, mid_c, volume FROM candles_cache WHERE timeframe=? ORDER BY ts",
+        f"SELECT c.ts, {prices}, c.volume FROM candles_cache c JOIN series s ON s.id = c.series"
+        " WHERE c.timeframe=? ORDER BY c.ts",
         (tf,),
     )
     return pd.DataFrame(rows, columns=FULL_COLUMNS).astype({"ts": "int64", "v": "int64"})

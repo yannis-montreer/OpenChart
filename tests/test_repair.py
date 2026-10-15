@@ -86,7 +86,10 @@ async def test_stored_candles_are_never_replaced(db):
     await backfill(FakeProvider({"XAU_USD": CANDLES}), store, "XAU_USD", START, END)
     await delete(db, utc(2024, 3, 6, 3), utc(2024, 3, 6, 4))
     edited = utc(2024, 3, 6, 2, 59)  # next to the hole, inside the refetched range
-    await db.conn.execute("UPDATE candles_m1 SET mid_c=1.0 WHERE ts=?", (edited,))
+    # Prices are stored as integers times the series scale: this is a mid close of 1.0.
+    await db.conn.execute(
+        "UPDATE candles_m1 SET mid_c=(SELECT scale FROM series) WHERE ts=?", (edited,)
+    )
     await db.conn.commit()
 
     await repair(FakeProvider({"XAU_USD": CANDLES}), store, "XAU_USD", METAL_HOURS)

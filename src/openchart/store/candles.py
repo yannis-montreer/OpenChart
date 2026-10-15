@@ -4,15 +4,25 @@ Two provider granularities are stored: M1 (the source of truth for recent histor
 H1 (deep history, where M1 does not reach). Complete 4h, D and W bars derived from
 them are cached in `candles_cache`; every M1 or H1 write deletes the cached bars it
 could affect, so the cache never serves stale data and can always be rebuilt.
+
+Storage format (migration 0007): each (source, instrument) is a row of `series` with a
+small integer id and a price `scale`; candle rows hold the id and the prices as
+integers, `price * scale`. Reading divides by the scale in SQL, which gives back
+exactly the double that was written, as long as the price has at most
+`log10(scale)` decimals: `scale` is `10^(decimals + 1)`, one digit more than the
+instrument's display precision, which OANDA's mid prices need. A price with more
+digits is rounded to the scale and logged. Callers only ever see floats.
 """
 
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
 
 import aiosqlite
+import numpy as np
 import pandas as pd
 
 from openchart.market.aggregate import COLUMNS, FULL_COLUMNS, PRICES, empty_frame
@@ -20,16 +30,35 @@ from openchart.market.sessions import TradingHours, bar_bounds, bar_start
 from openchart.market.timeframes import TIMEFRAMES
 from openchart.providers.base import OHLC, Candle, InstrumentInfo
 
+log = logging.getLogger(__name__)
+
 TABLES = {"M1": "candles_m1", "H1": "candles_h1"}
 STEP_SECONDS = {"M1": 60, "H1": 3600}
 CACHED_TIMEFRAMES = ("4h", "1D", "1W")
+# Scale of a series whose instrument has no metadata (tests, tools): six decimals.
+DEFAULT_SCALE = 10**6
 
-_PRICE_COLUMNS = (
-    "bid_o, bid_h, bid_l, bid_c, ask_o, ask_h, ask_l, ask_c, mid_o, mid_h, mid_l, mid_c"
-)
+_PRICE_NAMES = [f"{side}_{x}" for side in ("bid", "ask", "mid") for x in "ohlc"]
+_PRICE_COLUMNS = ", ".join(_PRICE_NAMES)
 
 
-def _upsert_sql(table: str, key: str = "source, instrument, ts") -> str:
+def price_scale(decimals: int | None) -> int:
+    """The integer factor prices of an instrument with these display decimals are stored in."""
+    return DEFAULT_SCALE if decimals is None else 10 ** (decimals + 1)
+
+
+def _decoded(names: list[str], scale: int) -> str:
+    """SQL select list turning stored integers back into prices."""
+    return ", ".join(f"{name} / {scale}.0" for name in names)
+
+
+@dataclass(frozen=True)
+class Series:
+    id: int
+    scale: int
+
+
+def _upsert_sql(table: str, key: str = "series, ts") -> str:
     cols = [c.strip() for c in _PRICE_COLUMNS.split(",")] + ["volume"]
     updates = ", ".join(f"{c}=excluded.{c}" for c in cols)
     n = len(key.split(",")) + len(cols)
@@ -58,9 +87,47 @@ class CandleStore:
         # Bumped on every M1/H1 write, before it is queued. The cache compares it to
         # detect that the data it was computing from changed underneath it.
         self._epoch: dict[tuple[str, str], int] = defaultdict(int)
+        self._series: dict[tuple[str, str], Series] = {}
 
     def epoch(self, source: str, instrument: str) -> int:
         return self._epoch[(source, instrument)]
+
+    # Series (one per source and instrument)
+
+    async def series(self, source: str, instrument: str, *, create: bool = False) -> Series | None:
+        """The series of these candles. With `create`, made on first use (not committed:
+        the write that needs it commits it), its scale from the instrument's decimals."""
+        key = (source, instrument)
+        if key in self._series:
+            return self._series[key]
+        sql = "SELECT id, scale FROM series WHERE source=? AND instrument=?"
+        async with self.conn.execute(sql, key) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            if not create:
+                return None
+            decimals = await self._scalar(
+                "SELECT decimals FROM instruments WHERE source=? AND instrument=?", *key
+            )
+            await self.conn.execute(
+                "INSERT INTO series (source, instrument, scale) VALUES (?, ?, ?)",
+                (*key, price_scale(decimals)),
+            )
+            async with self.conn.execute(sql, key) as cur:
+                row = await cur.fetchone()
+        self._series[key] = Series(row[0], row[1])
+        return self._series[key]
+
+    def _check_exact(self, source: str, instrument: str, scale: int, inexact: int) -> None:
+        if inexact:
+            log.warning(
+                "%s/%s: %d candle(s) had prices with more decimals than the series stores"
+                " (scale %d); they were rounded",
+                source,
+                instrument,
+                inexact,
+                scale,
+            )
 
     # Writes
 
@@ -68,16 +135,24 @@ class CandleStore:
         self, source: str, instrument: str, candles: Iterable[Candle], granularity: str = "M1"
     ) -> int:
         """Insert or replace complete candles in one transaction. Returns rows written."""
-        rows = [
-            (source, instrument, c.ts, *c.bid, *c.ask, *c.mid, c.volume)
-            for c in candles
-            if c.complete
-        ]
-        if not rows:
+        complete = [c for c in candles if c.complete]
+        if not complete:
             return 0
+        series = await self.series(source, instrument, create=True)
+        assert series is not None
+        scale = series.scale
+        rows = []
+        inexact = 0
+        for c in complete:
+            prices = (*c.bid, *c.ask, *c.mid)
+            ints = [round(price * scale) for price in prices]
+            if any(i / scale != price for i, price in zip(ints, prices, strict=True)):
+                inexact += 1
+            rows.append((series.id, c.ts, *ints, c.volume))
+        self._check_exact(source, instrument, scale, inexact)
         self._epoch[(source, instrument)] += 1
         await self.conn.executemany(_upsert_sql(TABLES[granularity]), rows)
-        stamps = [r[2] for r in rows]
+        stamps = [r[1] for r in rows]
         await self._invalidate_cache(source, instrument, min(stamps), max(stamps))
         await self.conn.commit()
         return len(rows)
@@ -94,6 +169,8 @@ class CandleStore:
         before or inside it (a download extending history backward), the dropped range is
         recorded in `cache_dirty` and `CandleCache.extend` recomputes it.
         """
+        series = await self.series(source, instrument)
+        assert series is not None  # the write that calls this created it
         for name in CACHED_TIMEFRAMES:
             tf = TIMEFRAMES[name]
             start, end = bar_start(lo, tf), bar_bounds(hi + 3599, tf)[1]
@@ -102,15 +179,13 @@ class CandleStore:
                 continue  # nothing cached: the cache starts from the oldest data anyway
             if end > last:
                 await self.conn.execute(
-                    "DELETE FROM candles_cache WHERE source=? AND instrument=? AND timeframe=?"
-                    " AND ts>=?",
-                    (source, instrument, name, start),
+                    "DELETE FROM candles_cache WHERE series=? AND timeframe=? AND ts>=?",
+                    (series.id, name, start),
                 )
                 continue
             await self.conn.execute(
-                "DELETE FROM candles_cache WHERE source=? AND instrument=? AND timeframe=?"
-                " AND ts>=? AND ts<?",
-                (source, instrument, name, start, end),
+                "DELETE FROM candles_cache WHERE series=? AND timeframe=? AND ts>=? AND ts<?",
+                (series.id, name, start, end),
             )
             await self.conn.execute(
                 "INSERT INTO cache_dirty (source, instrument, timeframe, start_ts, end_ts)"
@@ -138,28 +213,32 @@ class CandleStore:
         return row[0] if row else None
 
     async def count(self, source: str, instrument: str, granularity: str = "M1") -> int:
+        series = await self.series(source, instrument)
+        if series is None:
+            return 0
         n = await self._scalar(
-            f"SELECT COUNT(*) FROM {TABLES[granularity]} WHERE source=? AND instrument=?",
-            source,
-            instrument,
+            f"SELECT COUNT(*) FROM {TABLES[granularity]} WHERE series=?", series.id
         )
         return n or 0
 
     async def first_ts(self, source: str, instrument: str, granularity: str = "M1") -> int | None:
+        series = await self.series(source, instrument)
+        if series is None:
+            return None
         return await self._scalar(
-            f"SELECT MIN(ts) FROM {TABLES[granularity]} WHERE source=? AND instrument=?",
-            source,
-            instrument,
+            f"SELECT MIN(ts) FROM {TABLES[granularity]} WHERE series=?", series.id
         )
 
     async def last_ts(
         self, source: str, instrument: str, granularity: str = "M1", *, before: int | None = None
     ) -> int | None:
         """Newest stored candle, or the newest one strictly before `before`."""
+        series = await self.series(source, instrument)
+        if series is None:
+            return None
         return await self._scalar(
-            f"SELECT MAX(ts) FROM {TABLES[granularity]} WHERE source=? AND instrument=? AND ts<?",
-            source,
-            instrument,
+            f"SELECT MAX(ts) FROM {TABLES[granularity]} WHERE series=? AND ts<?",
+            series.id,
             2**62 if before is None else before,
         )
 
@@ -171,22 +250,25 @@ class CandleStore:
         end: int | None = None,
         granularity: str = "M1",
     ) -> list[int]:
-        sql = (
-            f"SELECT ts FROM {TABLES[granularity]}"
-            " WHERE source=? AND instrument=? AND ts>=? AND ts<? ORDER BY ts"
-        )
-        params = (source, instrument, start or 0, end or 2**62)
+        series = await self.series(source, instrument)
+        if series is None:
+            return []
+        sql = f"SELECT ts FROM {TABLES[granularity]} WHERE series=? AND ts>=? AND ts<? ORDER BY ts"
+        params = (series.id, start or 0, end or 2**62)
         async with self.conn.execute(sql, params) as cur:
             return [row[0] for row in await cur.fetchall()]
 
     async def read(
         self, source: str, instrument: str, start: int, end: int, granularity: str = "M1"
     ) -> list[Candle]:
+        series = await self.series(source, instrument)
+        if series is None:
+            return []
         sql = (
-            f"SELECT ts, {_PRICE_COLUMNS}, volume FROM {TABLES[granularity]}"
-            " WHERE source=? AND instrument=? AND ts>=? AND ts<? ORDER BY ts"
+            f"SELECT ts, {_decoded(_PRICE_NAMES, series.scale)}, volume FROM {TABLES[granularity]}"
+            " WHERE series=? AND ts>=? AND ts<? ORDER BY ts"
         )
-        async with self.conn.execute(sql, (source, instrument, start, end)) as cur:
+        async with self.conn.execute(sql, (series.id, start, end)) as cur:
             rows = await cur.fetchall()
         return [Candle(r[0], OHLC(*r[1:5]), OHLC(*r[5:9]), OHLC(*r[9:13]), r[13]) for r in rows]
 
@@ -214,14 +296,16 @@ class CandleStore:
         With `price=None`: ts, the twelve bid/ask/mid OHLC columns and v."""
         if price is not None and price not in PRICES:
             raise ValueError(f"price must be one of {PRICES}")
-        cols = f"{price}_o, {price}_h, {price}_l, {price}_c" if price else _PRICE_COLUMNS
+        columns = COLUMNS if price else FULL_COLUMNS
+        series = await self.series(source, instrument)
+        if series is None:
+            return empty_frame(columns)
+        names = [f"{price}_{x}" for x in "ohlc"] if price else _PRICE_NAMES
         sql = (
-            f"SELECT ts, {cols}, volume FROM {TABLES[granularity]}"
-            " WHERE source=? AND instrument=? AND ts>=? AND ts<? ORDER BY ts"
+            f"SELECT ts, {_decoded(names, series.scale)}, volume FROM {TABLES[granularity]}"
+            " WHERE series=? AND ts>=? AND ts<? ORDER BY ts"
         )
-        return await self._frame(
-            sql, (source, instrument, start, end), COLUMNS if price else FULL_COLUMNS
-        )
+        return await self._frame(sql, (series.id, start, end), columns)
 
     async def read_m1_frame(
         self, source: str, instrument: str, start: int, end: int, price: str = "mid"
@@ -281,18 +365,22 @@ class CandleStore:
     # Cache of derived bars
 
     async def cache_last_ts(self, source: str, instrument: str, timeframe: str) -> int | None:
+        series = await self.series(source, instrument)
+        if series is None:
+            return None
         return await self._scalar(
-            "SELECT MAX(ts) FROM candles_cache WHERE source=? AND instrument=? AND timeframe=?",
-            source,
-            instrument,
+            "SELECT MAX(ts) FROM candles_cache WHERE series=? AND timeframe=?",
+            series.id,
             timeframe,
         )
 
     async def cache_count(self, source: str, instrument: str, timeframe: str) -> int:
+        series = await self.series(source, instrument)
+        if series is None:
+            return 0
         n = await self._scalar(
-            "SELECT COUNT(*) FROM candles_cache WHERE source=? AND instrument=? AND timeframe=?",
-            source,
-            instrument,
+            "SELECT COUNT(*) FROM candles_cache WHERE series=? AND timeframe=?",
+            series.id,
             timeframe,
         )
         return n or 0
@@ -316,14 +404,19 @@ class CandleStore:
         if bars.empty:
             await self.conn.commit()
             return 0
-        values = bars[FULL_COLUMNS].to_numpy(dtype=object)
+        series = await self.series(source, instrument, create=True)
+        assert series is not None
+        prices = bars[FULL_COLUMNS[1:13]].to_numpy(dtype=np.float64)
+        ints = np.rint(prices * series.scale).astype(np.int64)
+        inexact = int((ints / series.scale != prices).any(axis=1).sum())
+        self._check_exact(source, instrument, series.scale, inexact)
+        stamps = bars["ts"].to_numpy(dtype=np.int64)
+        volumes = bars["v"].to_numpy(dtype=np.int64)
         rows = [
-            (source, instrument, timeframe, int(r[0]), *map(float, r[1:13]), int(r[13]))
-            for r in values
+            (series.id, timeframe, int(ts), *map(int, row), int(v))
+            for ts, row, v in zip(stamps, ints, volumes, strict=True)
         ]
-        await self.conn.executemany(
-            _upsert_sql("candles_cache", "source, instrument, timeframe, ts"), rows
-        )
+        await self.conn.executemany(_upsert_sql("candles_cache", "series, timeframe, ts"), rows)
         await self.conn.commit()
         return len(rows)
 
@@ -341,12 +434,16 @@ class CandleStore:
         """Cached bars in `[start, end)` for one price; the first or (`latest`) last `limit`."""
         if price not in PRICES:
             raise ValueError(f"price must be one of {PRICES}")
+        series = await self.series(source, instrument)
+        if series is None:
+            return empty_frame(COLUMNS)
+        names = [f"{price}_{x}" for x in "ohlc"]
         sql = (
-            f"SELECT ts, {price}_o, {price}_h, {price}_l, {price}_c, volume FROM candles_cache"
-            " WHERE source=? AND instrument=? AND timeframe=? AND ts>=? AND ts<?"
+            f"SELECT ts, {_decoded(names, series.scale)}, volume FROM candles_cache"
+            " WHERE series=? AND timeframe=? AND ts>=? AND ts<?"
             f" ORDER BY ts {'DESC' if latest else 'ASC'}"
         )
-        params: tuple = (source, instrument, timeframe, start, end)
+        params: tuple = (series.id, timeframe, start, end)
         if limit is not None:
             sql += " LIMIT ?"
             params += (limit,)
@@ -356,12 +453,13 @@ class CandleStore:
         return frame
 
     async def clear_cache(self, source: str | None = None, instrument: str | None = None) -> None:
-        for table in ("candles_cache", "cache_dirty"):
-            await self.conn.execute(
-                f"DELETE FROM {table}"
-                " WHERE (? IS NULL OR source=?) AND (? IS NULL OR instrument=?)",
-                (source, source, instrument, instrument),
-            )
+        which = "(? IS NULL OR source=?) AND (? IS NULL OR instrument=?)"
+        params = (source, source, instrument, instrument)
+        await self.conn.execute(
+            f"DELETE FROM candles_cache WHERE series IN (SELECT id FROM series WHERE {which})",
+            params,
+        )
+        await self.conn.execute(f"DELETE FROM cache_dirty WHERE {which}", params)
         await self.conn.commit()
 
     # Instruments
@@ -420,7 +518,9 @@ class CandleStore:
         """Any stored candles from this source (any instrument, M1 or H1)."""
         for table in ("candles_m1", "candles_h1"):
             async with self.conn.execute(
-                f"SELECT 1 FROM {table} WHERE source=? LIMIT 1", (source,)
+                f"SELECT 1 FROM {table} WHERE series IN (SELECT id FROM series WHERE source=?)"
+                " LIMIT 1",
+                (source,),
             ) as cur:
                 if await cur.fetchone():
                     return True
@@ -498,19 +598,20 @@ class CandleStore:
         """Delete an instrument and everything stored for its prices (candles, cache,
         closures). Rows deleted per table."""
         counts: dict[str, int] = {}
-        for table in (
-            "candles_m1",
-            "candles_h1",
-            "candles_cache",
-            "cache_dirty",
-            "closures",
-            "instruments",
-        ):
+        series = await self.series(source, instrument)
+        for table in ("candles_m1", "candles_h1", "candles_cache"):
+            if series is None:
+                counts[table] = 0
+                continue
+            cur = await self.conn.execute(f"DELETE FROM {table} WHERE series=?", (series.id,))
+            counts[table] = cur.rowcount
+        for table in ("series", "cache_dirty", "closures", "instruments"):
             cur = await self.conn.execute(
                 f"DELETE FROM {table} WHERE source=? AND instrument=?", (source, instrument)
             )
             counts[table] = cur.rowcount
         await self.conn.commit()
+        self._series.pop((source, instrument), None)
         self._epoch[(source, instrument)] += 1
         return counts
 
