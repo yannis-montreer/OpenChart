@@ -17,7 +17,10 @@ from openchart.alerts.service import AlertService
 from openchart.api.auth import Auth
 from openchart.api.hub import Hub
 from openchart.config import Config, OandaConfig
+from openchart.indicators._custom import CustomIndicators
 from openchart.indicators._registry import Registry, load_indicators
+from openchart.indicators.worker.isolation import Isolation, start_worker
+from openchart.indicators.worker.runner import IndicatorRunner
 from openchart.lock import DataFolderInUse, DataFolderLock, in_use_message
 from openchart.market.cache import CandleCache
 from openchart.market.candle_builder import CandleBuilder
@@ -64,6 +67,8 @@ class Server:
         *,
         secrets: Secrets | None = None,
         provider_factory: ProviderFactory = oanda_factory,
+        indicator_worker: bool = True,
+        indicator_launchers: list[Any] | None = None,
     ):
         self.config = config
         self._fixed_provider = provider  # tests inject one; it is then always used
@@ -80,7 +85,11 @@ class Server:
         self._tasks: list[asyncio.Task[Any]] = []
         self._reconfigure_lock = asyncio.Lock()
         self.telegram_transport = None  # tests replace the HTTP transport
-        self.indicators = Registry()
+        self.indicators = Registry()  # built-in: they run here (D5)
+        self.custom = CustomIndicators(self.indicators_dir)  # yours: they run in the worker
+        self.indicator_runner: IndicatorRunner | None = None
+        self._indicator_worker = indicator_worker  # tests that need no worker turn it off
+        self._indicator_launchers = indicator_launchers
         self.db: Database | None = None
         self.lock: DataFolderLock | None = None
         self.alerts: AlertService | None = None
@@ -148,8 +157,10 @@ class Server:
         )
         with contextlib.suppress(OSError):
             self.indicators_dir.mkdir(parents=True, exist_ok=True)
-        self.indicators = load_indicators(self.indicators_dir)
-        log.info("indicators: %s", ", ".join(self.indicators.indicators) or "none")
+        self.indicators = load_indicators()
+        log.info("built-in indicators: %s", ", ".join(self.indicators.indicators) or "none")
+        # In the background: the first worker takes a second or two (importing pandas).
+        self._tasks.append(asyncio.create_task(self._start_indicator_worker(), name="worker"))
         self._tasks.append(asyncio.create_task(self._status_loop(), name="status"))
         self.alerts = AlertService(self)
         await self.alerts.start()
@@ -162,6 +173,32 @@ class Server:
             )
         await self.reconfigure()
         await self.alerts.announce_start()
+
+    @property
+    def isolation(self) -> Isolation | None:
+        """How custom indicator code is isolated here; None while the worker starts."""
+        return self.custom.isolation
+
+    async def _start_indicator_worker(self) -> None:
+        if not self._indicator_worker:
+            self.custom.worker_ready(
+                None, Isolation("unavailable", False, "the indicator worker is turned off")
+            )
+            return
+        try:
+            runner, isolation = await start_worker(
+                self.config.data_dir, launchers=self._indicator_launchers
+            )
+        except Exception as exc:  # never takes the server down
+            log.exception("indicator worker")
+            runner, isolation = (
+                None,
+                Isolation("unavailable", False, f"{type(exc).__name__}: {exc}"),
+            )
+        self.indicator_runner = runner
+        self.custom.worker_ready(runner, isolation)
+        if runner is None:
+            log.error("indicator sandbox: unavailable: %s", isolation.reason)
 
     async def app_settings(self) -> AppSettings:
         return await load_app_settings(self.settings, self.config)
@@ -282,6 +319,9 @@ class Server:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
         self._tasks.clear()
+        if self.indicator_runner is not None:
+            await self.indicator_runner.stop()
+            self.indicator_runner = None
         if self._fixed_provider is not None:
             await self._fixed_provider.aclose()
         if self.db is not None:

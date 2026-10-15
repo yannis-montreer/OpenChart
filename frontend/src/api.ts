@@ -340,6 +340,8 @@ export interface IndicatorCatalog {
   indicators: IndicatorDef[];
   errors: { file: string; error: string }[];
   folder: string;
+  /** How your own files are isolated here (CI-1); the notice says when they are not. */
+  isolation?: { level: string; minimum_met?: boolean; reason?: string; notice?: string | null };
 }
 
 export interface IndicatorValues {

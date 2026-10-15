@@ -37,6 +37,37 @@ from openchart.files import open_private
 log = logging.getLogger(__name__)
 
 SECRET_NAMES = ("oanda_token", "telegram_token")
+
+# Set on the server's own machine only, with `openchart settings set` (decision D2): no
+# HTTP endpoint can change them. Read on every request, so no restart is needed.
+INDICATOR_EDITING = "indicator_editing"  # auto | on | off: editing custom code in a browser
+BEHIND_PROXY = "behind_proxy"  # a reverse proxy in front: "auto" then means off
+EDITING_VALUES = ("auto", "on", "off")
+_TRUE, _FALSE = ("on", "true", "yes", "1"), ("off", "false", "no", "0")
+
+
+def _editing_value(text: str) -> str:
+    value = text.strip().lower()
+    if value not in EDITING_VALUES:
+        raise ValueError(f"indicator-editing must be one of {', '.join(EDITING_VALUES)}")
+    return value
+
+
+def _bool_value(text: str) -> bool:
+    value = text.strip().lower()
+    if value in _TRUE:
+        return True
+    if value in _FALSE:
+        return False
+    raise ValueError("behind-proxy must be on or off")
+
+
+# The keys `openchart settings get/set` accepts: the command's name, the table's key, the
+# parser of a value, the default.
+LOCAL_SETTINGS = {
+    "indicator-editing": (INDICATOR_EDITING, _editing_value, "auto"),
+    "behind-proxy": (BEHIND_PROXY, _bool_value, False),
+}
 SECRET_KEY_ENV = "OPENCHART_SECRET_KEY"
 SECRET_KEY_FILE_ENV = "OPENCHART_SECRET_KEY_FILE"
 SECRETS_FILE = "secrets.enc"

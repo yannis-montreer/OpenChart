@@ -344,7 +344,8 @@ Implement drawings in the frontend with Lightweight Charts custom primitives. Th
 
 ### Indicators (milestone 7)
 Computed **server-side in Python** so the chart and the alerts use identical numbers. Sent as series aligned to candles, in the price type the chart shows (mid, bid or ask).
-- Each indicator is one Python file (docs/indicators.md): name, parameters with defaults and types, overlay or own pane, outputs, a compute function and an optional warm-up. The server discovers the built-in files and those in `<data dir>/indicators/` at startup; never uploaded through the UI. The Indicators menu and the settings dialog (Inputs and Style tabs) are generated from the parameter schemas.
+- Each indicator is one Python file (docs/indicators.md): name, parameters with defaults and types, overlay or own pane, outputs, a compute function and an optional warm-up. Built-in files run in the server. Your own files in `<data dir>/indicators/` run in a separate worker process with less than the server can do, never in the server (docs/custom-indicators.md, CI-1); they are read again when they change. The Indicators menu and the settings dialog (Inputs and Style tabs) are generated from the parameter schemas.
+- Code may come from the browser only when the install isolates it (the minimum isolation in docs/custom-indicators.md) and the editing setting allows it, which only the server's own machine can change (`openchart settings set indicator-editing`). The editor itself comes in CI-4.
 - EMA: alpha = 2 / (length + 1), seeded with the simple average of the first `length` values (as TradingView's `ta.ema`).
 - First set: SMA, EMA, RSI, MACD, Bollinger Bands, ATR.
 - Indicators are composable functions, so indicator-on-indicator works.

@@ -86,16 +86,19 @@ export function openIndicatorPicker(opts: { catalog: IndicatorCatalog; onPick: (
         ...opts.catalog.errors.map((e) => h("div", { class: "ind-error" }, icon("warn", 14), h("b", {}, e.file), h("span", {}, e.error))),
       )
     : null;
+  // How isolated your files are on this install (they run in the indicator worker).
+  const notice = opts.catalog.isolation?.notice;
   box.append(
     h("div", { class: "ind-search" }, icon("search", 16), search),
     list,
     errors ?? "",
+    notice ? h("div", { class: "ind-error ind-notice" }, icon("warn", 14), h("span", {}, notice)) : "",
     h(
       "div",
       { class: "ind-foot" },
       "Add your own: put a Python file in ",
       h("code", {}, opts.catalog.folder),
-      " and restart the server. See docs/indicators.md.",
+      " (no restart needed). See docs/indicators.md.",
     ),
   );
   render();

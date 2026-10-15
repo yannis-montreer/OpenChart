@@ -34,10 +34,16 @@ jobs:
           cache: pip
       - run: pip install -e ".[dev]"
       - run: pytest -q
+        env:
+          # tests/test_worker_windows.py: an AppContainer with decoys in Credential Manager
+          # and the registry, on the runner only (never on someone's own PC by default).
+          OPENCHART_TEST_APPCONTAINER: ${{ runner.os == 'Windows' && '1' || '' }}
 
   windows-package:
     # The release build (server folder and viewer), smoke-tested; then the service installer on
-    # the runner, installed and reinstalled over the running service. Nothing is kept.
+    # the runner, installed and reinstalled over the running service, with the indicator
+    # sandbox checked as LocalSystem (AppContainer, probes, private desktop, uninstall
+    # proof). Nothing is kept.
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -118,13 +124,26 @@ jobs:
           curl -fsS http://127.0.0.1:18000/api/setup/status
           docker compose logs openchart | grep -q "secrets: encrypted file /data/secrets.enc"
           docker compose exec -T openchart sh -c 'test -f /data/openchart.db && openchart backup && ls /data/backups'
+      - name: Custom indicators run in the sidecar, with the minimum isolation
+        run: |
+          for i in $(seq 1 30); do
+            docker compose logs openchart | grep -q "indicator sandbox: " && break
+            sleep 2
+          done
+          docker compose logs openchart | grep "indicator sandbox"
+          docker compose logs openchart | grep -q "indicator sandbox: ready (sidecar)"
+          # The same probes from a second connection, and a script on 5,000 bars.
+          docker compose exec -T openchart openchart sandbox check | tee check.txt
+          grep -q "Minimum isolation: met" check.txt
+          # The sidecar: its own uid, no data volume, no network interface but loopback.
+          docker compose exec -T indicator-worker sh -c 'test "$(id -u)" = 10002 && test ! -e /data/openchart.db && test "$(ls /sys/class/net)" = lo'
       - name: Not reachable from other addresses when bound to 127.0.0.1
         run: |
           ip=$(hostname -I | awk '{print $1}')
           ! curl -fsS --max-time 3 "http://$ip:18000/api/health"
       - name: Logs
         if: always()
-        run: docker compose logs openchart || true
+        run: docker compose logs || true
 
   frontend:
     runs-on: ubuntu-latest

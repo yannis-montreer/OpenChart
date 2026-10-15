@@ -22,14 +22,15 @@ item are in `docs/decisions.md`. Updated 2026-10-15.
 | Data-folder lock: commands that write refuse while a server runs; the installer stops the service first (tested in CI) | #14 |
 | v0.1.0: version, release notes, draft release from the notes file | #15 |
 
+**v0.1.0 is released as a pre-release** (owner, 2026-10-15).
+
 ## Parked on branches (not merged)
 
-- **`custom-indicators`** (local, not pushed): custom indicators written in Python.
+- **`custom-indicators`** (local, not pushed): custom indicators written in Python. Main merged in on 2026-10-15; **CI-1 is on it**, waiting for the owner's review.
   - `docs/custom-indicators-design.md`: the approved design. Decisions D1 to D7 are at its top. D2 is the request-origin rule for browser editing; D7 (a) means no custom code on a service install without its AppContainer.
   - `docs/ci0-spike-report.md`: the CI-0 spike, final. **GO** for the Windows service (AppContainer + job object + private desktop, proven as LocalSystem) and for Docker (sidecar container). The source install is a weaker mode with browser editing always off.
   - `docs/ci1-plan.md`: the approved CI-1 plan (files, tests, installer steps, upgrade from M8, rollback).
   - `tools/ci0_spike/` and `.github/workflows/ci0-spike.yml`: spike code, to be replaced by CI-1.
-  - **Before CI-1:** bring the branch up to date with main, since main moved a lot (storage, the lock, v0.1.0).
 - **`storage-review`** (local, not pushed): the storage analysis the owner decided from.
   - `docs/storage-review.md`: layouts, retention, logs, replay, 5s candles, Dukascopy, cold storage.
   - `docs/hosting-notes.md`: what multi-user hosting would need.

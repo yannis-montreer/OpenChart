@@ -65,7 +65,7 @@ def test_a_server_whose_start_fails_closes_what_it_opened(data):
 
 
 def test_any_start_failure_closes_everything(tmp_path, monkeypatch):
-    def broken(_folder):
+    def broken():
         raise RuntimeError("an indicator folder that cannot be read")
 
     monkeypatch.setattr("openchart.server.load_indicators", broken)
@@ -101,7 +101,7 @@ def test_the_process_really_ends_after_a_failed_start(tmp_path):
         import openchart.server
         from openchart.main import main
 
-        def broken(folder):  # called once the database is open
+        def broken():  # called once the database is open
             raise RuntimeError("fails after the database is open")
 
         openchart.server.load_indicators = broken

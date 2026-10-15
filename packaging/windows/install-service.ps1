@@ -13,6 +13,10 @@
       (100.64.0.0/10).
     - Warns if the PC goes to sleep, and prints the powercfg commands to stop that (it does
       not run them).
+    - Backs up an existing data folder first (openchart backup), and stops if that fails.
+    - Sets up the indicator sandbox (docs/custom-indicators.md): custom indicators run in a
+      worker inside an AppContainer that may read the release folder and nothing else. Only
+      with the release build; -NoSandbox removes it (custom indicators then do not run).
     Run it again to change the port or the data folder: it updates the service in place.
 
     In the release zip, run install-service.cmd (it asks for administrator rights).
@@ -41,7 +45,9 @@ param(
     [string]$Nssm = "",
     [string]$FirewallRemote = "100.64.0.0/10",
     [switch]$NoFirewall,
-    [switch]$NoStart
+    [switch]$NoStart,
+    [switch]$NoSandbox,
+    [switch]$NoBackup
 )
 
 $ErrorActionPreference = "Stop"
@@ -140,6 +146,15 @@ Step "Data folder"
 $env:OPENCHART_DATA_DIR = $DataDir   # for the openchart commands this script runs
 Remove-Item Env:OPENCHART_SECRET_KEY -ErrorAction SilentlyContinue
 Remove-Item Env:OPENCHART_SECRET_KEY_FILE -ErrorAction SilentlyContinue
+if ((Test-Path (Join-Path $DataDir "openchart.db")) -and -not $NoBackup) {
+    # Before anything changes it: an upgrade may migrate the database.
+    if ($PSCmdlet.ShouldProcess($DataDir, "Back up the data folder (openchart backup)")) {
+        $r = Exec $Exe backup --data-dir $DataDir
+        $r.Lines | Where-Object { $_ -notmatch "^\d{4}-\d\d-\d\d " } | ForEach-Object { Note $_ }
+        if ($r.Code -ne 0) { Fail "The backup failed (see above); nothing was changed. -NoBackup skips it." }
+        Ok "Backed up before the update."
+    }
+}
 if (-not (Test-Path $DataDir)) {
     if ($PSCmdlet.ShouldProcess($DataDir, "Create the data folder, readable by SYSTEM, Administrators and you only")) {
         New-Item -ItemType Directory -Path $DataDir -Force | Out-Null
@@ -170,6 +185,40 @@ if ($PSCmdlet.ShouldProcess($KeyFile, "Copy the tokens into $DataDir\secrets.enc
     Ok "Key file locked: SYSTEM (read), Administrators (full)."
 }
 
+# --- Indicator sandbox ------------------------------------------------------------------
+# Custom indicators run in a worker inside an AppContainer ("OpenChart.IndicatorWorker",
+# no capabilities: no network, no files but what its SID is granted). It gets read and
+# execute on the release folder only; the data folder and the key file keep their ACLs.
+# The server creates the container's profile itself, as SYSTEM, when it starts.
+Step "Indicator sandbox"
+$ReleaseDir = Split-Path $Exe
+$isRelease = (Test-Path (Join-Path $ReleaseDir "_internal")) -and ($Exe -notlike "*\.venv\*")
+$SandboxSid = $null
+$r = Exec $Exe sandbox sid
+$knownSid = if ($r.Code -eq 0) { $r.Lines | Where-Object { $_ -match '^S-1-15-2-' } | Select-Object -First 1 } else { $null }
+if ($NoSandbox) {
+    if ($knownSid -and $PSCmdlet.ShouldProcess($ReleaseDir, "Remove the sandbox's read access")) {
+        Exec icacls.exe $ReleaseDir /remove "*$knownSid" /T /C /Q | Out-Null
+    }
+    Ok "No sandbox (-NoSandbox): custom indicators do not run on this install; built-in ones do."
+    Note "Its profile is removed by uninstall-service.ps1, or the next time it is set up."
+} elseif (-not $isRelease) {
+    Note "Custom indicators need the release build; with a source checkout they do not run under the service."
+    Note "Built-in indicators, charts and alerts are not affected."
+} elseif (-not $knownSid) {
+    Warn "Could not get the sandbox's identity: $($r.Text)"
+    Note "Custom indicators will not run; everything else works. Rerun this installer after fixing it."
+} elseif ($PSCmdlet.ShouldProcess($ReleaseDir, "Grant the indicator sandbox read and execute on the release folder")) {
+    $g = Exec icacls.exe $ReleaseDir /grant "*${knownSid}:(OI)(CI)RX" /T /C /Q
+    if ($g.Code -ne 0) {
+        Warn "Could not grant the sandbox read access to ${ReleaseDir}: $($g.Text)"
+        Note "Custom indicators will not run; everything else works. Rerun this installer after fixing it."
+    } else {
+        $SandboxSid = $knownSid
+        Ok "The sandbox ($SandboxSid) may read and run $ReleaseDir, nothing else."
+    }
+}
+
 # --- Service ----------------------------------------------------------------------------
 Step "Windows service '$Name'"
 $existing = Get-Service -Name $Name -ErrorAction SilentlyContinue
@@ -188,7 +237,11 @@ if ($PSCmdlet.ShouldProcess($Name, "Configure: start on boot, restart on exit, L
     $log = Join-Path $logDir "service.log"
     Invoke-Nssm set $Name AppParameters "run --data-dir `"$DataDir`" --host $BindAddress --port $Port"
     Invoke-Nssm set $Name AppDirectory $DataDir
-    Invoke-Nssm set $Name AppEnvironmentExtra "OPENCHART_SECRET_KEY_FILE=$KeyFile" "OPENCHART_DATA_DIR=$DataDir" "PYTHONUNBUFFERED=1" "PYTHONIOENCODING=utf-8"
+    $envExtra = @("OPENCHART_SECRET_KEY_FILE=$KeyFile", "OPENCHART_DATA_DIR=$DataDir", "PYTHONUNBUFFERED=1", "PYTHONIOENCODING=utf-8")
+    # Recorded so the server knows the sandbox was set up and the uninstaller removes
+    # exactly this grant.
+    if ($SandboxSid) { $envExtra += "OPENCHART_SANDBOX_SID=$SandboxSid" }
+    Invoke-Nssm set $Name AppEnvironmentExtra @envExtra
     Invoke-Nssm set $Name DisplayName "OpenChart server"
     Invoke-Nssm set $Name Description "OpenChart: charts, price feed and alerts. http://localhost:$Port"
     Invoke-Nssm set $Name ObjectName LocalSystem
@@ -274,6 +327,8 @@ if (-not $NoStart -and $PSCmdlet.ShouldProcess($Name, "Start the service")) {
     Step "Starting"
     # NSSM 2.24 may say "unexpected status SERVICE_START_PENDING": the server is still
     # starting. What counts is whether it answers.
+    $serviceLog = Join-Path $DataDir "logs\service.log"
+    $logStart = if (Test-Path $serviceLog) { (Get-Item $serviceLog).Length } else { 0 }
     $started = Exec $script:NssmExe start $Name
     $url = "http://127.0.0.1:$Port/api/health"
     $up = $false
@@ -289,6 +344,30 @@ if (-not $NoStart -and $PSCmdlet.ShouldProcess($Name, "Start the service")) {
     } else {
         Warn "The server did not answer within a minute. See the log: $(Join-Path $DataDir 'logs\service.log')"
         if ($started.Text) { Note "nssm start said: $($started.Text)" }
+    }
+    if ($up -and $SandboxSid) {
+        # The server starts the first worker in the background and says how it went.
+        $verdict = $null
+        foreach ($i in 1..60) {
+            if (Test-Path $serviceLog) {
+                $fs = [IO.File]::Open($serviceLog, "Open", "Read", "ReadWrite")
+                try {
+                    $fs.Seek([math]::Min($logStart, $fs.Length), "Begin") | Out-Null
+                    $text = (New-Object IO.StreamReader($fs)).ReadToEnd()
+                } finally { $fs.Close() }
+                $m = [regex]::Match($text, "indicator sandbox: (ready \(AppContainer\)|unavailable: [^\r\n]*)")
+                if ($m.Success) { $verdict = $m.Groups[1].Value; break }
+            }
+            Start-Sleep -Seconds 1
+        }
+        if ($verdict -eq "ready (AppContainer)") {
+            Ok "Indicator sandbox: ready (AppContainer)."
+        } elseif ($verdict) {
+            Warn "Indicator sandbox: $verdict"
+            Note "Custom indicators will not run; everything else works. Rerun this installer after fixing it."
+        } else {
+            Warn "The indicator sandbox did not report within a minute. See the log: $serviceLog"
+        }
     }
 }
 

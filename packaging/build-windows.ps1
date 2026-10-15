@@ -105,6 +105,7 @@ $tmp = Join-Path ([IO.Path]::GetTempPath()) ("openchart-smoke-" + [guid]::NewGui
 New-Item -ItemType Directory $tmp | Out-Null
 Run $exe --version
 Run $exe self-test
+Run $exe sandbox check --data-dir $tmp   # the indicator worker of the frozen build, as this user
 $env:OPENCHART_SECRET_KEY = (& $exe secrets new-key).Trim()   # the file store, as in the service
 $log = Join-Path $tmp "server.log"
 $proc = Start-Process $exe -ArgumentList @("run", "--data-dir", "`"$tmp`"", "--port", "$SmokePort") -PassThru -WindowStyle Hidden -RedirectStandardError $log -RedirectStandardOutput (Join-Path $tmp "out.log")
@@ -121,7 +122,14 @@ try {
     $logText = Get-Content $log -Raw
     if ($logText -notmatch "indicators: ema") { throw "The built-in EMA indicator was not loaded." }
     if ($logText -notmatch "secrets: encrypted file") { throw "The encrypted secrets file was not used." }
-    Write-Host "   health ok, web page served, setup required: $($setup.setup_required), EMA loaded, secrets file used" -ForegroundColor Green
+    foreach ($i in 1..30) {
+        if ($logText -match "indicator sandbox: ") { break }
+        Start-Sleep -Seconds 1
+        $logText = Get-Content $log -Raw
+    }
+    $sandbox = [regex]::Match($logText, "indicator sandbox: [^\r\n]*").Value
+    if ($sandbox -notmatch "ready \(restricted token\)") { throw "The indicator worker did not start: $sandbox" }
+    Write-Host "   health ok, web page served, setup required: $($setup.setup_required), EMA loaded, secrets file used, indicator worker ready" -ForegroundColor Green
 } finally {
     Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
     Remove-Item Env:OPENCHART_SECRET_KEY -ErrorAction SilentlyContinue

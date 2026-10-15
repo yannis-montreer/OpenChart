@@ -1,8 +1,12 @@
 """Indicator routes (SPEC sections 7 and 11): the catalog, and values aligned to candles.
 
-Values are computed here, in Python, on the same bars `/api/candles` returns for the same
-query (instrument, timeframe, price type, range), plus as many earlier bars as the
-indicator asks for to settle (`warmup`). One value per bar; null where there is none.
+Values are computed on the same bars `/api/candles` returns for the same query
+(instrument, timeframe, price type, range), plus as many earlier bars as the indicator
+asks for to settle (`warmup`). One value per bar; null where there is none.
+
+Built-in indicators are computed here, in the server; your own files in the worker
+(`indicators/worker/`). The two are separate namespaces: `kind=builtin|custom` picks one;
+without it, a built-in wins and a custom file is found when no built-in has its id.
 """
 
 from __future__ import annotations
@@ -13,8 +17,10 @@ import math
 from typing import Any
 
 import pandas as pd
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 
+from openchart.api.editing import editing_for
+from openchart.indicators.worker.runner import ScriptFailed, WorkerUnavailable
 from openchart.market.aggregate import PRICES
 from openchart.market.series import MAX_LIMIT
 from openchart.market.timeframes import TIMEFRAMES, parse_timeframe
@@ -28,12 +34,32 @@ def indicator_routes(server: Server) -> APIRouter:
     router = APIRouter(prefix="/api/indicators")
 
     @router.get("")
-    async def catalog() -> dict[str, Any]:
+    async def catalog(request: Request) -> dict[str, Any]:
         registry = server.indicators
+        custom = await server.custom.refresh()
+        isolation = server.isolation
+        builtin = [{**i.to_json(), "kind": "builtin"} for i in registry.catalog()]
+        runnable = [
+            d.to_json()["definition"]
+            for d in custom
+            if d.indicator is not None and d.status == "ok" and d.id not in registry.indicators
+        ]
         return {
-            "indicators": [i.to_json() for i in registry.catalog()],
-            "errors": registry.errors,
+            # The flat list the M7 menu reads: built-in ones, then yours that run (a file
+            # with a built-in's id is only in "custom" until the menu has sections, CI-3).
+            "indicators": sorted(builtin + runnable, key=lambda i: i["title"].lower()),
+            "errors": registry.errors
+            + [
+                {"file": d.file, "error": d.reason or d.status}
+                for d in custom
+                if d.status in ("error", "quarantined", "not_run")
+            ],
             "folder": str(server.indicators_dir),
+            "builtin": builtin,
+            "custom": [d.to_json() for d in custom],
+            "isolation": isolation.to_json() if isolation else {"level": "starting"},
+            "worker": server.indicator_runner.status() if server.indicator_runner else None,
+            "editing": (await editing_for(request, server.settings, isolation)).to_json(),
         }
 
     @router.get("/{indicator_id}")
@@ -43,13 +69,25 @@ def indicator_routes(server: Server) -> APIRouter:
         timeframe: str = "1m",
         price: str = "mid",
         params: str = "{}",
+        kind: str | None = None,
         from_: int | None = Query(None, alias="from"),
         to: int | None = None,
         limit: int | None = Query(None, ge=1),
     ) -> dict[str, Any]:
-        indicator = server.indicators.get(indicator_id)
-        if indicator is None:
+        if kind not in (None, "builtin", "custom"):
+            raise HTTPException(400, "kind must be builtin or custom")
+        builtin = server.indicators.get(indicator_id) if kind != "custom" else None
+        custom = None
+        if builtin is None and kind != "builtin":
+            custom = await server.custom.get(indicator_id)
+        if builtin is None and custom is None:
             raise HTTPException(404, f"no indicator {indicator_id!r}")
+        if custom is not None and custom.indicator is None:
+            status = 409 if custom.status == "quarantined" else 422
+            if custom.status == "not_run":
+                status = 503
+            raise HTTPException(status, f"{custom.file}: {custom.reason or custom.status}")
+        indicator = builtin or custom.indicator
         try:
             given = json.loads(params)
             if not isinstance(given, dict):
@@ -66,12 +104,26 @@ def indicator_routes(server: Server) -> APIRouter:
         if await server.store.instrument(server.source, instrument) is None:
             raise HTTPException(404, f"unknown instrument {instrument!r}")
 
+        try:
+            if custom is not None:
+                warm = await server.custom.warmup(custom, settings)
+            else:
+                warm = int(indicator.warmup(settings))
+        except ScriptFailed as exc:
+            raise _failed(indicator.name, exc) from None
+        except WorkerUnavailable as exc:
+            raise HTTPException(503, f"{indicator.name}: {exc}") from None
+        except Exception as exc:  # a built-in's own code
+            raise HTTPException(
+                422, f"{indicator.name} failed: {type(exc).__name__}: {exc}"
+            ) from None
+        warm = min(max(warm, 0), MAX_WARMUP)
+
         read = server.reader.candles
         bars = await read(
             server.source, instrument, tf, price=price, start=from_, end=to, limit=limit
         )
         bars = bars[COLUMNS]
-        warm = min(max(int(indicator.warmup(settings)), 0), MAX_WARMUP)
         before: list[pd.DataFrame] = []
         if warm and not bars.empty:
             first, need = int(bars["ts"].iloc[0]), warm
@@ -89,16 +141,25 @@ def indicator_routes(server: Server) -> APIRouter:
                 before.insert(0, older[COLUMNS])
                 first, need = int(older["ts"].iloc[0]), need - len(older)
         frame = pd.concat([*before, bars], ignore_index=True) if before else bars
+        frame = frame.reset_index(drop=True)
 
         try:
-            series = await asyncio.to_thread(indicator.run, frame.reset_index(drop=True), settings)
-        except Exception as exc:  # the indicator's own code
+            if custom is not None:
+                series = await server.custom.compute(custom, frame, settings)
+            else:
+                series = await asyncio.to_thread(indicator.run, frame, settings)
+        except ScriptFailed as exc:
+            raise _failed(indicator.name, exc) from None
+        except WorkerUnavailable as exc:
+            raise HTTPException(503, f"{indicator.name}: {exc}") from None
+        except Exception as exc:  # a built-in's own code
             raise HTTPException(
                 422, f"{indicator.name} failed: {type(exc).__name__}: {exc}"
             ) from None
         n = len(bars)
         return {
             "id": indicator.id,
+            "kind": "custom" if custom is not None else "builtin",
             "name": indicator.name,
             "instrument": instrument,
             "timeframe": tf.name,
@@ -109,6 +170,12 @@ def indicator_routes(server: Server) -> APIRouter:
         }
 
     return router
+
+
+def _failed(name: str, exc: ScriptFailed) -> HTTPException:
+    """The legend's "⚠ SMA cross: ZeroDivisionError (line 23)"; 409 once quarantined."""
+    status = 409 if exc.kind == "quarantined" else 422
+    return HTTPException(status, f"{name} failed: {exc.summary}")
 
 
 def _floats(series: pd.Series) -> list[float | None]:

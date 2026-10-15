@@ -1,11 +1,14 @@
 # Writing an indicator
 
-An indicator is one Python file. The server finds the files when it starts and lists them
-in the Indicators menu; the settings dialog (Inputs and Style tabs) is built from what the
-file declares, so a new file needs no change to the web interface.
+An indicator is one Python file. The server lists the files in the Indicators menu; the
+settings dialog (Inputs and Style tabs) is built from what the file declares, so a new file
+needs no change to the web interface.
 
-Values are computed on the server, on the same bars the chart shows (the same timeframe
-and price type: mid, bid or ask), and drawn aligned to the candles.
+Values are computed on the server's machine, on the same bars the chart shows (the same
+timeframe and price type: mid, bid or ask), and drawn aligned to the candles. Built-in
+indicators run in the server; your own files run in a separate worker process with less
+than the server can do (no tokens, and on a service or Docker install no data folder and no
+network): see [custom-indicators.md](custom-indicators.md).
 
 ## Where the files go
 
@@ -14,15 +17,19 @@ and price type: mid, bid or ask), and drawn aligned to the candles.
   Indicators menu shows the exact path. The server creates the folder on start.
 - **Built-in ones:** `src/openchart/indicators/` (for now only `ema.py`).
 
-Restart the server after adding or changing a file. Files whose name starts with `_` are
-skipped. The file name is the indicator's id (lowercase letters, digits and `_`); a file of
-yours with the name of a built-in one replaces it. Indicators are never uploaded through
-the web interface: only files placed there by whoever runs the server, because they run as
-Python code inside the server.
+A new or changed file is picked up without a restart (its modification time or size
+changed). Files whose name starts with `_` are skipped. The file name is the indicator's id
+(lowercase letters, digits and `_`), at most 256 KB. Your files and the built-in ones are
+separate: a file of yours named `ema.py` no longer replaces the built-in EMA (the menu shows
+the built-in one until it gets its Built-in and Custom sections).
 
-A file that fails to load (a syntax error, a missing declaration) does not stop the server:
-it is listed under "Files that did not load" in the Indicators menu with the reason, and in
-the server log.
+A file that fails to load (a syntax error, a missing declaration) does not stop anything:
+it is listed under "Files that did not load" in the Indicators menu with the reason and its
+line. A script that raises shows "Mid failed: ZeroDivisionError: division by zero (line
+11)"; one that hangs is stopped at its deadline (5 s); one that fails that way 3 times in a
+row is stopped until you change the file. Inside the worker, scripts cannot open files,
+use the network or start programs ("custom indicators cannot open files"); `print()` goes
+to the server log.
 
 ## What a file declares
 

@@ -153,6 +153,12 @@
   color: var(--muted);
   overflow-wrap: anywhere;
 }
+/* "weaker isolation: ..." for your own files (CI-1): one line, no file name. */
+.ind-notice {
+  grid-template-columns: 16px minmax(0, 1fr);
+  padding: 8px 20px;
+  border-top: 1px solid var(--line);
+}
 .ind-foot {
   padding: 10px 20px 14px;
   border-top: 1px solid var(--line);

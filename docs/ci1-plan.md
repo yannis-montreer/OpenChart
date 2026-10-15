@@ -1,7 +1,8 @@
 # CI-1 plan: the isolated indicator worker
 
-Status: **plan only**, approved in principle on 2026-10-15. Work starts when the owner says
-the M8 tests and the data move are done. Inputs:
+Status: **built** on 2026-10-15, waiting for the owner's review (what was decided along
+the way: `docs/decisions.md`, CI-1). Section 8 is history: those branches are merged.
+Inputs:
 
 - `docs/custom-indicators-design.md` (approved, with the owner's changes);
 - `docs/ci0-spike-report.md`: findings 1 to 10, decisions D1 to D7, and the D2

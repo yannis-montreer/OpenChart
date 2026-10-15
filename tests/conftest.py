@@ -34,7 +34,7 @@ TOKEN = "oanda-token-SECRET-abcd1234"
 
 
 class Harness:
-    def __init__(self, tmp_path):
+    def __init__(self, tmp_path, *, indicator_launchers=None):
         self.config = replace(Config(), data_dir=tmp_path)
         self.secrets = MemorySecrets()
         self.provider = FakeProvider({"XAU_USD": CANDLES}, instruments=[GOLD, EURO])
@@ -46,9 +46,15 @@ class Harness:
                 return FakeProviderRejecting()
             return FakeProvider({"XAU_USD": CANDLES}, instruments=[GOLD, EURO])
 
-        # The fake stream stays silent; tests push ticks through the feed themselves.
+        # The fake stream stays silent; tests push ticks through the feed themselves. No
+        # indicator worker unless a test gives launchers (tests/worker_helpers.py).
         self.server = Server(
-            self.config, provider=self.provider, secrets=self.secrets, provider_factory=factory
+            self.config,
+            provider=self.provider,
+            secrets=self.secrets,
+            provider_factory=factory,
+            indicator_worker=indicator_launchers is not None,
+            indicator_launchers=indicator_launchers,
         )
 
     def seed_candles(self):
