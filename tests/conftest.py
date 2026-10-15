@@ -17,6 +17,9 @@ from openchart.server import Server
 from openchart.settings import MemorySecrets
 from openchart.store.candles import CandleStore
 from openchart.store.sqlite import Database
+from tests import clock
+
+clock.install()  # one fixed timeline for the whole run, before any "now" is taken (clock.py)
 
 GOLD = InstrumentInfo("XAU_USD", "XAU_USD", "Gold", 3, 0.01, "METAL")
 EURO = InstrumentInfo("EUR_USD", "EUR_USD", "EUR/USD", 5, 0.0001, "CURRENCY")
@@ -91,6 +94,11 @@ SETUP = {
 def run_setup(client: TestClient, **overrides):
     body = {**SETUP, "setup_code": client.server.auth.setup_code, **overrides}
     return client.post("/api/setup", json=body)
+
+
+@pytest.fixture(autouse=True)
+def _one_clock():
+    clock.patch_modules()  # modules first imported by a test get the timeline's datetime too
 
 
 @pytest.fixture
