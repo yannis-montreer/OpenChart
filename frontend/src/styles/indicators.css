@@ -12,8 +12,10 @@
 .legend-row {
   pointer-events: auto;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: 0 8px;
+  max-width: 100%;
   min-height: 24px;
   padding: 0 4px;
   margin-left: -4px;
@@ -30,6 +32,20 @@
 }
 .legend-row.off .legend-row-name {
   color: var(--faint);
+}
+/* The values are elements with no space between them: as flex items they can wrap, so a row with
+   many outputs (up to 16) stays inside the chart instead of running under the price scale. */
+.legend-row-values {
+  display: flex;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.legend-row-values[hidden] {
+  display: none;
+}
+.legend-row-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .legend-row-values b {
   font-weight: 500;

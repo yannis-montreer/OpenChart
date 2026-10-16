@@ -5,6 +5,7 @@
  */
 
 import type { IndicatorCatalog, IndicatorDef, IndicatorEntry, IndicatorParam, ParamValue } from "../api";
+import { outputWidth } from "../chart/indicatorOutputs";
 import { indicatorLabel } from "../chart/indicators";
 import { PALETTE } from "../drawings/toolbar";
 import { button, closeMenu, h, icon, menuItem, showMenu } from "./dom";
@@ -130,6 +131,7 @@ export function paramProblem(p: IndicatorParam, value: ParamValue): string | nul
     if (p.min !== undefined && value < p.min) return `At least ${p.min}`;
     if (p.max !== undefined && value > p.max) return `At most ${p.max}`;
   }
+  if (p.type === "string" && String(value).length > (p.max_length ?? 100)) return `At most ${p.max_length ?? 100} characters`;
   if ((p.type === "source" || p.type === "choice") && !(p.choices ?? []).includes(String(value))) return "Pick a value";
   if (p.type === "color" && !/^#[0-9a-f]{6}$/i.test(String(value))) return "Pick a colour";
   return null;
@@ -177,6 +179,18 @@ export function openIndicatorSettings(opts: SettingsOptions): void {
       for (const c of p.choices ?? []) sel.append(h("option", { value: c, selected: c === value }, p.type === "source" ? (SOURCE_LABELS[c] ?? c) : c));
       sel.addEventListener("change", () => setParam(p.name, sel.value));
       control = sel;
+    } else if (p.type === "string") {
+      const text = h("input", { class: "input", type: "text", maxLength: p.max_length ?? 100 });
+      text.value = String(value);
+      text.addEventListener("input", () => {
+        const problem = paramProblem(p, text.value);
+        note.textContent = problem ?? "";
+        if (problem) problems.set(p.name, problem);
+        else problems.delete(p.name);
+        if (!problem) setParam(p.name, text.value);
+        else changed();
+      });
+      control = text;
     } else {
       const num = h("input", { class: "input num", type: "number", inputmode: p.type === "float" ? "decimal" : "numeric", step: String(p.step ?? "any") });
       if (p.min !== undefined) num.min = String(p.min);
@@ -204,13 +218,19 @@ export function openIndicatorSettings(opts: SettingsOptions): void {
     const used = new Set<string>();
     for (const o of def.outputs) {
       used.add(o.color);
-      used.add(o.width);
+      const width = outputWidth(o); // histograms, fills, markers and backgrounds have none
+      if (width) used.add(width);
       style.append(
         h(
           "div",
           { class: "al-row" },
           h("span", { class: "al-label" }, o.label),
-          h("div", { class: "ind-style" }, colorButton(String(entry.params[o.color]), (c) => setParam(o.color, c)), widthSelect(Number(entry.params[o.width]), (w) => setParam(o.width, w))),
+          h(
+            "div",
+            { class: "ind-style" },
+            colorButton(String(entry.params[o.color]), (c) => setParam(o.color, c)),
+            ...(width ? [widthSelect(Number(entry.params[width]), (w) => setParam(width, w))] : []),
+          ),
         ),
       );
     }
