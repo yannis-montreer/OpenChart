@@ -367,7 +367,7 @@ and the real worker, the four documentation examples on empty, one-bar and weekl
 chart in a real browser (edit a file while it is open, a stale layout, 16 outputs and 26 inputs in
 one legend, a marker on every bar, NaN-only outputs, marker-only panes, 25 rounds of hide/show on 6
 indicators, remove everything, a weekly chart of four bars). What held up: the schema and result
-checks on every hostile return value tried (14 shapes), warmup and window arithmetic on 0, 1, 2 and 3
+checks on every hostile return value tried (13 shapes), warmup and window arithmetic on 0, 1, 2 and 3
 bars, every constant the docs quote (checked against the code), `print()` going to the log, 15,000
 markers without a long task, no leftover pane after removal.
 
