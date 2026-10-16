@@ -624,3 +624,100 @@ async def test_a_service_never_takes_the_a1_fallback(monkeypatch, tmp_path):
     assert runner is None and iso.level == "unavailable" and not iso.runs_custom_code
     assert set(started) == {"appcontainer"}
     assert iso.notice.startswith("custom indicators do not run on this install")
+
+
+# Start priority: normal until the hello, below normal after it ------------------------------
+
+
+def watch_jobs(runner: IndicatorRunner) -> list[str | None]:
+    """The worker's priority class as each compute request goes out and again when its
+    answer is back: sampled while the request is outstanding, without a job that has to wait
+    for the clock (a worker below normal priority wakes late from a sleep on a busy machine,
+    but answers a request at once)."""
+    seen: list[str | None] = []
+    ask = runner._ask
+
+    async def spy(live, header, arrays, wait):
+        if header.get("cmd") != "compute":
+            return await ask(live, header, arrays, wait)
+        seen.append(live.handle.priority())
+        got = await ask(live, header, arrays, wait)
+        seen.append(live.handle.priority())
+        return got
+
+    runner._ask = spy
+    return seen
+
+
+async def test_a_real_worker_starts_at_normal_priority_and_runs_below_normal():
+    limits = Limits(timeout_s=10)
+    launcher = WindowsLauncher(JOB_IDENTITY, limits)
+    assert launcher.lowers_priority_after_hello
+    bare = launcher.start()
+    try:
+        assert bare.priority() == "normal"  # what the server lowers after the hello
+        assert bare.cpu_seconds() is not None
+    finally:
+        bare.kill()
+        bare.close()
+    runner = IndicatorRunner(launcher, limits)
+    await runner.start()
+    seen = watch_jobs(runner)
+    try:
+        assert runner._live.handle.priority() == "below_normal"
+        await runner.compute(*script(), {}, BARS)
+        runner.kill_for_tests()  # a respawn follows the same path
+        runner._live.handle.wait(5000)
+        await runner.compute(*script(), {}, BARS)
+        assert runner.restarts == 1
+        assert seen == ["below_normal"] * 4  # before and after each job, on both workers
+    finally:
+        await runner.stop()
+
+
+def busy_loops(count: int) -> list[subprocess.Popen]:
+    """One normal-priority busy loop per core, each ending by itself after ten minutes."""
+    code = "import time\nt = time.time()\nwhile time.time() - t < 600: pass"
+    return [
+        subprocess.Popen(
+            [isolation.base_python(), "-I", "-c", code],
+            creationflags=0x08000000,  # CREATE_NO_WINDOW
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        for _ in range(count)
+    ]
+
+
+async def test_a_worker_becomes_ready_when_every_core_is_busy():
+    """The case that failed (docs/investigations/worker-start-under-load.md): a worker
+    created below normal priority got 0.4 s of CPU in 150 s next to as many normal busy
+    loops as cores. It must now say hello within the start deadline, then run below normal.
+    The deadline is generous (90 s; 1 to 7 s measured), so a slow runner does not flake."""
+    from openchart.indicators.worker import runner as runner_module
+
+    loops = busy_loops(os.cpu_count() or 1)
+    try:
+        await asyncio.sleep(1.0)
+        assert all(p.poll() is None for p in loops)
+        limits = Limits(timeout_s=30)
+        runner = IndicatorRunner(WindowsLauncher(JOB_IDENTITY, limits), limits)
+        t = time.perf_counter()
+        await runner.start()  # raises when no hello comes within START_TIMEOUT
+        try:
+            assert runner.state == "ready"
+            assert time.perf_counter() - t < runner_module.START_TIMEOUT
+            seen = watch_jobs(runner)
+            await runner.compute(*script(), {}, BARS)
+            assert seen == ["below_normal"] * 2  # during a job
+        finally:
+            # A graceful exit needs CPU the below-normal worker does not get on a busy
+            # machine (about 40 s measured); the job object ends it at once.
+            runner.kill_for_tests()
+            await runner.stop()
+    finally:
+        for p in loops:
+            p.kill()
+        for p in loops:
+            p.wait(10)

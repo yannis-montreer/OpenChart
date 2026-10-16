@@ -126,6 +126,7 @@ def bad_result(kind, head, out, arrays):
 def main():
     fin, fout = sys.stdin.buffer, sys.stdout.buffer
     read = exact_reader(fin)
+    time.sleep(float(os.environ.get("FAKE_HELLO_DELAY", "0")))  # a slow start (tests)
     fout.write(encode({"ready": True, "pid": os.getpid(), "python": "fake"}))
     fout.flush()
     sources = {}

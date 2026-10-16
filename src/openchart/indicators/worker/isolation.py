@@ -166,6 +166,8 @@ def clean_env(runtime_dir: str, *, appcontainer: bool = False) -> dict[str, str]
 
 class WindowsLauncher:
     enforces_deadline = False
+    # Created at normal priority; the runner lowers it after the hello and reads it back.
+    lowers_priority_after_hello = True
 
     def __init__(
         self,
