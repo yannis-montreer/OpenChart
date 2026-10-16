@@ -184,6 +184,17 @@ export class IndicatorLayer {
     this.onChange();
   }
 
+  /** Drop every instance of one of your definitions that no longer exists (its file was deleted). */
+  removeDefinition(id: string): number {
+    const gone = this.active.filter((a) => a.def.id === id && !a.def.builtin);
+    if (!gone.length) return 0;
+    for (const a of gone) this.dispose(a);
+    this.active = this.active.filter((a) => !gone.includes(a));
+    this.layoutPanes();
+    this.onChange();
+    return gone.length;
+  }
+
   get(uid: number): { def: IndicatorDef; entry: IndicatorEntry } | undefined {
     const a = this.find(uid);
     return a && { def: a.def, entry: structuredClone(a.entry) };

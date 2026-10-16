@@ -10,6 +10,9 @@ import { paramProblem } from "../chart/params";
 import { indicatorLabel } from "../chart/indicators";
 import { PALETTE } from "../drawings/toolbar";
 import { button, closeMenu, h, icon, menuItem, showMenu } from "./dom";
+import { openDeleteDefinition } from "./deleteDefinition";
+import { modal } from "./modal";
+import { pickerModel, type PickerRow, type RowState } from "./pickerModel";
 
 const SOURCE_LABELS: Record<string, string> = {
   open: "Open",
@@ -22,88 +25,108 @@ const SOURCE_LABELS: Record<string, string> = {
   hlcc4: "(H + L + C + C) / 4",
 };
 
-/** A modal with a title, a close button and Escape / backdrop to close. */
-function modal(cls: string, title: string, onClose: () => void) {
-  const box = h("div", { class: `modal ${cls}`, role: "dialog", "aria-modal": "true", "aria-label": title });
-  const backdrop = h("div", { class: "modal-backdrop" }, box);
-  const onKey = (ev: KeyboardEvent) => {
-    if (ev.key === "Escape" && !document.querySelector(".menu")) {
-      ev.stopPropagation();
-      close();
-    }
-  };
-  const close = () => {
-    backdrop.remove();
-    document.removeEventListener("keydown", onKey, true);
-    onClose();
-  };
-  backdrop.addEventListener("pointerdown", (ev) => {
-    if (ev.target === backdrop) close();
-  });
-  document.addEventListener("keydown", onKey, true);
-  const head = h("div", { class: "modal-head" }, h("h2", {}, title), button({ icon: "x", title: "Close (Esc)", onClick: () => close() }));
-  box.append(head);
-  document.body.append(backdrop);
-  return { box, close };
-}
-
 // Indicators list
 
-export function openIndicatorPicker(opts: { catalog: IndicatorCatalog; onPick: (def: IndicatorDef) => void }): void {
+/** Short words for the state of a file of yours that cannot be added (the reason is under the name). */
+const STATE_LABELS: Partial<Record<RowState, string>> = {
+  error: "did not load",
+  quarantined: "switched off",
+  not_run: "worker not running",
+  shadowed: "id taken",
+};
+
+function pickerRow(row: PickerRow, onPick: (def: IndicatorDef) => void, close: () => void, onDelete: (row: PickerRow) => void): HTMLElement {
+  const lead = icon(row.addable ? "indicators" : "warn", 16);
+  const head = h(
+    "span",
+    { class: "ind-head" },
+    h("span", { class: "ind-title" }, row.title),
+    row.name === row.title ? null : h("span", { class: "ind-tag" }, row.name),
+    row.file ? h("span", { class: "ind-own", "data-tip": "From your indicators folder" }, row.file) : null,
+    row.addable ? null : h("span", { class: `ind-state ind-state-${row.state}` }, STATE_LABELS[row.state] ?? row.state),
+  );
+  const text = h("span", { class: "ind-text" }, head, row.why ? h("span", { class: "ind-why" }, row.line ? `line ${row.line}: ${row.why}` : row.why) : null);
+  const where = h("span", { class: "ind-where" }, row.where ?? "");
+  let main: HTMLElement;
+  if (row.def) {
+    const def = row.def;
+    main = h("button", { class: "ind-item", type: "button", role: "option" }, lead, text, where);
+    main.addEventListener("click", () => {
+      onPick(def);
+      close();
+    });
+  } else {
+    main = h("div", { class: "ind-item ind-disabled", role: "option", "aria-disabled": "true" }, lead, text, where);
+  }
+  const wrap = h("div", { class: "ind-row" }, main);
+  if (row.canDelete) {
+    const gate = row.canDelete;
+    const del = button({
+      icon: "trash",
+      title: gate.allowed ? `Delete ${row.title}…` : `Deleting is not available: ${gate.reason}`,
+      class: `ind-del${gate.allowed ? "" : " ind-locked"}`,
+    });
+    // Not `disabled`: a disabled button shows no tooltip, and the reason is the point.
+    if (!gate.allowed) del.setAttribute("aria-disabled", "true");
+    del.addEventListener("click", () => {
+      if (gate.allowed) onDelete(row);
+    });
+    wrap.append(del);
+  }
+  return wrap;
+}
+
+export function openIndicatorPicker(opts: {
+  catalog: IndicatorCatalog;
+  onPick: (def: IndicatorDef) => void;
+  /** Read the catalog again (after a delete, or when a delete failed in a way that leaves it unknown). */
+  reload?: () => Promise<IndicatorCatalog>;
+  /** A definition of yours was deleted: charts that still show it should drop it. */
+  onDeleted?: (id: string) => void;
+}): void {
   const { box, close } = modal("ind-picker", "Indicators", () => {});
+  let catalog = opts.catalog;
   const search = h("input", { class: "input", type: "search", placeholder: "Search", spellcheck: "false", "aria-label": "Search indicators" });
   const list = h("div", { class: "ind-list", role: "listbox" });
   const render = () => {
-    const q = search.value.trim().toLowerCase();
-    const found = opts.catalog.indicators.filter((d) => `${d.name} ${d.title}`.toLowerCase().includes(q));
-    list.replaceChildren(
-      ...found.map((d) => {
-        const row = h(
-          "button",
-          { class: "ind-item", type: "button", role: "option" },
-          icon("indicators", 16),
-          h("span", { class: "ind-title" }, d.title),
-          h("span", { class: "ind-tag" }, d.name),
-          d.builtin ? null : h("span", { class: "ind-own", "data-tip": "From your indicators folder" }, "your file"),
-          h("span", { class: "ind-where" }, d.overlay ? "on the chart" : "own pane"),
-        );
-        row.addEventListener("click", () => {
-          opts.onPick(d);
-          close();
-        });
-        return row;
-      }),
-    );
-    if (!found.length) list.append(h("div", { class: "panel-empty" }, "No indicator matches."));
+    const model = pickerModel(catalog, search.value);
+    const onDelete = (row: PickerRow) =>
+      openDeleteDefinition({
+        id: row.id,
+        title: row.title,
+        onChanged: () => {
+          void opts.reload?.().then((fresh) => {
+            catalog = fresh;
+            // Only what the server no longer has is dropped from the charts: a failed delete
+            // leaves it, and a half-done one (the file moved, the answer was lost) is caught here.
+            const there = (fresh.custom ?? []).some((e) => e.id === row.id) || fresh.indicators.some((d) => d.id === row.id && !d.builtin);
+            if (!there) opts.onDeleted?.(row.id);
+            render();
+          });
+        },
+      });
+    const nodes: HTMLElement[] = [];
+    for (const s of model.sections) {
+      nodes.push(h("div", { class: "ind-section-head" }, s.heading));
+      for (const n of s.notices) nodes.push(h("div", { class: "ind-error ind-notice" }, icon("warn", 14), h("span", {}, n)));
+      for (const r of s.rows) nodes.push(pickerRow(r, opts.onPick, close, onDelete));
+      if (s.hint) nodes.push(h("div", { class: "panel-empty" }, s.hint));
+    }
+    if (model.empty) nodes.push(h("div", { class: "panel-empty" }, model.empty));
+    list.replaceChildren(...nodes);
   };
   search.addEventListener("input", render);
   search.addEventListener("keydown", (ev) => {
-    if (ev.key === "Enter") (list.querySelector(".ind-item") as HTMLButtonElement | null)?.click();
+    if (ev.key === "Enter") (list.querySelector("button.ind-item") as HTMLButtonElement | null)?.click();
   });
-  const errors = opts.catalog.errors.length
-    ? h(
-        "div",
-        { class: "ind-errors" },
-        h("div", { class: "menu-section" }, "Files that did not load"),
-        ...opts.catalog.errors.map((e) => h("div", { class: "ind-error" }, icon("warn", 14), h("b", {}, e.file), h("span", {}, e.error))),
-      )
-    : null;
-  // How isolated your files are on this install (they run in the indicator worker).
-  const notice = opts.catalog.isolation?.notice;
   box.append(
     h("div", { class: "ind-search" }, icon("search", 16), search),
     list,
-    errors ?? "",
-    notice ? h("div", { class: "ind-error ind-notice" }, icon("warn", 14), h("span", {}, notice)) : "",
-    // What the worker can still do here, for example its own folder (owner's decision B1).
-    ...(opts.catalog.isolation?.notes ?? [])
-      .filter((n) => n.startsWith("its own folder"))
-      .map((n) => h("div", { class: "ind-error ind-notice" }, icon("warn", 14), h("span", {}, n))),
     h(
       "div",
       { class: "ind-foot" },
       "Add your own: put a Python file in ",
-      h("code", {}, opts.catalog.folder),
+      h("code", {}, catalog.folder),
       " (no restart needed). See docs/indicators.md.",
     ),
   );

@@ -764,6 +764,12 @@ export class App {
     openIndicatorPicker({
       catalog: this.catalog,
       onPick: (def) => void this.indicators.add(def),
+      reload: async () => {
+        this.catalog = await indicatorsApi.catalog();
+        this.indicators.setCatalog(this.catalog.indicators);
+        return this.catalog;
+      },
+      onDeleted: (id) => this.indicators.removeDefinition(id),
     });
   }
 
