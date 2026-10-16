@@ -82,6 +82,19 @@ describe("afterError", () => {
     expect(next.text).toBe("Could not delete: something else");
   });
 
+  it("409 whose usage is not a usage is a failure too", () => {
+    for (const usage of [{ id: "x", charts: [] }, { id: "x", layouts: [] }, { charts: [], layouts: [] }, "no", null]) {
+      const err = new ApiError(409, "odd");
+      err.detail = { message: "odd", usage };
+      expect(afterError("SMA cross", err)).toMatchObject({ phase: "failed", text: "Could not delete: odd" });
+    }
+  });
+
+  it("another refusal (400, 422): failed, nothing to re-read, no advice about half-done moves", () => {
+    expect(afterError("SMA cross", new ApiError(400, "bad id"))).toEqual({ phase: "failed", text: "Could not delete: bad id", refresh: false });
+    expect(afterError("SMA cross", new ApiError(422, "x")).refresh).toBe(false);
+  });
+
   it("a server error: failed, and everything shown is re-read (the move may be half done)", () => {
     const next = afterError("SMA cross", new ApiError(500, "Internal Server Error"));
     expect(next).toEqual({

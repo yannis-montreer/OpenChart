@@ -201,12 +201,20 @@ describe("errors the server lists besides the files", () => {
     expect(pickerModel(c, "").sections[0].notices).toEqual(["rsi.py: boom"]);
   });
 
+  it("an error of a file the custom list does not have is a notice on Your files", () => {
+    const c = catalog({ errors: [{ file: "ghost.py", error: "unreadable", kind: "custom" }] });
+    const m = pickerModel(c, "");
+    expect(m.sections[0].notices).toEqual([]);
+    expect(m.sections[1].notices).toEqual(["ghost.py: unreadable"]);
+  });
+
   it("an error for a file already listed in custom is not shown twice", () => {
     const bad = own("bad", { status: "error", reason: "SyntaxError", definition: null });
     const c = catalog({ custom: [bad], errors: [{ file: "bad.py", error: "SyntaxError", kind: "custom" }] });
     const m = pickerModel(c, "");
     expect(rows(m, "custom")).toHaveLength(1);
     expect(m.sections[0].notices).toEqual([]);
+    expect(m.sections[1].notices).toEqual([]);
   });
 });
 
