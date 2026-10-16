@@ -7,8 +7,9 @@ ends the process, `RAISE` raises, `SLOWRAISE` raises after 0.4 s, `GATE <folder>
 `STALLBELOW <n>` loops and `ENDBELOW <n>` ends the process on fewer than n bars, `SHIFT`
 answers the next bar's close (lookahead), `STRICT` refuses any request but one with the
 colour #00ff00 on XAU_USD 5m, `WARMUP <n>` declares n bars of warmup, `FILL <folder>` and
-`FILLIDLE <folder>` fill a folder (during the job, or from a thread after it); anything
-else describes one output and echoes the closes.
+`FILLIDLE <folder>` fill a folder (during the job, or from a thread after it), `MODE` and
+`MODE2` describe other inputs (a choice instead of the width; MODE2 renames a choice),
+`NODESCRIBE` fails to load; anything else describes one output and echoes the closes.
 """
 
 import os
@@ -77,6 +78,37 @@ DEFINITION_MARKERS = {
         },
     ],
 }
+
+
+def with_mode(choices):
+    """A definition whose inputs differ from DEFINITION's: no width, a choice `mode`."""
+    return {
+        **DEFINITION,
+        "params": [
+            DEFINITION["params"][0],
+            {
+                "name": "mode",
+                "type": "choice",
+                "default": choices[0],
+                "label": "Mode",
+                "group": "inputs",
+                "choices": list(choices),
+            },
+        ],
+        "outputs": [{"kind": "histogram", "name": "out", "label": "Out", "color": "color"}],
+    }
+
+
+DEFINITION_MODE = with_mode(["fast", "slow"])
+DEFINITION_MODE2 = with_mode(["quick", "slow"])  # "fast" renamed
+
+
+def definition_for(source):
+    if "MODE2" in source:
+        return DEFINITION_MODE2
+    if "MODE" in source:
+        return DEFINITION_MODE
+    return DEFINITION_MARKERS if "MARKERS" in source else DEFINITION
 
 
 def bad_result(kind, head, out, arrays):
@@ -154,8 +186,17 @@ def main():
             source = sources.get(req.get("hash"))
             if source is None:
                 head = {"error": {"type": "NeedSource", "message": "send the source"}}
+            elif cmd == "describe" and "NODESCRIBE" in source:  # a file that does not load
+                head = {
+                    "error": {
+                        "type": "SyntaxError",
+                        "message": "invalid syntax",
+                        "line": 1,
+                        "traceback": "",
+                    }
+                }
             elif cmd == "describe":
-                head = {"definition": DEFINITION_MARKERS if "MARKERS" in source else DEFINITION}
+                head = {"definition": definition_for(source)}
             elif cmd == "warmup":  # `WARMUP <n>` declares n bars, else none
                 n = source.split("WARMUP ", 1)[1].split()[0] if "WARMUP " in source else 0
                 head = {"warmup": int(n)}

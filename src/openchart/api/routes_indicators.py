@@ -50,11 +50,12 @@ def indicator_routes(server: Server) -> APIRouter:
         ]
         return {
             # The flat list the M7 menu reads: built-in ones, then yours that run (a file
-            # with a built-in's id is only in "custom" until the menu has sections, CI-3).
+            # with a built-in's id is only in "custom" until the browser reads the
+            # sections). Every entry has its `kind`, as have the sections and `errors`.
             "indicators": sorted(builtin + runnable, key=lambda i: i["title"].lower()),
-            "errors": registry.errors
+            "errors": [{**e, "kind": "builtin"} for e in registry.errors]
             + [
-                {"file": d.file, "error": d.reason or d.status}
+                {"file": d.file, "error": d.reason or d.status, "kind": "custom"}
                 for d in custom
                 if d.status in ("error", "quarantined", "not_run")
             ],

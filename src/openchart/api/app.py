@@ -22,9 +22,12 @@ from fastapi.staticfiles import StaticFiles
 
 from openchart import API_VERSION, __version__
 from openchart.api.auth import SESSION_COOKIE
+from openchart.api.chart_indicators import ChartIndicators
 from openchart.api.hub import Client
 from openchart.api.routes_account import account_routes, client_host
 from openchart.api.routes_alerts import alert_routes
+from openchart.api.routes_charts import chart_routes
+from openchart.api.routes_custom_indicators import custom_routes
 from openchart.api.routes_drawings import drawing_routes
 from openchart.api.routes_indicators import indicator_routes
 from openchart.api.routes_layouts import layout_routes
@@ -105,8 +108,11 @@ def create_app(server: Server) -> FastAPI:
     app.include_router(account_routes(server))
     app.include_router(drawing_routes(server))
     app.include_router(alert_routes(server))
+    charts = ChartIndicators(server)  # one lock for every write to charts' indicators
     app.include_router(indicator_routes(server))
-    app.include_router(layout_routes(server))
+    app.include_router(chart_routes(server, charts))
+    app.include_router(custom_routes(server, charts))
+    app.include_router(layout_routes(server, charts))
 
     @app.get("/api/health")
     async def health() -> dict[str, Any]:
