@@ -73,8 +73,10 @@ class SeriesReader:
         Stored M1 holds a minute only once it has closed, so the bar that is forming is not in
         the bars above. With `forming`, the builder's forming M1 bar is folded in: into the bar
         of its period if that is the last one, else as a bar of its own at the end (the 1m chart's
-        live bar, the first minute of a new period). The browser's candles do without it (it
-        draws the live bar from the websocket); indicators need it to have a value for that bar.
+        live bar, the first minute of a new period). The bar that has it is flagged: it is
+        never `complete` (its period may be over while no tick has closed the minute yet), and
+        `frame.attrs["forming"]` is its `ts`. The fold is in memory only: nothing here is stored,
+        and the cache of 4h, D and W bars is filled from the stored bars alone.
         """
         if price not in PRICES:
             raise ValueError(f"price must be one of {PRICES}")
@@ -90,8 +92,9 @@ class SeriesReader:
             bars = await self._from_base(source, instrument, tf, price, start, end)
         else:
             bars = await self._latest_from_base(source, instrument, tf, price, end, limit)
+        folded = None
         if forming and tf.kind is not Kind.TICK:
-            bars = self._fold_forming(bars, instrument, tf, price, start, end)
+            bars, folded = self._fold_forming(bars, instrument, tf, price, start, end)
         bars = (bars.head(limit) if start is not None else bars.tail(limit)).reset_index(drop=True)
         if bars.empty:
             bars["complete"] = pd.Series(dtype=bool)
@@ -99,13 +102,20 @@ class SeriesReader:
         last_end = bar_bounds(int(bars["ts"].iloc[-1]), tf)[1]
         complete = np.ones(len(bars), dtype=bool)
         complete[-1] = last_end <= now
+        if folded is not None and int(bars["ts"].iloc[-1]) == folded:  # not cut by the page
+            complete[-1] = False
+            bars.attrs["forming"] = folded
         bars["complete"] = complete
         return bars
 
-    def _fold_forming(self, bars, instrument, tf, price, start, end) -> pd.DataFrame:
+    def _fold_forming(
+        self, bars, instrument, tf, price, start, end
+    ) -> tuple[pd.DataFrame, int | None]:
+        """`bars` with the live minute in them, and the `ts` of the bar that has it (None:
+        it was not folded in)."""
         live: Bar | None = self.live(instrument) if self.live else None
         if live is None or live.ts >= end:
-            return bars
+            return bars, None
         first, _ = bar_bounds(live.ts, tf)
         o, h, low, c = live.series(price)
         last = int(bars["ts"].iloc[-1]) if not bars.empty else None
@@ -116,13 +126,13 @@ class SeriesReader:
             bars.loc[i, "l"] = min(bars.at[i, "l"], low)
             bars.loc[i, "c"] = c
             bars.loc[i, "v"] = bars.at[i, "v"] + live.volume
-            return bars
+            return bars, first
         if (last is not None and last > first) or (start is not None and first < start):
-            return bars  # not at the live edge of this window, or a bar the window cuts
+            return bars, None  # not at the live edge of this window, or a bar the window cuts
         row = pd.DataFrame(
             {"ts": [first], "o": [o], "h": [h], "l": [low], "c": [c], "v": [live.volume]}
         ).astype(bars.dtypes.to_dict())
-        return pd.concat([bars, row], ignore_index=True)
+        return pd.concat([bars, row], ignore_index=True), first
 
     @staticmethod
     def _uses_h1(tf: Timeframe) -> bool:

@@ -13,8 +13,10 @@ export interface MergeResult {
  * the middle (a bar that formed while we were disconnected) mean the history must be
  * redrawn; anything from our last bar onwards can be applied as plain updates.
  *
- * An incomplete fresh bar never replaces our last bar: the server builds that bar from
- * stored M1 only, so it lacks the forming minute that live updates already gave us.
+ * An incomplete fresh bar never replaces our last bar: it is a snapshot from when the server
+ * answered (stored minutes, and since the forming bar is in the answer, the live one as it was
+ * then), while live updates may already have given us a newer copy. A fresh bar that starts
+ * after our last one is applied, forming or not.
  */
 export function mergeBars(existing: Bar[], fresh: Bar[]): MergeResult {
   if (!existing.length) return { bars: [...fresh], rewritesHistory: fresh.length > 0, tail: [] };

@@ -4,7 +4,9 @@
 so the bar that is forming (and on the 1m chart every live bar) was missing from the values an
 indicator was computed on: the browser showed no value for it until the minute had closed. The
 indicator route now asks the reader to fold the builder's forming M1 bar into the series.
-`/api/candles` itself is unchanged (the browser draws the forming bar from the websocket)."""
+The reader leaves it out unless asked. `/api/candles` asks too since the candles-forming-bar
+change (flagged `forming`, never stored: tests/test_candles_forming.py); this file is the
+reader's fold and the indicator route."""
 
 from datetime import UTC, datetime
 
@@ -101,7 +103,7 @@ async def test_the_price_type_picks_its_own_series(store, price, close):
     assert got["c"].iloc[-1] == close
 
 
-async def test_off_by_default_so_the_candles_route_keeps_its_meaning(store):
+async def test_the_reader_leaves_it_out_unless_asked(store):
     got = await read(store, "1m", forming_bar())
     assert got["ts"].iloc[-1] == FORMING_TS - 60
 
@@ -170,7 +172,7 @@ def test_an_indicator_has_a_value_for_the_live_bar_on_the_one_minute_chart(clien
     assert candles(client, **q)[-1]["t"] == NOW - 60  # the stored bars end before the live minute
     push(client, Tick("XAU_USD", NOW + 30, 2000.0, 2000.2))
     push(client, Tick("XAU_USD", NOW + 31, 2003.0, 2003.2))
-    assert candles(client, **q)[-1]["t"] == NOW - 60  # /api/candles is unchanged
+    assert candles(client, forming="false", **q)[-1]["t"] == NOW - 60  # the stored bars only
 
     body = values(client, **q).json()
     assert body["t"][-1] == NOW

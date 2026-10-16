@@ -631,3 +631,45 @@ renamed).
   unchanged.
 - `docs/indicators.md`: the `ta` heading no longer says "in progress", and "Not yet" says the usual
   set is available as the four files rather than as built-ins.
+
+## `/api/candles` ends with the forming bar (2026-10-16)
+
+The owner's decision after #26, which had left the candles route alone and asked. The answer now
+folds the builder's forming M1 bar into the bar of its period (or adds it as a bar of its own),
+for the answer only. Checked first:
+
+- **The cache** (`market/cache.py`) holds complete 4h, D and W bars only and is filled from the
+  stored bars (`extend` reads the store, never a frame the reader built). The forming 4h, D or W
+  bar is the tail the reader computes from stored M1 and H1 on every read; the live minute is added
+  to that frame in memory afterwards. So nothing of it can reach the cache, and the reader copies
+  the frame before changing it. Tested against a whole-database snapshot for 1m, 5m, 1h, 4h, 1D and
+  1W (with a control that the snapshot sees a stored minute), and by a read with the bar followed by
+  one without it.
+- **`complete`** was `last_end <= now` for the last bar and true for every other. That would call a
+  bar with live data complete when its minute is over but no tick has closed it yet (a quiet
+  market: the builder closes it on the next tick or on its clock). A bar with live data is now
+  never complete, and carries `forming: true` (absent on every other bar, like `hits` in the
+  indicator answer). Only the last bar can have it.
+- **Who reads these bars.** `SeriesReader.candles` has two callers: this route and the indicator
+  route (already folded in by #26). The alert engine does not use it: it reads stored M1
+  (`store.read_m1`) for its catch-up and evaluates on ticks. In the browser: the first load, `resync`
+  after a reconnect, `loadOlder` (a `to` before the live minute: no bar), and the watchlist's two
+  daily candles. `resync` merges with `mergeBars`, which already ignores an incomplete fresh bar that
+  has the time of our last one (a snapshot may be older than the live updates we have), and applies
+  one that starts after it; three tests pin that for the forming bar, and the comment that said the
+  server's bar lacks the live minute is corrected. The watchlist takes the last two daily bars as
+  today and last close and previous close: right after the 17:00 rollover the new day's bar now
+  exists from the first live minute, where it used to appear after the first minute had closed.
+- **Not applied** (as for the indicators): the window ends before the live minute, a full page,
+  sub-minute timeframes (built from ticks, which are buffered live), a builder bar older than the
+  last stored bar. `forming=false` on the request gives the stored bars only.
+- **The legend's `∅`** came from the indicator route (stored minutes only), fixed by #26. This does
+  not change the legend. What it changes: a reload draws the live bar from the first answer instead
+  of after the websocket's first message, and other readers of the route (scripts, the watchlist)
+  see the same last bar as the chart.
+- **A test changed on purpose:** `test_an_indicator_has_a_value_for_the_live_bar_...` in
+  `tests/test_forming_bar.py` asserted "`/api/candles` is unchanged". That was the contract this
+  replaces; it now asserts the stored-only answer with `forming=false`. The test of the reader's
+  default was renamed, as its name spoke of the route.
+- With a connection that joined mid-minute (after a start or a reconnect) the first minute is
+  partial, in the answer as on the chart.
