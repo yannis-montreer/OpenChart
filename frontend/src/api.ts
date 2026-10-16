@@ -17,6 +17,8 @@ export interface Bar {
   c: number;
   v: number;
   complete?: boolean;
+  /** Only on the last bar of an answer that holds the live minute: in memory on the server, not stored. */
+  forming?: boolean;
 }
 
 export interface TimeframeMeta {
