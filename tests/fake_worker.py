@@ -18,6 +18,8 @@ for i, arg in enumerate(sys.argv):
         site.addsitedir(sys.argv[i + 1])
 sys.path.insert(0, sys.argv[sys.argv.index("--path") + 1])
 
+import numpy as np  # noqa: E402 (the protocol needs it anyway)
+
 from openchart.indicators.worker.protocol import encode, exact_reader, read_frame  # noqa: E402
 
 DEFINITION = {
@@ -47,6 +49,74 @@ DEFINITION = {
     "outputs": [{"name": "out", "label": "Out", "color": "color", "width": "width"}],
     "builtin": False,
 }
+
+
+DEFINITION_MARKERS = {
+    **DEFINITION,
+    "outputs": [
+        {
+            "kind": "line",
+            "name": "out",
+            "label": "Out",
+            "color": "color",
+            "width": "width",
+            "style": "solid",
+        },
+        {
+            "kind": "marker",
+            "name": "hit",
+            "label": "Hit",
+            "color": "color",
+            "shape": "circle",
+            "position": "above",
+            "text": "",
+        },
+    ],
+}
+
+
+def bad_result(kind, head, out, arrays):
+    """What a worker that cannot be trusted might answer (`BAD <kind>` in the source)."""
+    n = len(arrays["c"])
+    nan = np.full(n, np.nan)
+    if kind == "undeclared":
+        return {"outputs": ["out", "hit", "zzz"]}, {**out, "zzz": arrays["c"]}
+    if kind == "unlisted":
+        return head, {**out, "zzz": arrays["c"]}
+    if kind == "missing":
+        return {"outputs": ["out"]}, {"out": arrays["c"]}
+    if kind == "none":
+        return {"outputs": []}, {}
+    if kind == "notalist":
+        return {"outputs": "out"}, out
+    if kind == "notnames":
+        return {"outputs": [1, 2]}, out
+    if kind == "ghost":
+        return {"outputs": ["out", "hit", "ghost"]}, out
+    if kind == "nooutputs":
+        return {}, out
+    if kind == "duplicate":
+        return {"outputs": ["out", "out", "hit"]}, out
+    if kind == "many":
+        names = [f"o{i}" for i in range(40)]
+        return {"outputs": names}, {k: arrays["c"] for k in names}
+    if kind == "short":
+        return head, {**out, "out": arrays["c"][:-1]}
+    if kind == "long":
+        return head, {**out, "out": np.concatenate([arrays["c"], arrays["c"]])}
+    if kind == "huge":
+        return head, {**out, "out": np.zeros(3_000_000)}
+    if kind == "empty":
+        return head, {**out, "out": np.zeros(0)}
+    if kind == "marker2":
+        return head, {**out, "hit": arrays["c"] * 0 + 2}
+    if kind == "markernan":
+        return head, {**out, "hit": nan}
+    if kind == "nanonly":
+        return head, {**out, "out": nan}
+    if kind == "inf":
+        return head, {**out, "out": np.full(n, np.inf)}
+    raise SystemExit(f"unknown BAD kind {kind}")
 
 
 def main():
@@ -79,7 +149,7 @@ def main():
             if source is None:
                 head = {"error": {"type": "NeedSource", "message": "send the source"}}
             elif cmd == "describe":
-                head = {"definition": DEFINITION}
+                head = {"definition": DEFINITION_MARKERS if "MARKERS" in source else DEFINITION}
             elif cmd == "warmup":
                 head = {"warmup": 0}
             else:
@@ -117,6 +187,14 @@ def main():
                 else:
                     head = {"outputs": ["out"]}
                     out = {"out": arrays["c"]}
+                    if "MARKERS" in source:
+                        head, out = (
+                            {"outputs": ["out", "hit"]},
+                            {"out": arrays["c"], "hit": arrays["c"] * 0},
+                        )
+                    bad = source.split("BAD ", 1)[1].split()[0] if "BAD " in source else ""
+                    if bad:
+                        head, out = bad_result(bad, head, out, arrays)
         fout.write(encode(head, out))
         fout.flush()
 

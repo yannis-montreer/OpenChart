@@ -2,7 +2,9 @@
 
 Values are computed on the same bars `/api/candles` returns for the same query
 (instrument, timeframe, price type, range), plus as many earlier bars as the indicator
-asks for to settle (`warmup`). One value per bar; null where there is none.
+asks for to settle (`warmup`). Numbers: one value per bar, null where there is none.
+Markers and backgrounds: the list of bar positions (into `t`) where they are on. Levels:
+their value for these parameters. See docs/api.md.
 
 Built-in indicators are computed here, in the server; your own files in the worker
 (`indicators/worker/`). The two are separate namespaces: `kind=builtin|custom` picks one;
@@ -16,10 +18,12 @@ import json
 import math
 from typing import Any
 
+import numpy as np
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from openchart.api.editing import editing_for
+from openchart.indicators._base import Info
 from openchart.indicators.worker.runner import ScriptFailed, WorkerUnavailable
 from openchart.market.aggregate import PRICES
 from openchart.market.series import MAX_LIMIT
@@ -101,8 +105,16 @@ def indicator_routes(server: Server) -> APIRouter:
             raise HTTPException(400, f"timeframe must be one of {list(TIMEFRAMES)}") from None
         if price not in PRICES:
             raise HTTPException(400, f"price must be one of {list(PRICES)}")
-        if await server.store.instrument(server.source, instrument) is None:
+        row = await server.store.instrument(server.source, instrument)
+        if row is None:
             raise HTTPException(404, f"unknown instrument {instrument!r}")
+        info = Info(
+            instrument=instrument,
+            display_name=row.display_name,
+            decimals=row.decimals,
+            timeframe=tf.name,
+            price=price,
+        )
 
         try:
             if custom is not None:
@@ -145,9 +157,9 @@ def indicator_routes(server: Server) -> APIRouter:
 
         try:
             if custom is not None:
-                series = await server.custom.compute(custom, frame, settings)
+                series = await server.custom.compute(custom, frame, settings, info)
             else:
-                series = await asyncio.to_thread(indicator.run, frame, settings)
+                series = await asyncio.to_thread(indicator.run, frame, settings, info)
         except ScriptFailed as exc:
             raise _failed(indicator.name, exc) from None
         except WorkerUnavailable as exc:
@@ -157,6 +169,17 @@ def indicator_routes(server: Server) -> APIRouter:
                 422, f"{indicator.name} failed: {type(exc).__name__}: {exc}"
             ) from None
         n = len(bars)
+        numbers: dict[str, list[float | None]] = {}
+        hits: dict[str, list[int]] = {}
+        levels: dict[str, float] = {}
+        for oid, o in zip(indicator.output_ids(), indicator.outputs, strict=True):
+            if o.data == "number":
+                numbers[oid] = _floats(series[oid].iloc[len(series[oid]) - n :])
+            elif o.data == "bool":
+                tail = series[oid].to_numpy()[len(series[oid]) - n :]
+                hits[oid] = np.flatnonzero(tail).tolist()
+            elif o.kind == "level":
+                levels[oid] = float(settings[o.value] if isinstance(o.value, str) else o.value)
         return {
             "id": indicator.id,
             "kind": "custom" if custom is not None else "builtin",
@@ -166,7 +189,9 @@ def indicator_routes(server: Server) -> APIRouter:
             "price": price,
             "params": settings,
             "t": [int(t) for t in bars["ts"]],
-            "values": {name: _floats(s.iloc[len(s) - n :]) for name, s in series.items()},
+            "values": numbers,
+            "hits": hits,
+            "levels": levels,
         }
 
     return router

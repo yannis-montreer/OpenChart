@@ -28,6 +28,7 @@ from typing import Any, Protocol
 
 import numpy as np
 
+from openchart.indicators._base import MAX_OUTPUTS
 from openchart.indicators.worker.protocol import ProtocolError, encode, exact_reader, read_frame
 
 log = logging.getLogger("openchart.indicators.worker")
@@ -226,11 +227,30 @@ class IndicatorRunner:
         source: str,
         params: dict[str, Any],
         bars: Mapping[str, np.ndarray],
+        info: Mapping[str, Any] | None = None,
     ) -> dict[str, np.ndarray]:
-        head, out = await self.request(
-            {"cmd": "compute", "params": params}, bars, script=(digest, file, source)
-        )
-        return {name: out[name] for name in head["outputs"]}
+        header: dict[str, Any] = {"cmd": "compute", "params": params}
+        if info is not None:
+            header["info"] = dict(info)
+        head, out = await self.request(header, bars, script=(digest, file, source))
+        # The answer comes from code this server does not control: its list of outputs
+        # must be a short list of names, each with an array, and nothing else.
+        names = head.get("outputs")
+        if (
+            not isinstance(names, list)
+            or len(names) > MAX_OUTPUTS
+            or not all(isinstance(n, str) for n in names)
+            or len(set(names)) != len(names)
+            or any(n not in out for n in names)
+        ):
+            raise ScriptFailed(
+                "error",
+                {
+                    "type": "ResultError",
+                    "message": "the worker's answer does not list its outputs correctly",
+                },
+            )
+        return dict(out)  # all of it: an array nobody declared is the caller's error to name
 
     async def request(
         self,

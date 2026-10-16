@@ -165,7 +165,7 @@ class Worker:
                 params = indicator.normalize(req.get("params") or {})
                 if cmd == "warmup":
                     return {"warmup": int(indicator.warmup(params))}, {}
-                return self.compute(indicator, params, arrays)
+                return self.compute(indicator, params, arrays, req.get("info"))
             return {"error": _error_info("ValueError", f"unknown command {cmd!r}")}, {}
         except BaseException as exc:  # a script's own error: report it, keep serving
             if isinstance(exc, (KeyboardInterrupt, SystemExit)) and cmd not in (
@@ -208,7 +208,7 @@ class Worker:
             raise got
         return got
 
-    def compute(self, indicator, params: dict[str, Any], arrays: dict[str, Any]):
+    def compute(self, indicator, params: dict[str, Any], arrays: dict[str, Any], info: Any = None):
         import numpy as np
         import pandas as pd
 
@@ -220,8 +220,11 @@ class Worker:
         if any(len(arrays[c]) != n for c in columns):
             raise ValueError("bar columns of different lengths")
         bars = pd.DataFrame({c: np.array(arrays[c], dtype="float64") for c in columns})
+        from openchart.indicators._base import Info
+
+        info = Info.from_json(info) if info is not None else None
         t = time.perf_counter()
-        series = indicator.run(bars, params)
+        series = indicator.run(bars, params, info)
         ms = (time.perf_counter() - t) * 1000
         out = {name: s.to_numpy(dtype="float64") for name, s in series.items()}
         return {"outputs": list(out), "compute_ms": round(ms, 3)}, out
@@ -233,14 +236,17 @@ class Worker:
 def _compile(file: str, source: str):
     """Run the script as a module of its own, never under openchart.indicators (that
     would replace the helpers scripts import), then check what it declares."""
+    from openchart.indicators._base import MAX_FILE_BYTES, SchemaError
     from openchart.indicators._registry import from_module
 
+    if len(source.encode()) > MAX_FILE_BYTES:
+        raise SchemaError(f"{file}: the file is larger than {MAX_FILE_BYTES // 1024} KB")
     stem = file[:-3] if file.endswith(".py") else file
     module = types.ModuleType(f"openchart_custom.{stem}")
     module.__file__ = file
     code = compile(source, file, "exec", dont_inherit=True)
     exec(code, module.__dict__)
-    return from_module(stem, module, builtin=False)
+    return from_module(stem, module, builtin=False, file=file)
 
 
 def _error_info(kind: str, message: str) -> dict[str, Any]:
