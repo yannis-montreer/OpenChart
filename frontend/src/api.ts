@@ -411,6 +411,8 @@ export interface IndicatorValues {
   hits?: Record<string, number[]>;
   /** Level outputs: the number to draw at, resolved with this request's params. */
   levels?: Record<string, number>;
+  /** Your own files only: the save-time checks of this version of the file (`version`: its digest). */
+  checks?: { version?: string };
 }
 
 export const indicatorsApi = {
