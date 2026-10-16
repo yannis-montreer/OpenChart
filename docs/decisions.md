@@ -419,6 +419,10 @@ markers without a long task, no leftover pane after removal.
 
 - When several outputs share one colour parameter, the other swatches in the open settings dialog keep the
   old colour until it is reopened (the chart updates at once).
+- Own-pane indicators are formatted with the instrument's decimals: `applyFormat` sets one chart-wide
+  `priceFormatter`, so an RSI reads `70.000` on gold and would read `70.00000` on EUR/USD (axis, level labels and
+  legend). A per-pane format means dropping that chart-wide formatter, which also formats the drawings' labels:
+  not done unattended.
 - The chart assumes `hits` ascending and without repeats, as the server guarantees; a wrong server would
   hand the library unsorted markers.
 - Refreshes run only while ticks arrive, so with the market closed an edit is noticed at the next history
