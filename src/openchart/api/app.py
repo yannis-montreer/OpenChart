@@ -193,6 +193,7 @@ def create_app(server: Server) -> FastAPI:
         from_: int | None = Query(None, alias="from"),
         to: int | None = None,
         limit: int | None = Query(None, ge=1),
+        forming: bool = True,
     ) -> dict[str, Any]:
         tf = _timeframe(timeframe)
         if price not in PRICES:
@@ -201,9 +202,18 @@ def create_app(server: Server) -> FastAPI:
         if row is None:
             raise HTTPException(404, f"unknown instrument {instrument!r}")
         bars = await server.reader.candles(
-            server.source, instrument, tf, price=price, start=from_, end=to, limit=limit
+            server.source,
+            instrument,
+            tf,
+            price=price,
+            start=from_,
+            end=to,
+            limit=limit,
+            forming=forming,
         )
         records = bars.rename(columns={"ts": "t"}).to_dict("records")
+        if "forming" in bars.attrs:  # the bar that holds the live minute: in memory, not stored
+            records[-1]["forming"] = True
         return {
             "instrument": instrument,
             "timeframe": tf.name,

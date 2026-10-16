@@ -56,14 +56,17 @@ Before setup, the two test routes and `/api/setup/defaults` also work without a 
 | `from` | none | first bar start to include. A bar that starts before `from` is left out, not cut in half |
 | `to` | now | exclusive: bars starting before `to`, each returned whole |
 | `limit` | 1000 (max 5000) | with `from`: the first `limit` bars from there; without `from`: the latest `limit` bars |
+| `forming` | `true` | `false`: only what is stored (see below) |
 
 ```json
 {"instrument": "XAU_USD", "timeframe": "1h", "price": "mid", "decimals": 3,
  "candles": [{"t": 1791838800, "o": 4174.4, "h": 4175.885, "l": 4166.705, "c": 4173.68,
-              "v": 8104, "complete": false}]}
+              "v": 8104, "complete": false, "forming": true}]}
 ```
 
 `v` is **tick volume** (number of price updates), not traded volume. Only the last bar can have `"complete": false` (its period is not over yet).
+
+**The forming bar.** A minute is stored only once it has closed, so the minute that is forming is in memory (and on the websocket). The answer folds it in, for the answer only: into the last bar if that is the bar of its period, otherwise as a bar of its own at the end (the 1m chart's live bar, the first minute of a new period). That bar has `"forming": true` (the key is absent on every other bar) and is never `"complete": true`, even if its period has passed while no tick has closed the minute yet. It is never written: not to the stored minutes, not to the cache of 4h, D and W bars, so the next read, with or without `forming`, starts from what is stored. It is left out when the window ends before the live minute (`to`), when the page is full (`from` and `limit`), and for sub-minute timeframes (built from ticks, which already include it). With a connection that joined mid-minute (after a start or a reconnect) its first minute is partial, as the chart's live bar is. `forming=false` gives the stored bars only.
 
 Errors: `400` unknown timeframe or price, `404` unknown instrument, `422` invalid parameter.
 
@@ -113,7 +116,7 @@ Errors: `400` unknown timeframe or price, `404` unknown instrument, `422` invali
   | `background` | `color, opacity` | `hits[name]`: the bars to tint |
 
   `shape` is `arrow_up`, `arrow_down`, `circle` or `square`; `position` is `above`, `below` or `on` (the bar's close); `opacity` is above 0 and at most 1. M7 outputs (`{name, label, color, width}`) are `line` with `style: "solid"`; the old fields are unchanged.
-- **Values:** `params` is a JSON object (missing ones take their defaults; unknown or invalid ones are a 400). The bars are those `GET /api/candles` returns for the same `instrument, timeframe, price, from, to, limit`; `t` holds their start times. Earlier bars are read as the indicator's warm-up needs, so values do not depend on where the window starts.
+- **Values:** `params` is a JSON object (missing ones take their defaults; unknown or invalid ones are a 400). The bars are those `GET /api/candles` returns for the same `instrument, timeframe, price, from, to, limit`, including the bar that is forming (see `forming` there): the values have a value for it, and it moves with each tick. `t` holds the start times. Earlier bars are read as the indicator's warm-up needs, so values do not depend on where the window starts.
   - `values`: one list per `line`, `histogram` and `area` output, as long as `t`, `null` where there is no value (a gap, or not a finite number).
   - `hits`: for each `marker` and `background` output, the ascending list of positions **in `t`** (0-based) where it is on. `[]` when never. A thousand bars with a marker every tenth bar is 100 integers, not 1,000 booleans.
   - `levels`: `{name: number}` for each `level`, already resolved with this request's `params`.

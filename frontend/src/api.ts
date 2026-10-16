@@ -17,6 +17,8 @@ export interface Bar {
   c: number;
   v: number;
   complete?: boolean;
+  /** Only on the last bar of an answer that holds the live minute: in memory on the server, not stored. */
+  forming?: boolean;
 }
 
 export interface TimeframeMeta {
@@ -411,6 +413,8 @@ export interface IndicatorValues {
   hits?: Record<string, number[]>;
   /** Level outputs: the number to draw at, resolved with this request's params. */
   levels?: Record<string, number>;
+  /** Your own files only: the save-time checks of this version of the file (`version`: its digest). */
+  checks?: { version?: string };
 }
 
 export const indicatorsApi = {

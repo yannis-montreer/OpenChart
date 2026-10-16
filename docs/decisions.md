@@ -576,6 +576,104 @@ unit-tested), the two primitives in `indicatorPrimitives.ts`, the wiring in `ind
   forming bar is never there (15:30:07, 15:30:27 and 15:30:47 all ended at the 15:29 bar). It
   was the same before CI-2 (M7 code, same server). The fix is on its own branch, see the PR.
 
+## Indicators see the forming bar (2026-10-16)
+
+Found in review of CI-2 (d): the legend showed no value for the live bar for up to a minute after a
+5m bar started, and on the 1m chart for every live bar. Not the demo's fake broker: `CandleBuilder`
+writes an M1 bar to the database only when it closes (the forming minute is in memory and on the
+websocket), and both `GET /api/candles` and the indicator values read stored M1. Measured on the
+demo (1m, 15:30:07, :27 and :47): both answers ended at the 15:29 bar. The same on `main` before
+CI-2.
+
+- **Fix:** `SeriesReader.candles(..., forming=True)` folds the builder's forming M1 bar (a copy,
+  `CandleBuilder.forming_m1`) into the bars: into the last bar if it is the bar of that period,
+  else appended (the first minute of a period, the 1m chart). Only the indicator route asks for it.
+  `/api/candles` is unchanged: the chart merges websocket updates into the bar it has, and a bar
+  that changes under a reload is a different change. To decide later whether it should follow.
+- **Not applied** when the window ends before the forming minute (`to`), when it starts after
+  that minute's bar, for sub-minute timeframes (built from ticks, which are buffered live), or if the
+  builder's bar is older than the last stored bar (a stale builder must not put bars out of order).
+  A full page (`from` and `limit`) drops the appended bar like any other that does not fit.
+- **Consequence for the values:** the last value now moves with each tick (a bar that has not
+  closed), like the last bar of the chart. The cache of results keys on the bars, so a changed
+  last bar is a new computation, as it already was for a forming higher-timeframe bar.
+- Tests: `tests/test_forming_bar.py` (19). Mutation check: 9 mutants of the fold, two survived the first
+  version of the tests (a stale bar, and a high above all stored highs) and got tests; then all killed.
+
+## CI-2 (e): the guide, the examples and the Pine sheet (2026-10-16)
+
+`docs/custom-indicators.md` now starts with how to write a file: where to start, the four
+examples of the design (SMA cross, RSI with bands, Bollinger-style fill, an engulfing-candle
+marker), the output kinds, a cheat sheet from Pine Script and what has no equivalent, then the
+save-time checks, the worker, isolation by install, the gate on browser editing and what none of
+it protects against (the last four were written in CI-1 and CI-2 (c) and are only moved and
+renamed).
+
+- **The examples are files** in `docs/examples/indicators/`, and the page shows them verbatim
+  (`<!-- example: name.py -->` before each block). `tests/test_doc_examples.py` runs each against the
+  real worker on a seeded random walk (the synthetic bars of the other tests close up every bar, so
+  an engulfing pattern never occurs): the file loads, every line has values, every marker and
+  background fires and not on every bar, both save-time checks say `ok` with no findings, and the
+  values and hits on every bar are the same whichever later bars exist (4 cut points each).
+  Controls so the tests can fail: a variant of the SMA cross with `shift(-3)` is warned by the
+  lookahead check and changes under the prefix test. The page cannot drift: a test compares each
+  block with its file, one that every `ta.name(` in the sheet exists, one that every `ta` helper is
+  in the sheet, and one that every output kind is in the table.
+- **All four passed both checks at the first run**, including the marker-only file (the checks' own
+  caveat, that a file with only markers cannot be told apart, did not produce a warning here).
+- **The Pine sheet says what has no equivalent** instead of mapping loosely: anything that
+  looks ahead (negative `offset`, `x[-1]`), other symbols and timeframes, alerts and strategies,
+  `barstate.*`, drawing objects, a colour per bar, and 20 `ta` functions that `ta` lacks (with the
+  pandas one-liner where there is one). `ta.pivothigh` is described as Pine reports it (on the
+  confirming bar); the `offset=-right` that Pine scripts add to draw it back is the future.
+- **Not verified against TradingView:** the sheet states the definitions as the `ta` tests and
+  docs/indicators.md already do; the three items marked "to check in TradingView" in the roadmap are
+  unchanged.
+- `docs/indicators.md`: the `ta` heading no longer says "in progress", and "Not yet" says the usual
+  set is available as the four files rather than as built-ins.
+
+## `/api/candles` ends with the forming bar (2026-10-16)
+
+The owner's decision after #26, which had left the candles route alone and asked. The answer now
+folds the builder's forming M1 bar into the bar of its period (or adds it as a bar of its own),
+for the answer only. Checked first:
+
+- **The cache** (`market/cache.py`) holds complete 4h, D and W bars only and is filled from the
+  stored bars (`extend` reads the store, never a frame the reader built). The forming 4h, D or W
+  bar is the tail the reader computes from stored M1 and H1 on every read; the live minute is added
+  to that frame in memory afterwards. So nothing of it can reach the cache, and the reader copies
+  the frame before changing it. Tested against a whole-database snapshot for 1m, 5m, 1h, 4h, 1D and
+  1W (with a control that the snapshot sees a stored minute), and by a read with the bar followed by
+  one without it.
+- **`complete`** was `last_end <= now` for the last bar and true for every other. That would call a
+  bar with live data complete when its minute is over but no tick has closed it yet (a quiet
+  market: the builder closes it on the next tick or on its clock). A bar with live data is now
+  never complete, and carries `forming: true` (absent on every other bar, like `hits` in the
+  indicator answer). Only the last bar can have it.
+- **Who reads these bars.** `SeriesReader.candles` has two callers: this route and the indicator
+  route (already folded in by #26). The alert engine does not use it: it reads stored M1
+  (`store.read_m1`) for its catch-up and evaluates on ticks. In the browser: the first load, `resync`
+  after a reconnect, `loadOlder` (a `to` before the live minute: no bar), and the watchlist's two
+  daily candles. `resync` merges with `mergeBars`, which already ignores an incomplete fresh bar that
+  has the time of our last one (a snapshot may be older than the live updates we have), and applies
+  one that starts after it; three tests pin that for the forming bar, and the comment that said the
+  server's bar lacks the live minute is corrected. The watchlist takes the last two daily bars as
+  today and last close and previous close: right after the 17:00 rollover the new day's bar now
+  exists from the first live minute, where it used to appear after the first minute had closed.
+- **Not applied** (as for the indicators): the window ends before the live minute, a full page,
+  sub-minute timeframes (built from ticks, which are buffered live), a builder bar older than the
+  last stored bar. `forming=false` on the request gives the stored bars only.
+- **The legend's `∅`** came from the indicator route (stored minutes only), fixed by #26. This does
+  not change the legend. What it changes: a reload draws the live bar from the first answer instead
+  of after the websocket's first message, and other readers of the route (scripts, the watchlist)
+  see the same last bar as the chart.
+- **A test changed on purpose:** `test_an_indicator_has_a_value_for_the_live_bar_...` in
+  `tests/test_forming_bar.py` asserted "`/api/candles` is unchanged". That was the contract this
+  replaces; it now asserts the stored-only answer with `forming=false`. The test of the reader's
+  default was renamed, as its name spoke of the route.
+- With a connection that joined mid-minute (after a start or a reconnect) the first minute is
+  partial, in the answer as on the chart.
+
 ## CI-3 backend: indicators per chart on the server (D1), 2026-10-16
 
 Design: `docs/custom-indicators-design.md` 1.2, 4 and 5.4. Code: `store/chart_indicators.py`, `api/chart_indicators.py` (the checks, shared), `api/routes_charts.py`, `api/routes_custom_indicators.py`, `api/routes_layouts.py`. No browser change: the M7 page keeps its own list until the frontend step, after the other session's chart work merges. Tests first (`tests/test_chart_indicators.py` with the fake worker, and the migration test in `tests/test_migrations.py`): run red against main with only the tests added, **40 failed and 7 passed**: the unknown-chart test and the six odd delete names, which got a 404 because no route existed. The mutation check below shows that each of them bites.
