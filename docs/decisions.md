@@ -359,6 +359,65 @@ Design approved by the owner with decisions A and B and five additions. Tests fi
 - **A flaky test, caught by the mutation tool:** a mutant that cannot touch the runner was "killed" by `test_the_run_time_counts_neither_the_queue_nor_a_worker_start`. The test killed the worker and sent the next job at once, so the job could reach the dying process (a crash) instead of a new one. It now waits until the worker is gone, as the other kill test does; 30 runs in a row pass. The mutation script is now `tools/mutate_checks.py` (44 mutants, with the multi-edit ones: timing that starts before the worker start, a dead worker counted as up, the budget's `<=` made `<`); it refuses to run unless the tests pass on the unbroken copy, and exits 1 on a survivor, 2 on a mutant that no longer applies. Result: 43 killed, 1 equivalent (markers given the line tolerance).
 - **Stress runs (owner's review):** the new tests 20 times in a row, the 20th with a busy loop on each of the 12 cores. Runs 1 to 19 passed. **Run 20 failed in `test_checks_api.py`'s fixture: the real worker did not start within the server's 60 s.** Measured alone: the restricted worker starts in 1.7 s with 0 or 6 cores busy, and does not start within 60 s with all 12 busy, also when the busy loops run at the worker's own below-normal priority. So it is not the scheduling priority; most likely the job object's hard CPU cap (50% of one core) once every core is saturated (inferred, not proven). **This is CI-1's worker start, not the checks**, and CI runners do not run other loads; it is reported to the owner as a separate item. The fix here: `test_checks_api.py` did not need the real worker. What it proves (the format, the request's own params and `info` in the check's runs, built-ins skipped) is shown with the fake worker, which now refuses (`STRICT`) any request but the one colour on XAU_USD 5m. Real scripts are checked in `test_lookahead_checks.py`, in-process. Run again after the change: 20 of 20 passed, the 20th with all 12 cores busy (93 tests, 277 s instead of 40 s). The mutation tool then caught what the switch had lost: "the declared warmup not passed" survived, because the fake worker declared no warmup (the default). It now declares one (`WARMUP <n>`), and the API test checks 320 bars with a declared warmup of 20; the mutant is killed again.
 
+## Review of CI-2 (b) to (d) as someone else's work (2026-10-16)
+
+Method: read the code of (b) (schema and result validation), (c) (the checks and their scheduling)
+and (d) (the chart), then tried to break it: hostile and degenerate requests against the real routes
+and the real worker, the four documentation examples on empty, one-bar and weekly windows, and the
+chart in a real browser (edit a file while it is open, a stale layout, 16 outputs and 26 inputs in
+one legend, a marker on every bar, NaN-only outputs, marker-only panes, 25 rounds of hide/show on 6
+indicators, remove everything, a weekly chart of four bars). What held up: the schema and result
+checks on every hostile return value tried (14 shapes), warmup and window arithmetic on 0, 1, 2 and 3
+bars, every constant the docs quote (checked against the code), `print()` going to the log, 15,000
+markers without a long task, no leftover pane after removal.
+
+**Fixed, each on its own branch with the test first (frontend and docs):**
+
+- The chart did not redraw an **edited indicator file** (only the last two bars changed, so a line
+  mixed two versions of the code), did not show a script that then raised, and never retried one that
+  had failed: a full load on a new `checks.version`, on a server error, and every 5 s while in error
+  (`refresh.ts`, 7 tests; browser-checked).
+- A **layout's stored parameters** that the file no longer has (or has with another type or range) made
+  every request a 400 and the indicator "Could not compute" for good: `reconcileParams` (8 tests).
+- **Legend rows** with many outputs could not wrap (CSS; no automated test possible here).
+- **`docs/api.md`** did not describe 5 of the 8 keys of the catalog answer or the `kind` parameter and key
+  (a docs-consistency test, red before).
+- **`docs/roadmap.md`** listed merged steps as next.
+- The legend's `∅` for the live bar was real and is fixed on its own branch (see the section above on
+  indicators and the forming bar), as asked.
+
+**Backend, not fixed (for the owner; each has a repro):**
+
+1. `GET /api/indicators/ema?...&params={"length": Infinity}` (also `-Infinity`, `1e400`) is a **500**.
+   `Param.check` catches only `ValueError`, and `int(float("inf"))` raises `OverflowError`; Python's
+   JSON parser accepts `Infinity`. Any `Int` or `Width` input of any indicator. Suggested: test
+   `math.isfinite` before `int()` (the `float` branch already does), or catch `OverflowError`. Also
+   `NaN` answers "cannot convert float NaN to integer" instead of "must be a whole number".
+2. **A check can be spent on a tiny request.** `_want_check` keys the save-time check by (file version,
+   params) and the first values request for that key decides its bars. In the browser, after a file
+   edit the first request is the once-a-second two-bar refresh: lookahead and warmup are then "skipped:
+   too few bars" for that version and those params, and every later full request returns that same
+   stale result (`bars: 0`; reproduced with `from=0&to=1`, then `limit=600`). A script that peeks
+   (`shift(-3)`) gets no warning. Suggested: keep the result with the most bars, i.e. queue the check
+   again when a later request has more bars than the stored one and the stored one was skipped for too
+   few (the key is still bounded by `CHECK_SETTINGS`).
+3. **`from` or `to` beyond 64 bits is a 500** on `/api/indicators/{id}` and on `/api/candles` (SQLite
+   cannot bind the integer). Suggested: clamp, or 400. Authenticated route; low severity.
+4. A file's change stamp is `(mtime_ns, size)`: two edits of the same size within the file system's
+   timestamp resolution (FAT/exFAT 2 s) would not be seen. NTFS and ext4 are fine. Low severity; a
+   content hash on every catalog read would fix it at the cost of reading each file.
+
+**Seen, not changed (frontend):**
+
+- When several outputs share one colour parameter, the other swatches in the open settings dialog keep the
+  old colour until it is reopened (the chart updates at once).
+- The chart assumes `hits` ascending and without repeats, as the server guarantees; a wrong server would
+  hand the library unsorted markers.
+- Refreshes run only while ticks arrive, so with the market closed an edit is noticed at the next history
+  load.
+- Two marker outputs on the same bar and side overlap (the library does not stack them).
+- Every load of older history refetches every indicator in full (the M7 design; CI-5).
+
 ## The worker's start under full CPU load (2026-10-16)
 
 Found in CI-2 testing: with every core busy, the isolated worker did not say hello within
