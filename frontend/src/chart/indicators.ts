@@ -473,7 +473,7 @@ export class IndicatorLayer {
     a.hits = hits;
     a.levels = levels;
     const toChart = (t: number) => this.view.chartTimeOf(t);
-    for (const [name, m] of got) a.series.get(name)!.setData(lineData(m, toChart) as { time: UTCTimestamp; value: number }[]);
+    for (const [name, m] of got) a.series.get(name)!.setData(lineData(m, toChart, this.seriesKind(a, name)) as never);
     a.anchor?.setData(this.view.closeData() as { time: UTCTimestamp; value: number }[]);
     this.paintMarkers(a);
     this.paintLevels(a);
@@ -497,16 +497,26 @@ export class IndicatorLayer {
     }
   }
 
+  private seriesKind(a: Active, name: string): "line" | "area" | "histogram" {
+    const o = a.def.outputs.find((x) => x.name === name);
+    return o ? (kindOf(o) as "line" | "area" | "histogram") : "line";
+  }
+
   private applyTail(a: Active, page: IndicatorValues, count: number): void {
-    const lastShown = new Map([...a.series].map(([name, s]) => [name, s.data().at(-1)?.time as number | undefined]));
+    const toChart = (t: number) => this.view.chartTimeOf(t);
+    const fromChart = page.t[0] === undefined ? undefined : toChart(page.t[0]);
     for (const [name, values] of Object.entries(page.values)) {
       const series = a.series.get(name);
       const m = a.values.get(name);
       if (!series || !m) continue;
-      for (const p of tailPoints(page.t, values, (t) => this.view.chartTimeOf(t))) {
-        m.set(p.t, p.value);
-        const last = lastShown.get(name);
-        series.update({ time: p.time as UTCTimestamp, value: p.value } as never, last !== undefined && p.time < last);
+      const points = tailPoints(page.t, values, toChart);
+      for (const p of points) m.set(p.t, p.value);
+      if (!points.length || fromChart === undefined) continue;
+      // The points of the last bars as a full load would send them (a gap may now end at one of
+      // them), replacing what the series holds there.
+      const last = series.data().at(-1)?.time as number | undefined;
+      for (const p of lineData(m, toChart, this.seriesKind(a, name))) {
+        if (p.time >= fromChart) series.update(p as never, last !== undefined && p.time < last);
       }
     }
     if (a.anchor) {

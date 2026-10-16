@@ -13,6 +13,7 @@ import type {
 } from "../api";
 import {
   FALLBACK_COLOR,
+  GAP_COLOR,
   backgroundTimes,
   buildBands,
   buildFill,
@@ -300,11 +301,63 @@ describe("replacing a window of times (the forming bar's update)", () => {
 describe("value series", () => {
   const toChart = (t: number) => t + 10;
 
-  it("lineData keeps order, skips gaps and bars the chart lacks", () => {
-    const values = new Map<number, number | null>([[1, 5], [2, null], [3, 7], [4, 8]]);
+  it("lineData keeps order and skips bars the chart lacks", () => {
+    const values = new Map<number, number | null>([[1, 5], [2, 6], [3, 7], [4, 8]]);
     expect(lineData(values, (t) => (t === 4 ? undefined : toChart(t)))).toEqual([
       { time: 11, value: 5 },
+      { time: 12, value: 6 },
       { time: 13, value: 7 },
+    ]);
+  });
+
+  it("lineData breaks a line at a gap: the first value after it has a transparent colour, hiding the segment that joins it", () => {
+    const values = new Map<number, number | null>([[1, 5], [2, null], [3, null], [4, 8], [5, 9], [6, 10]]);
+    expect(lineData(values, toChart)).toEqual([
+      { time: 11, value: 5 },
+      { time: 14, value: 8, color: GAP_COLOR },
+      { time: 15, value: 9 },
+      { time: 16, value: 10 },
+    ]);
+  });
+
+  it("an area breaks the same way, line and both fills", () => {
+    const values = new Map<number, number | null>([[1, 5], [2, null], [3, 7], [4, 8]]);
+    expect(lineData(values, toChart, "area")).toEqual([
+      { time: 11, value: 5 },
+      { time: 13, value: 7, lineColor: GAP_COLOR, topColor: GAP_COLOR, bottomColor: GAP_COLOR },
+      { time: 14, value: 8 },
+    ]);
+  });
+
+  it("columns have nothing to join, so a histogram sends only the values", () => {
+    const values = new Map<number, number | null>([[1, 5], [2, null], [3, 7], [4, 8]]);
+    expect(lineData(values, toChart, "histogram")).toEqual([
+      { time: 11, value: 5 },
+      { time: 13, value: 7 },
+      { time: 14, value: 8 },
+    ]);
+  });
+
+  it("lineData marks nothing before the first value or after the last (warmup, a gap at the live bar)", () => {
+    const values = new Map<number, number | null>([[1, null], [2, null], [3, 7], [4, null]]);
+    expect(lineData(values, toChart)).toEqual([{ time: 13, value: 7 }]);
+    expect(lineData(new Map([[1, null], [2, null]]), toChart)).toEqual([]);
+  });
+
+  it("never marks the last point: a transparent colour would hide its price label", () => {
+    const values = new Map<number, number | null>([[1, 5], [2, null], [3, 7]]);
+    expect(lineData(values, toChart)).toEqual([
+      { time: 11, value: 5 },
+      { time: 13, value: 7 },
+    ]);
+  });
+
+  it("lineData: a gap bar the chart does not hold is not a gap", () => {
+    const values = new Map<number, number | null>([[1, 5], [2, null], [3, 7], [4, 8]]);
+    expect(lineData(values, (t) => (t === 2 ? undefined : t))).toEqual([
+      { time: 1, value: 5 },
+      { time: 3, value: 7 },
+      { time: 4, value: 8 },
     ]);
   });
 
@@ -430,6 +483,20 @@ describe("compatibility: the built-in EMA and an M7-format file draw as before",
       ["fast", "line", "#2962ff"],
       ["slow", "line", "#ff6d00"],
     ]);
+  });
+
+  it("draws any series that has only leading nulls (every built-in and warmup-only M7 file) with exactly the M7 chart's data", () => {
+    // The M7 chart: every non-null value in order, nothing else.
+    const m7 = (values: Map<number, number | null>) => [...values].filter(([, v]) => v !== null).map(([t, value]) => ({ time: t + 10, value }));
+    let seed = 7;
+    const rnd = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+    for (let round = 0; round < 200; round++) {
+      const warmup = Math.floor(rnd() * 30);
+      const n = warmup + 1 + Math.floor(rnd() * 200);
+      const values = new Map<number, number | null>();
+      for (let i = 0; i < n; i++) values.set(1000 + i * 60, i < warmup ? null : 1900 + rnd() * 20);
+      expect(lineData(values, (t) => t + 10)).toEqual(m7(values));
+    }
   });
 
   it("sends the values to the series as the M7 chart did: ordered, no gaps", () => {

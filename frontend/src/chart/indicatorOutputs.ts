@@ -129,13 +129,51 @@ export function seriesPlan(def: IndicatorDef, entry: IndicatorEntry): SeriesPlan
   });
 }
 
-/** Series data for one output: ascending, no gaps, only bars the chart holds. */
-export function lineData(values: ReadonlyMap<number, number | null>, toChart: (t: number) => number | undefined): { time: number; value: number }[] {
-  const data: { time: number; value: number }[] = [];
+/** Colour of a point that hides the segment joining it to the one before. */
+export const GAP_COLOR = "rgba(0, 0, 0, 0)";
+
+export type SeriesPoint = {
+  time: number;
+  value: number;
+  color?: string;
+  lineColor?: string;
+  topColor?: string;
+  bottomColor?: string;
+};
+
+/**
+ * Series data for one output: ascending, only bars the chart holds, no points for nulls. The
+ * library joins a line across missing points (a point without a value does not break it), so a
+ * gap between two values is drawn by giving the first value after it a transparent colour: the
+ * segment that leads to a point takes that point's colour. A line breaks like that, and so does an
+ * area; columns have nothing to join. Nothing is marked before the first value (warmup), after the
+ * last, or on the last point (a transparent colour would hide its price label), so a series
+ * whose only nulls are the warmup is exactly what the M7 chart drew.
+ */
+export function lineData(
+  values: ReadonlyMap<number, number | null>,
+  toChart: (t: number) => number | undefined,
+  kind: "line" | "area" | "histogram" = "line",
+): SeriesPoint[] {
+  const data: SeriesPoint[] = [];
+  const afterGap: number[] = []; // indexes in `data` of the first value after a gap
+  let gap = false;
   for (const [t, value] of values) {
-    if (value === null) continue;
     const time = toChart(t);
-    if (time !== undefined) data.push({ time, value });
+    if (time === undefined) continue;
+    if (value === null) {
+      gap = data.length > 0;
+      continue;
+    }
+    if (gap) afterGap.push(data.length);
+    gap = false;
+    data.push({ time, value });
+  }
+  if (kind !== "histogram") {
+    for (const i of afterGap) {
+      if (i === data.length - 1) continue;
+      Object.assign(data[i], kind === "area" ? { lineColor: GAP_COLOR, topColor: GAP_COLOR, bottomColor: GAP_COLOR } : { color: GAP_COLOR });
+    }
   }
   return data;
 }

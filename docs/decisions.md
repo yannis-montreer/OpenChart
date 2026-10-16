@@ -435,10 +435,17 @@ unit-tested), the two primitives in `indicatorPrimitives.ts`, the wiring in `ind
 - **Levels** are drawn at the number in `levels` (already resolved by the server for the request);
   if the answer has none, from the catalog's number or the input's value. The axis label follows
   "Labels on price scale"; the level's `label` is not shown anywhere yet.
-- **Fills cut the band where either line has no value; lines still bridge gaps, as in M7.**
-  The EMA and M7 files must draw as before, so lines keep their data points unchanged (nulls
-  skipped, no whitespace points). Result for a file with gaps in the middle: the line joins across,
-  the band does not. To decide: whitespace points for all lines, or leave it.
+- **Lines break at gaps, like fills (owner's answer, 2026-10-16).** The library joins a line
+  across points that have no value (tried: Lightweight Charts 5.2.1 draws straight across
+  whitespace points), so a gap is drawn by giving the first value after it a transparent colour:
+  the segment leading to a point takes that point's colour. Lines and areas break that way
+  (an area's line and both fills); columns have nothing to join. Nothing is marked before the
+  first value (warmup), after the last, or on the last point (a transparent colour would hide
+  its price label, so a gap right before the live bar is bridged until it has a successor). Every
+  built-in and any M7 file whose only nulls are the warmup produce exactly the data the M7 chart
+  did (a test compares 200 random series of that shape with the M7 rule). A file with gaps in
+  the middle now draws them where M7 joined them. The once-a-second refresh sends the last bars
+  as a full load would, so a gap that ends there is kept; it never turns a held value into a gap.
 - **Hidden, removed, changed, failed.** Hiding turns off the series, the markers, the price
   lines and both primitives. Removing detaches all of them and removes the series. A settings
   change re-applies colours, widths, styles and level lines for every kind. An indicator whose
@@ -490,7 +497,10 @@ unit-tested), the two primitives in `indicatorPrimitives.ts`, the wiring in `ind
     for markers, levels and bands. Every load of older history refetches every indicator for all
     bars held (33 full fetches per indicator while scrolling back eleven days): the M7 design,
     which CI-5 is for. Not changed here.
-- **Seen, not changed (server).** After a bar of a new period starts (5m, in the demo), `GET
-  /api/candles` and so the indicator values end at the previous bar for up to a minute or more
-  (14:50:32: last candle 14:45), so the legend shows `∅` for the new bar in that time. The server
-  was not touched in this step; to look at under CI-5 (forming-bar updates).
+- **The legend's `∅` for the live bar is real, not the demo's fake broker (checked by reading the
+  code and watching the clock, no change in this step).** `CandleBuilder` writes an M1 bar to the
+  database only when it closes; the forming minute lives in memory and on the websocket. `GET
+  /api/candles` and so the indicator values come from stored M1, so a bar whose first minute
+  has not closed is missing: for up to a minute after a 5m bar starts, and on the 1m chart the
+  forming bar is never there (15:30:07, 15:30:27 and 15:30:47 all ended at the 15:29 bar). It
+  was the same before CI-2 (M7 code, same server). The fix is on its own branch, see the PR.
