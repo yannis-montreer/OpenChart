@@ -34,6 +34,12 @@ describe("apiErrorFrom", () => {
     expect(e.message).toBe("field required");
   });
 
+  it("does not take an empty text for a message", () => {
+    expect(apiErrorFrom(400, "Bad Request", { detail: "" }).message).toBe("Bad Request");
+    expect(apiErrorFrom(409, "Conflict", { detail: { message: "" } }).message).toBe("Conflict");
+    expect(apiErrorFrom(422, "Unprocessable", { detail: [{ msg: "" }] }).message).toBe("Unprocessable");
+  });
+
   it("falls back to the status text when the body has nothing usable", () => {
     expect(apiErrorFrom(500, "Internal Server Error", null).message).toBe("Internal Server Error");
     expect(apiErrorFrom(500, "Internal Server Error", {}).message).toBe("Internal Server Error");

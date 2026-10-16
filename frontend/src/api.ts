@@ -85,12 +85,33 @@ export interface CandleQuery {
 
 /** Raised for HTTP errors; `status` 401 means the session is gone. */
 export class ApiError extends Error {
+  /** The answer's `detail` as sent: a string, a list (validation) or an object (`{message, usage}` of a 409). */
+  detail?: unknown;
+
   constructor(
     public status: number,
     message: string,
   ) {
     super(message);
   }
+}
+
+/** The error for a failed answer: its message, and its `detail` kept whole for callers that need more than text. */
+export function apiErrorFrom(status: number, statusText: string, body: unknown): ApiError {
+  const detail = (body as { detail?: unknown } | null | undefined)?.detail;
+  let message = statusText;
+  if (typeof detail === "string" && detail) {
+    message = detail;
+  } else if (Array.isArray(detail)) {
+    const first = (detail[0] as { msg?: unknown } | undefined)?.msg;
+    if (typeof first === "string" && first) message = first;
+  } else if (detail && typeof detail === "object") {
+    const text = (detail as { message?: unknown }).message;
+    if (typeof text === "string" && text) message = text;
+  }
+  const error = new ApiError(status, message);
+  error.detail = detail;
+  return error;
 }
 
 /** Fired on any 401, so the app can show the login screen. */
@@ -116,17 +137,16 @@ async function request<T>(
     body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
   });
   if (!res.ok) {
-    let detail = res.statusText;
+    let body: unknown = null;
     try {
-      const body = await res.json();
-      detail = typeof body.detail === "string" ? body.detail : (body.detail?.[0]?.msg ?? detail);
+      body = await res.json();
     } catch {
       /* not JSON */
     }
     if (res.status === 401 && !path.includes("login")) {
       window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
     }
-    throw new ApiError(res.status, detail);
+    throw apiErrorFrom(res.status, res.statusText, body);
   }
   return res.json() as Promise<T>;
 }
@@ -386,6 +406,9 @@ export type IndicatorOutput =
   | MarkerOutput
   | BackgroundOutput;
 
+/** Built-in and your own definitions are separate namespaces (CI-3): an id means one of them only with its kind. */
+export type IndicatorKind = "builtin" | "custom";
+
 export interface IndicatorDef {
   id: string;
   name: string;
@@ -394,14 +417,61 @@ export interface IndicatorDef {
   params: IndicatorParam[];
   outputs: IndicatorOutput[];
   builtin: boolean;
+  kind?: IndicatorKind;
+}
+
+/** What became of one of your files: it runs, it did not load, it was switched off after failing, or the worker is not there. */
+export type CustomStatus = "ok" | "error" | "quarantined" | "not_run";
+
+/** One file of yours, as `custom` in the catalog lists it. */
+export interface CustomEntry {
+  id: string;
+  kind: "custom";
+  file: string;
+  status: CustomStatus;
+  reason: string | null;
+  line: number | null;
+  /** null when the file did not load. */
+  definition: IndicatorDef | null;
+  checks?: unknown;
+}
+
+/** How your own files are isolated here (CI-1); the notice says when they are not. */
+export interface IsolationInfo {
+  level: string;
+  minimum_met?: boolean;
+  reason?: string;
+  notice?: string | null;
+  notes?: string[];
+}
+
+export interface WorkerStatus {
+  state: string;
+  level?: string;
+  restarts?: number;
+  error?: string | null;
+  start_seconds?: number | null;
+  pid?: number | null;
+}
+
+/** Whether code may be edited (and a definition deleted) from this request, and why not. */
+export interface EditingStatus {
+  allowed: boolean;
+  setting: string;
+  reason: string;
 }
 
 export interface IndicatorCatalog {
+  /** The flat list the M7 menu read: built-in ones, then yours that run. */
   indicators: IndicatorDef[];
-  errors: { file: string; error: string }[];
+  errors: { file: string; error: string; kind?: IndicatorKind }[];
   folder: string;
-  /** How your own files are isolated here (CI-1); the notice says when they are not. */
-  isolation?: { level: string; minimum_met?: boolean; reason?: string; notice?: string | null; notes?: string[] };
+  /** The sections (a server from before CI-2 (d) sends none of these). */
+  builtin?: IndicatorDef[];
+  custom?: CustomEntry[];
+  isolation?: IsolationInfo;
+  worker?: WorkerStatus | null;
+  editing?: EditingStatus;
 }
 
 export interface IndicatorValues {
@@ -478,4 +548,94 @@ export const layoutsApi = {
   update: (id: string, body: { name?: string; layout?: LayoutState; default?: boolean }) =>
     request<Layout>("PUT", `api/layouts/${id}`, { body }),
   remove: (id: string) => request<LayoutSummary>("DELETE", `api/layouts/${id}`),
+  /** Put the layout's indicators on a chart (the layout's instrument unless one is given). */
+  apply: (id: string, instrument?: string) =>
+    request<{ layout: Layout; chart: ChartIndicators; skipped: SkippedEntry[] }>("POST", `api/layouts/${id}/apply`, {
+      params: { instrument },
+    }),
+};
+
+// Indicators per chart on the server (CI-3, docs/api.md)
+
+/** An instance as the server answers it. `reset` lists the inputs that fell back to their defaults. */
+export interface ChartIndicator {
+  uid: string;
+  kind: IndicatorKind;
+  id: string;
+  params: IndicatorParams;
+  visible: boolean;
+  price_labels: boolean;
+  legend_values: boolean;
+  status: "ok" | CustomStatus | "missing";
+  reset: string[];
+}
+
+export interface ChartIndicators {
+  source: string;
+  instrument: string;
+  /** 0 for a chart whose list was never set. */
+  revision: number;
+  indicators: ChartIndicator[];
+}
+
+/** An instance as a write sends it; a missing `uid` or `kind` is filled in by the server. */
+export interface ChartIndicatorIn {
+  uid?: string;
+  kind?: IndicatorKind;
+  id: string;
+  params: IndicatorParams;
+  visible?: boolean;
+  price_labels?: boolean;
+  legend_values?: boolean;
+}
+
+/** An entry of an imported or restored list that could not be used, and why. */
+export interface SkippedEntry {
+  id: string | null;
+  kind: IndicatorKind | null;
+  reason: string;
+}
+
+/** `{path}` segments are encoded one by one, so a source or instrument cannot change the route. */
+export function chartPath(source: string, instrument: string): string {
+  return `api/charts/${encodeURIComponent(source)}/${encodeURIComponent(instrument)}/indicators`;
+}
+
+export const chartsApi = {
+  get: (source: string, instrument: string) => get<ChartIndicators>(chartPath(source, instrument)),
+  /** The whole list, in legend order. `revision`: the one it was based on (409 if it moved on). */
+  put: (source: string, instrument: string, body: { indicators: ChartIndicatorIn[]; revision?: number }) =>
+    request<ChartIndicators>("PUT", chartPath(source, instrument), { body }),
+  /** A browser's list from before CI-3: taken only onto a chart whose list was never set. */
+  import: (source: string, instrument: string, indicators: unknown[]) =>
+    request<ChartIndicators & { skipped: SkippedEntry[] }>("POST", `${chartPath(source, instrument)}/import`, {
+      body: { indicators },
+    }),
+};
+
+// Your own definitions: where one is used, and deleting it (behind the editing gate)
+
+export interface DefinitionUsage {
+  id: string;
+  in_use: boolean;
+  charts: { source: string; instrument: string; instances: number }[];
+  layouts: { id: string; name: string; instances: number }[];
+}
+
+export interface DeletedDefinition {
+  id: string;
+  /** Where the file went, relative to your indicators folder. */
+  moved_to: string;
+  removed: DefinitionUsage;
+}
+
+export function definitionPath(id: string): string {
+  return `api/custom-indicators/${encodeURIComponent(id)}`;
+}
+
+export const customApi = {
+  usage: (id: string) => get<DefinitionUsage>(`${definitionPath(id)}/usage`),
+  /** Without `confirm`, a definition in use answers 409 with where it is used. */
+  remove: (id: string, confirm = false) =>
+    request<DeletedDefinition>("DELETE", definitionPath(id), { params: { confirm: confirm ? "true" : undefined } }),
 };

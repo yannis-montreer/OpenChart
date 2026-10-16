@@ -6,7 +6,7 @@
  * the server sends status every 5 s, so silence means the link is gone.
  */
 
-import type { Alert, AlertEvent, Bar, Drawing, LayoutSummary, Price, Status } from "./api";
+import type { Alert, AlertEvent, Bar, ChartIndicators, Drawing, LayoutSummary, Price, Status } from "./api";
 import type { Closure } from "./drawings/tradingTime";
 
 export interface SubKey {
@@ -35,6 +35,7 @@ export type ServerMessage =
   | { type: "alert_triggered"; alert: Alert; event: AlertEvent }
   | { type: "alert_event"; event: AlertEvent }
   | { type: "layouts_changed"; layouts: LayoutSummary[] }
+  | ({ type: "chart_indicators_changed" } & ChartIndicators)
   | { type: "error"; error: string };
 
 export type SocketState = "connecting" | "open" | "reconnecting";
