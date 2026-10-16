@@ -34,7 +34,7 @@ import secrets
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from fastapi import HTTPException
-from pydantic import BaseModel, Field, StrictBool, StrictFloat, StrictInt
+from pydantic import BaseModel, Field, StrictBool, StrictFloat, StrictInt, ValidationError
 
 from openchart.indicators._base import Indicator
 from openchart.store.chart_indicators import ChartIndicatorStore, Instance
@@ -53,8 +53,8 @@ UID_PATTERN = r"^[A-Za-z0-9_-]{1,40}$"
 
 # A parameter value as it may be stored: one JSON scalar, bounded. The definition decides
 # whether it fits; these bounds hold even when there is no definition to ask. Numbers
-# that are not finite (Python's JSON reads NaN and Infinity) are refused by `checked`,
-# not here: a validation error echoes its input, and NaN cannot be sent back as JSON.
+# that are not finite (Python's JSON reads NaN and Infinity) are refused by `checked`
+# (`unkeepable`), so an old list can leave out just that entry.
 Value = (
     StrictBool
     | Annotated[StrictInt, Field(ge=-MAX_WHOLE, le=MAX_WHOLE)]
@@ -75,12 +75,36 @@ class InstanceIn(BaseModel):
     kind: Literal["builtin", "custom"] | None = None
     id: str = Field(pattern=ID_PATTERN)
     params: Params = Field(default_factory=dict)
-    visible: bool = True
-    price_labels: bool = True  # last value on the price scale
-    legend_values: bool = True  # values in the legend row
+    visible: StrictBool = True
+    price_labels: StrictBool = True  # last value on the price scale
+    legend_values: StrictBool = True  # values in the legend row
 
 
 InstanceList = Annotated[list[InstanceIn], Field(max_length=MAX_INDICATORS)]
+MAX_OLD_ENTRIES = 200  # a browser's old list or a layout's copy, read entry by entry
+OldList = Annotated[list[Any], Field(max_length=MAX_OLD_ENTRIES)]
+
+
+def parse_entries(raw: list[Any]) -> tuple[list[InstanceIn], list[dict[str, Any]]]:
+    """Entries of an old list (a browser's `localStorage`, a layout's copy) one by one:
+    those that are not an instance at all are left out with the reason, not the list."""
+    entries: list[InstanceIn] = []
+    skipped: list[dict[str, Any]] = []
+    for item in raw:
+        try:
+            entries.append(InstanceIn.model_validate(item))
+        except ValidationError as exc:
+            rid = item.get("id") if isinstance(item, dict) else None
+            first = exc.errors()[0]
+            where = ".".join(str(x) for x in first["loc"])
+            skipped.append(
+                {
+                    "id": rid[:80] if isinstance(rid, str) else None,
+                    "kind": None,
+                    "reason": f"not an indicator: {where}: {first['msg']}",
+                }
+            )
+    return entries, skipped
 
 
 def new_uid() -> str:
@@ -107,15 +131,14 @@ def fit(indicator: Indicator, given: dict[str, Any], *, strict: bool) -> tuple[d
     return out, sorted(reset)
 
 
-def bounded(indicator_id: str, params: dict[str, Any]) -> None:
-    """422 for a value that is not a finite number, or values too large to keep."""
+def unkeepable(indicator_id: str, params: dict[str, Any]) -> str | None:
+    """Why these values cannot be stored (not a finite number, too large), or None."""
     for name, value in params.items():
         if isinstance(value, float) and not math.isfinite(value):
-            raise HTTPException(422, f"{indicator_id}: {name}: must be a finite number")
+            return f"{indicator_id}: {name}: must be a finite number"
     if len(json.dumps(params)) > MAX_PARAMS_BYTES:
-        raise HTTPException(
-            422, f"{indicator_id}: the values take more than {MAX_PARAMS_BYTES} bytes"
-        )
+        return f"{indicator_id}: the values take more than {MAX_PARAMS_BYTES} bytes"
+    return None
 
 
 class ChartIndicators:
@@ -158,13 +181,24 @@ class ChartIndicators:
     ) -> tuple[list[Instance], dict[str, list[str]], list[dict[str, Any]]]:
         """The instances to store, the inputs reset in each (by uid), and the entries left
         out. `strict` (PUT, layouts): an unknown definition, a repeated uid or a value an
-        input refuses is a 400. Otherwise (import, restore) they are left out, given a new
-        uid, or reset."""
+        input refuses is a 400, values that cannot be kept a 422. Otherwise (import,
+        restore) they are left out, given a new uid, or reset, and entries past the
+        first MAX_INDICATORS are left out."""
         instances: list[Instance] = []
         resets: dict[str, list[str]] = {}
         skipped: list[dict[str, Any]] = []
         seen: set[str] = set()
         for e in entries:
+            if len(instances) == MAX_INDICATORS and not strict:
+                skipped.append(
+                    {"id": e.id, "kind": e.kind, "reason": f"more than {MAX_INDICATORS} indicators"}
+                )
+                continue
+            if why := unkeepable(e.id, e.params):
+                if strict:
+                    raise HTTPException(422, why)
+                skipped.append({"id": e.id, "kind": e.kind, "reason": f"cannot be kept: {why}"})
+                continue
             kind, schema, status = await self.definition(e.kind, e.id)
             if status == "missing":
                 what = f"no {kind} indicator {e.id!r}" if kind else f"no indicator {e.id!r}"
@@ -180,7 +214,6 @@ class ChartIndicators:
                 uid = new_uid()
             seen.add(uid)
             params: dict[str, Any] = dict(e.params)
-            bounded(e.id, params)
             if schema is not None:
                 try:
                     params, reset = fit(schema, params, strict=strict)

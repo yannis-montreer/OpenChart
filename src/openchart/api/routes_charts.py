@@ -11,19 +11,20 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, StrictInt
 
-from openchart.api.chart_indicators import ChartIndicators, InstanceList
+from openchart.api.chart_indicators import ChartIndicators, InstanceList, OldList, parse_entries
 from openchart.server import Server
 
 
 class ChartPut(BaseModel):
     indicators: InstanceList
-    revision: int | None = None  # the revision this list was based on; 409 if it moved on
+    # The revision this list was based on; 409 if it moved on.
+    revision: StrictInt | None = Field(None, ge=0)
 
 
 class ChartImport(BaseModel):
-    indicators: InstanceList
+    indicators: OldList  # checked entry by entry: an old list is taken as far as it can be
 
 
 def chart_routes(server: Server, charts: ChartIndicators) -> APIRouter:
@@ -64,8 +65,9 @@ def chart_routes(server: Server, charts: ChartIndicators) -> APIRouter:
                         "chart": await charts.view(source, instrument),
                     },
                 )
-            instances, resets, skipped = await charts.checked(body.indicators, strict=False)
+            entries, unusable = parse_entries(body.indicators)
+            instances, resets, skipped = await charts.checked(entries, strict=False)
             chart = await charts.replace(source, instrument, instances, resets)
-        return {**chart, "skipped": skipped}
+        return {**chart, "skipped": unusable + skipped}
 
     return router

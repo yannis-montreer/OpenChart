@@ -137,8 +137,9 @@ def custom_routes(server: Server, charts: ChartIndicators) -> APIRouter:
     @router.delete("/{indicator_id}")
     async def delete(indicator_id: str, request: Request, confirm: bool = False) -> dict[str, Any]:
         await require_editing(request, server.settings, server.isolation)
-        path = definition_file(indicator_id)
+        definition_file(indicator_id)
         async with charts.lock:
+            path = definition_file(indicator_id)  # again: another delete may have run
             found = await usage(indicator_id)
             if found["in_use"] and not confirm:
                 message = where(found, await title(indicator_id))

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import math
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -17,6 +18,8 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -59,6 +62,17 @@ class WebFiles(StaticFiles):
         return response
 
 
+def encodable(value: Any) -> Any:
+    """`value` with every float that JSON cannot carry (NaN, infinities) as its text."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, dict):
+        return {k: encodable(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [encodable(v) for v in value]
+    return value
+
+
 def same_origin(origin: str | None, host: str | None) -> bool:
     """No Origin header (curl, scripts) is fine; a browser page from elsewhere is not."""
     return not origin or urlsplit(origin).netloc == host
@@ -81,6 +95,14 @@ def create_app(server: Server) -> FastAPI:
             await server.stop()
 
     app = FastAPI(title="OpenChart", version=__version__, lifespan=lifespan)
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(request: Request, exc: RequestValidationError) -> JSONResponse:
+        """FastAPI's own 422, except that a NaN or an infinity in the echoed input (Python's
+        JSON reader accepts them) is sent as text: as a number it cannot be encoded, and
+        the request became a 500."""
+        return JSONResponse({"detail": encodable(jsonable_encoder(exc.errors()))}, 422)
+
     app.state.server = server
 
     @app.middleware("http")

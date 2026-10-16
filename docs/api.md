@@ -150,12 +150,13 @@ A chart is a source and an instrument (the source is `provider` in `GET /api/sta
 - **An instance:** `{uid, kind, id, params, visible, price_labels, legend_values}`.
   - `uid`: the instance's stable id (letters, digits, `_` and `-`, at most 40); a new one is given when it is left out.
   - `kind`: `builtin` or `custom`. Left out, it is the built-in with that `id`, or the custom one when only a file of yours has it (how older lists are read).
-  - `params`: at most 64 values, each `true`/`false`, a finite number or a text of at most 1000 characters, 8 KB of JSON in all. `visible`, `price_labels` and `legend_values` default to `true`.
+  - `params`: at most 64 values, each `true`/`false`, a finite number or a text of at most 1000 characters, 8 KB of JSON in all. `visible`, `price_labels` and `legend_values` are `true` or `false` (no other value is read as one) and default to `true`.
   - **Answers add** `status` (`ok`; `missing` when no definition has that id in that kind; or a custom file's `error`, `quarantined`, `not_run`) and `reset`, the inputs whose values no longer fitted (below).
-- **`revision`** is 0 for a chart whose list was never set and goes up by one with every write. A `PUT` that gives `revision` is refused with `409` `{detail: {message, chart}}` if the chart has moved on since.
+- **`revision`** is 0 for a chart whose list was never set and goes up by one with every write. A `PUT` that gives `revision` (a whole number, not `true` or text) is refused with `409` `{detail: {message, chart}}` if the chart has moved on since.
+- **A refused body is a `422`** with FastAPI's usual `detail` list; a `NaN` or an infinity in the input it echoes is sent as text (`"nan"`), since JSON cannot carry it (that was a 500 before, for every route).
 - **Validation:** `PUT` stores the values complete (every input, defaults for those not given). An unknown definition, a `uid` used twice or a value its input does not accept is a `400`; values outside the bounds above, NaN or infinities are a `422`. A value for an input the definition does not have (removed, or never there) is dropped and listed in `reset`. An instance of a file of yours that does not load at the moment keeps its values as given; they are checked once it loads again.
 - **"Settings reset":** when the definition was edited after the values were stored (an input removed, a choice renamed, a range narrowed), `GET` answers those inputs with their defaults and lists them in `reset`, without changing what is stored (editing the file back brings the values back). The next write stores the list as it now fits; its answer and broadcast carry the note once.
-- **Import:** accepted only for a chart whose list was never set (`revision` 0), also not after it was set to an empty list: `409` `{detail: {message, chart}}` otherwise. Entries whose definition is gone are left out and listed in `skipped` (`[{id, kind, reason}]`); values that no longer fit fall back to their defaults with the note.
+- **Import:** accepted only for a chart whose list was never set (`revision` 0), also not after it was set to an empty list: `409` `{detail: {message, chart}}` otherwise. The list is read entry by entry (at most 200): entries that are not an instance, hold a value that cannot be kept, have no definition any more, or come after the first 30 are left out and listed in `skipped` (`[{id, kind, reason}]`), the rest is imported; values that no longer fit fall back to their defaults with the note.
 - Every change is sent to all connected browsers as a websocket `chart_indicators_changed` message.
 
 ## Your indicator definitions
@@ -185,7 +186,7 @@ These answer `403` unless editing custom indicators is allowed for this request 
 
 - `layout`: `{instrument, timeframe, chart_type, price, theme, panel_open, panel_view, indicators}`; `chart_type` is `candles`, `bars`, `line`, `area` or `heikin_ashi`. At most one layout is the default.
 - **`indicators`** is a copy of a chart's instances (`{uid, kind, id, params, visible, price_labels, legend_values}`, as above). **Left out, the layout copies its instrument's list from the server**; given (as the M7 browser does), it is checked like a `PUT` to a chart and stored complete, with a `kind` and a `uid` added to each entry.
-- **`apply`** replaces the chart's list with the copy (the same `uid`s), broadcast as `chart_indicators_changed`. Values that no longer fit fall back with the `reset` note; entries whose definition is gone are left out and listed in `skipped`. `400` when neither the layout nor the request names an instrument.
+- **`apply`** replaces the chart's list with the copy (the same `uid`s), broadcast as `chart_indicators_changed`. It reads the copy as the import reads a browser's list: values that no longer fit fall back with the `reset` note; entries whose definition is gone (or that cannot be used) are left out and listed in `skipped`. `400` when neither the layout nor the request names an instrument.
 
 ## Drawings
 

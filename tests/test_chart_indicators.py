@@ -7,6 +7,7 @@ With the fake worker (tests/fake_worker.py): what is tested is what the server s
 validates and sends, not how a script runs.
 """
 
+import asyncio
 import json
 import re
 import sys
@@ -302,11 +303,37 @@ def test_the_import_is_refused_once_a_chart_was_set_even_to_nothing(cc):
     assert chart(cc, "EUR_USD")["indicators"] == []
 
 
-def test_the_import_takes_the_same_shapes_as_put(cc):
-    r = cc.post(url(cc) + "/import", json={"indicators": [{"id": "ema"}] * 31})
-    assert r.status_code == 422
-    r = cc.post(url(cc) + "/import", json={"indicators": [{"id": "ema", "params": {"a": [1]}}]})
-    assert r.status_code == 422
+def test_the_import_takes_what_it_can_of_an_old_list(cc):
+    """Review finding 4: the browser's old list had no limit and was never checked, so
+    one entry outside PUT's bounds must not keep the whole list out for good."""
+    old = [{"id": "ema", "params": {"length": n}} for n in range(2, 34)]  # 32 entries
+    old[1] = {"id": "ema", "params": {"a": [1]}}  # not a value
+    old[2] = {"id": "Not An Id"}
+    old[3] = {"id": "ema", "params": {"length": "x" * 2000}}
+    r = cc.post(url(cc) + "/import", json={"indicators": old})
+    body = ok(r)
+    assert len(body["indicators"]) == 29  # 32 less the 3 that are not indicators
+    assert [i["params"]["length"] for i in body["indicators"]][:2] == [2, 6]
+    reasons = [s["reason"] for s in body["skipped"]]
+    assert len(reasons) == 3 and all("not an indicator" in x for x in reasons)
+    nan = '{"indicators": [{"id": "ema", "params": {"length": NaN}}, {"id": "ema"}]}'
+    r = cc.post(
+        url(cc, "EUR_USD") + "/import", content=nan, headers={"content-type": "application/json"}
+    )
+    body = ok(r)
+    assert len(body["indicators"]) == 1 and len(body["skipped"]) == 1
+
+
+def test_the_import_keeps_the_first_30(cc):
+    old = [{"id": "ema", "params": {"length": n}} for n in range(2, 34)]  # 32 entries
+    body = ok(cc.post(url(cc) + "/import", json={"indicators": old}))
+    assert [i["params"]["length"] for i in body["indicators"]] == list(range(2, 32))
+    assert [s["reason"] for s in body["skipped"]] == ["more than 30 indicators"] * 2
+
+
+def test_the_import_refuses_a_body_that_is_not_a_list(cc):
+    for body in ({"indicators": {"id": "ema"}}, {"indicators": [{"id": "ema"}] * 201}, {}):
+        assert cc.post(url(cc) + "/import", json=body).status_code == 422
     assert chart(cc)["revision"] == 0
 
 
@@ -559,3 +586,111 @@ def test_delete_refuses_a_file_whose_name_ends_in_a_newline(cc):
     (cc.folder / "mine\n.py").write_text("PLAIN\n")
     assert cc.delete("/api/custom-indicators/mine%0A?confirm=true").status_code == 404
     assert (cc.folder / "mine\n.py").is_file()
+
+
+# Found in the review of this change ------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"indicators": [], "revision": True},  # would match revision 1
+        {"indicators": [], "revision": "0"},
+        {"indicators": [], "revision": -1},
+        {"indicators": [{"id": "ema", "visible": "no"}]},
+        {"indicators": [{"id": "ema", "price_labels": 0}]},
+        {"indicators": [{"id": "ema", "legend_values": "false"}]},
+    ],
+)
+def test_revision_and_switches_take_only_their_own_types(cc, body):
+    """Review finding 3: lax parsing read `true` as revision 1 and "no" as false."""
+    assert cc.put(url(cc), json=body).status_code == 422
+    assert chart(cc)["revision"] == 0
+
+
+def slow_chart_writes(cc, monkeypatch):
+    """Every chart write pauses 1 s inside the lock; `inside` is set when one is there."""
+    import threading
+
+    from openchart.store import chart_indicators as store_module
+
+    inside = threading.Event()
+    replace = store_module.ChartIndicatorStore.replace
+
+    async def slow(self, *args, **kwargs):
+        inside.set()
+        await asyncio.sleep(1.0)
+        return await replace(self, *args, **kwargs)
+
+    monkeypatch.setattr(store_module.ChartIndicatorStore, "replace", slow)
+    return inside
+
+
+def in_thread(fn):
+    import threading
+
+    out = {}
+    thread = threading.Thread(target=lambda: out.setdefault("r", fn()), daemon=True)
+    thread.start()
+    return thread, out
+
+
+def test_a_layout_saved_during_a_delete_does_not_keep_the_deleted_definition(cc, monkeypatch):
+    """Review finding 1: layout writes did not take the charts' lock, so a layout saved
+    while a delete was removing instances kept one of the definition it deleted."""
+    allow_editing(cc)
+    write(cc.folder, "mine.py", "PLAIN\n")
+    ok(put(cc, [{"id": "mine"}]))
+    inside = slow_chart_writes(cc, monkeypatch)
+    thread, out = in_thread(lambda: cc.delete("/api/custom-indicators/mine?confirm=true"))
+    assert inside.wait(10)
+    layout = {"instrument": "EUR_USD", "indicators": [{"id": "mine"}, {"id": "ema"}]}
+    saved = cc.post("/api/layouts", json={"name": "During", "layout": layout})
+    thread.join(10)
+    assert out["r"].status_code == 200
+    assert not (cc.folder / "mine.py").exists()
+    if saved.status_code == 200:  # saved first: then the delete must have taken it out
+        got = ok(cc.get(f"/api/layouts/{saved.json()['id']}"))["layout"]["indicators"]
+        assert [i["id"] for i in got] == ["ema"]
+    else:
+        assert saved.status_code == 400  # saved after: the definition is gone
+
+
+def test_two_deletes_at_once_move_the_file_once(cc, monkeypatch):
+    """Review finding 2: the file was looked up before the lock, so a second delete that
+    waited for the first failed on the missing file (500) and left an empty folder."""
+    allow_editing(cc)
+    write(cc.folder, "mine.py", "PLAIN\n")
+    ok(put(cc, [{"id": "mine"}]))
+    inside = slow_chart_writes(cc, monkeypatch)
+    thread, out = in_thread(lambda: cc.delete("/api/custom-indicators/mine?confirm=true"))
+    assert inside.wait(10)
+    second = cc.delete("/api/custom-indicators/mine?confirm=true")
+    thread.join(10)
+    assert sorted([out["r"].status_code, second.status_code]) == [200, 404]
+    assert len(list((cc.folder / ".deleted").iterdir())) == 1
+
+
+NAN_ENTRY = '{"id": "ema", "params": {"length": NaN}}'
+
+
+@pytest.mark.parametrize(
+    "path, entries",
+    [("", [NAN_ENTRY] * 31), ("/import", ['{"length": NaN}'] * 201)],
+    ids=["put-31", "import-201"],
+)
+def test_a_refused_body_holding_nan_is_a_422(cc, path, entries):
+    """Review finding 5: FastAPI's 422 echoes the input, and a NaN in it could not be
+    encoded, so a 31-entry list with a NaN was a 500."""
+    method = cc.post if path else cc.put
+    body = '{"indicators": [' + ", ".join(entries) + "]}"
+    r = method(url(cc) + path, content=body, headers={"content-type": "application/json"})
+    assert r.status_code == 422
+    assert '"nan"' in r.text  # echoed as text
+
+
+def test_the_same_422_on_other_routes(cc):
+    """Finding 5's handler is the app's: a drawing with a NaN price was a 500 too."""
+    body = '{"instrument": "XAU_USD", "type": "hline", "points": [{"t": 1760450400, "p": NaN}]}'
+    r = cc.post("/api/drawings", content=body, headers={"content-type": "application/json"})
+    assert r.status_code == 422 and '"nan"' in r.text

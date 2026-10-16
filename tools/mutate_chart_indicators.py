@@ -311,6 +311,58 @@ MUTANTS = [
         '"error": d.reason or d.status, "kind": "custom"}',
         '"error": d.reason or d.status}',
     ),
+    # Found in the review of the change (each has its test)
+    (
+        "a layout saved outside the lock",
+        RL,
+        [
+            (
+                "        async with charts.lock:\n            layout = await store().create(",
+                "        if True:\n            layout = await store().create(",
+            ),
+            ("        assert charts.lock.locked()\n", ""),
+        ],
+        False,
+    ),
+    # Equivalent: the assertion only guards against a caller forgetting the lock.
+    one("checked() without the lock", RL, "        assert charts.lock.locked()\n", "", True),
+    one(
+        "the file looked up only before the lock",
+        RX,
+        "            path = definition_file(indicator_id)  # again: another delete may have run\n",
+        '            path = server.custom.folder / f"{indicator_id}.py"\n',
+    ),
+    one("lax switches", CI, "    visible: StrictBool = True\n", "    visible: bool = True\n"),
+    one(
+        "lax revision",
+        RC,
+        "revision: StrictInt | None = Field(None, ge=0)",
+        "revision: int | None = None",
+    ),
+    one(
+        "the import takes the list whole",
+        RC,
+        "    indicators: OldList  # checked",
+        "    indicators: InstanceList  # checked",
+    ),
+    one(
+        "no cap of 30 on an old list",
+        CI,
+        "            if len(instances) == MAX_INDICATORS and not strict:",
+        "            if False:",
+    ),
+    one(
+        "a value that cannot be kept fails the old list",
+        CI,
+        "                if strict:\n                    raise HTTPException(422, why)",
+        "                if True:\n                    raise HTTPException(422, why)",
+    ),
+    one(
+        "NaN echoed as a number",
+        "openchart/api/app.py",
+        "        return str(value)\n",
+        "        return value\n",
+    ),
 ]
 
 if __name__ == "__main__":

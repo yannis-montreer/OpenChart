@@ -12,9 +12,9 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, field_validator
 
-from openchart.api.chart_indicators import ChartIndicators, InstanceIn, InstanceList
+from openchart.api.chart_indicators import ChartIndicators, InstanceList, parse_entries
 from openchart.market.timeframes import parse_timeframe
 from openchart.server import Server
 from openchart.store.layouts import DEFAULT_KEY, LayoutStore
@@ -72,7 +72,10 @@ def layout_routes(server: Server, charts: ChartIndicators) -> APIRouter:
 
     async def checked(state: LayoutState) -> dict[str, Any]:
         """The layout as stored: indicators checked and completed like a chart's (a kind
-        and a uid each), or copied from the instrument's chart."""
+        and a uid each), or copied from the instrument's chart. Call it holding
+        `charts.lock` and store the result before releasing it, so a definition deleted
+        meanwhile cannot end up in the layout."""
+        assert charts.lock.locked()
         data = state.model_dump()
         if state.indicators is not None:
             instances, _, _ = await charts.checked(state.indicators, strict=True)
@@ -99,7 +102,8 @@ def layout_routes(server: Server, charts: ChartIndicators) -> APIRouter:
 
     @router.post("")
     async def create(body: LayoutCreate) -> dict[str, Any]:
-        layout = await store().create(body.name.strip(), await checked(body.layout))
+        async with charts.lock:
+            layout = await store().create(body.name.strip(), await checked(body.layout))
         if body.default:
             await server.settings.set(DEFAULT_KEY, layout.id)
         await announce()
@@ -112,10 +116,11 @@ def layout_routes(server: Server, charts: ChartIndicators) -> APIRouter:
             raise HTTPException(404, "no such layout")
         if body.name is not None:
             layout.name = body.name.strip()
-        if body.layout is not None:
-            layout.state = await checked(body.layout)
-        if body.name is not None or body.layout is not None:
-            await store().save(layout)
+        async with charts.lock:
+            if body.layout is not None:
+                layout.state = await checked(body.layout)
+            if body.name is not None or body.layout is not None:
+                await store().save(layout)
         if body.default is True:
             await server.settings.set(DEFAULT_KEY, layout.id)
         elif body.default is False and await default_id() == layout.id:
@@ -135,13 +140,7 @@ def layout_routes(server: Server, charts: ChartIndicators) -> APIRouter:
         if not instrument:
             raise HTTPException(400, "the layout has no instrument: give ?instrument=")
         await charts.known_chart(server.source, instrument)
-        entries, skipped = [], []
-        for raw in layout.state.get("indicators") or []:
-            try:
-                entries.append(InstanceIn.model_validate(raw))
-            except ValidationError as exc:
-                rid = raw.get("id") if isinstance(raw, dict) else None
-                skipped.append({"id": rid, "kind": None, "reason": f"not an indicator: {exc}"})
+        entries, skipped = parse_entries(layout.state.get("indicators") or [])
         async with charts.lock:
             instances, resets, left_out = await charts.checked(entries, strict=False)
             chart = await charts.replace(server.source, instrument, instances, resets)
