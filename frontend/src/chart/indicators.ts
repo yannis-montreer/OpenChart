@@ -68,6 +68,7 @@ import {
 } from "./indicatorOutputs";
 import { BackgroundPrimitive, FillPrimitive } from "./indicatorPrimitives";
 import { reconcileParams } from "./params";
+import { nextRefresh, versionChanged } from "./refresh";
 import type { ChartView } from "./view";
 
 const PAGE = 5000; // the server's largest page
@@ -111,6 +112,12 @@ interface Active {
   valueEls: Map<string, HTMLElement>;
   generation: number;
   error?: string;
+  /** The file's version the values were computed with (your own files; see refresh.ts). */
+  version?: string;
+  /** When a full load was last started, for trying again after an error. */
+  lastTry: number;
+  /** Set while a full load is under way, so a refresh does not start another over it. */
+  loading?: object;
 }
 
 const NO_FILL = { time: [], upper: new Float64Array(0), lower: new Float64Array(0) };
@@ -218,6 +225,7 @@ export class IndicatorLayer {
       row: h("div", { class: "legend-row" }),
       valueEls: new Map(),
       generation: 0,
+      lastTry: 0,
     };
     const chart = this.view.chart;
     const pane = def.overlay ? 0 : 1 + this.active.filter((x) => !x.def.overlay).length;
@@ -441,9 +449,20 @@ export class IndicatorLayer {
 
   /** Values, hits and levels for every bar held. */
   private async load(a: Active): Promise<void> {
+    const token = {};
+    a.loading = token;
+    try {
+      await this.loadNow(a);
+    } finally {
+      if (a.loading === token) a.loading = undefined; // a later load has its own token
+    }
+  }
+
+  private async loadNow(a: Active): Promise<void> {
     const span = this.view.span();
     const q = this.query(a);
     const gen = ++a.generation;
+    a.lastTry = Date.now();
     if (!span || !q) {
       this.clear(a);
       return;
@@ -451,6 +470,7 @@ export class IndicatorLayer {
     const got = new Map<string, Map<number, number | null>>(valueOutputs(a.def).map((o) => [o.name, new Map()]));
     const hits = new Map<string, number[]>([...a.hits.keys()].map((n) => [n, []]));
     let levels: Record<string, number> = {};
+    let version: string | undefined;
     try {
       let from = span.first;
       for (;;) {
@@ -462,6 +482,7 @@ export class IndicatorLayer {
         }
         for (const [name, list] of hits) for (const t of hitTimes(page.hits?.[name], page.t)) list.push(t);
         if (page.levels) levels = page.levels;
+        version = page.checks?.version;
         if (page.t.length < PAGE) break;
         from = page.t[page.t.length - 1] + 1;
       }
@@ -470,6 +491,7 @@ export class IndicatorLayer {
       return;
     }
     a.error = undefined;
+    a.version = version;
     a.values = got;
     a.hits = hits;
     a.levels = levels;
@@ -482,19 +504,37 @@ export class IndicatorLayer {
     this.renderRow(a);
   }
 
-  /** The forming bar and the one before it (it may just have closed). */
+  /**
+   * The forming bar and the one before it (it may just have closed). A new version of the file, or
+   * a failure after an edit, is a full load instead: the last bars alone would leave every older
+   * bar with the old values, or the error unseen. An indicator in error is asked again in full
+   * every few seconds.
+   */
   private async loadTail(a: Active): Promise<void> {
     const span = this.view.span();
     const q = this.query(a);
-    if (!span || !q || a.error) return;
+    if (!span || !q || a.loading) return;
+    const now = Date.now();
+    const plan = nextRefresh({ error: a.error !== undefined, lastTry: a.lastTry }, now);
+    if (plan === "wait") return;
+    if (plan === "reload") {
+      void this.load(a);
+      return;
+    }
     const gen = a.generation;
     try {
       const page = await indicatorsApi.values(a.def.id, { ...q, from: span.beforeLast ?? span.last, to: span.last + 1 });
       if (gen !== a.generation) return;
+      if (versionChanged(a.version, page.checks?.version)) {
+        void this.load(a);
+        return;
+      }
       this.applyTail(a, page, span.count);
       this.renderValues(a);
-    } catch {
-      /* the next update or reload tries again */
+    } catch (err) {
+      // The server answered with an error (the script raises now): show it. A network hiccup
+      // is left to the next refresh.
+      if (gen === a.generation && err instanceof ApiError) void this.load(a);
     }
   }
 
