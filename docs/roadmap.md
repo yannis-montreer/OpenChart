@@ -25,6 +25,9 @@ item are in `docs/decisions.md`. Updated 2026-10-16.
 | Custom indicators CI-1: your indicator files run in an isolated worker (AppContainer for the service, compose sidecar, restricted token or a job-limited process below the minimum, with a notice), the D2 editing gate and `openchart settings`, `openchart sandbox`, installer and uninstaller sandbox steps, CI as LocalSystem. Design, CI-0 report and CI-1 plan in `docs/` | #17 |
 | Custom indicators CI-2 step (a): the `ta` helper library, 34 helpers matching TradingView's definitions (averages, series, oscillators, volatility, windows, pivots), each with a no-lookahead test and loop references; pivot and `highestbars` ties and `rising`/`falling` checked in TradingView. Warmup per helper in `docs/indicators.md` | #19 |
 | Tests on one fixed clock (`tests/clock.py`): removes the time-of-day failure that broke every Windows job of #18 (a run crossing 17:00 New York) and seven failures on a Saturday or a Sunday before the open; a regression test runs the time-sensitive tests at moments around the breaks and the weekly close and open | #20 |
+| Custom indicators CI-2 step (b): the output kinds (`Histogram`, `Area`, `Fill`, `Level`, `Marker`, `Background`), the `String` input, `info`, long column names, and schema and result validation in the worker and again in the server | #21 |
+| Custom indicators CI-2 step (c): the save-time lookahead and warmup checks (they warn, never block), and a tool that breaks one rule at a time to prove the tests catch it | #22 |
+| The indicator worker starts at normal priority and drops to below normal after its hello (a worker starved by busy cores did not start) | #23 |
 
 **v0.1.0 is released as a pre-release** (owner, 2026-10-15).
 
@@ -40,10 +43,8 @@ item are in `docs/decisions.md`. Updated 2026-10-16.
 
 In the owner's order. Each item is one branch from main and stops for review.
 
-1. **Custom indicators**, CI-2 to CI-5 (design: `docs/custom-indicators-design.md`). CI-1 is merged (#17), and so is step (a) of CI-2 (#19).
-   - **CI-2, steps (b) to (e) (next)** (the rest of its 3 to 4 days), one reviewable branch each:
-     - **(b)** the new input and output kinds with schema validation: `String` input, `info`, long column names, and the histogram, area, fill, level, marker and background declarations;
-     - **(c)** the save-time lookahead and warmup checks (`cum` will be reported by the warmup check, by design);
+1. **Custom indicators**, CI-2 to CI-5 (design: `docs/custom-indicators-design.md`). CI-1 is merged (#17), and so are steps (a), (b) and (c) of CI-2 (#19, #21, #22).
+   - **CI-2, steps (d) and (e) (next)**, one reviewable branch each (on open draft PRs when this was written; steps (b) and (c) are merged):
      - **(d)** drawing the new output kinds in the chart;
      - **(e)** `docs/custom-indicators.md` with the four examples and the Pine cheat sheet.
    - **To check in TradingView** (inferred so far, in `docs/decisions.md`): `pivotlow` ties and pivots with several equal bars on the left, `rising`/`falling` for n other than 2, and `rsi` on a window where nothing moved (100).
