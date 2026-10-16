@@ -8,6 +8,11 @@ so no restart is needed after editing one.
 A definition that crashes the worker, times out or hits the memory limit 3 times in a
 row is stopped ("quarantined") until its file changes, so one bad script cannot keep the
 worker restarting for everyone. Its own exceptions are shown, not counted.
+
+Each version of a file is checked for lookahead and a short warmup (`_checks.py`) on the
+bars of its first chart requests, for at most CHECK_SETTINGS different settings: two more
+worker jobs at the lowest priority, one check at a time, never right after the worker
+starts. A check only ever warns: what it finds, or why it did not run, is in `checks`.
 """
 
 from __future__ import annotations
@@ -19,14 +24,16 @@ import json
 import logging
 import re
 import time
-from collections import OrderedDict
-from dataclasses import dataclass
+from collections import OrderedDict, deque
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
+from openchart.indicators import _checks
 from openchart.indicators._base import (
     MAX_FILE_BYTES,
     Indicator,
@@ -46,6 +53,10 @@ QUARANTINE_AFTER = 3
 WORKER_WAIT = 90.0  # seconds a request waits for the worker's first start
 ERROR_CACHE_SIZE = 256  # a script's own errors kept, by script, parameters and bars
 SLOW_ERROR_PAUSE = 30.0  # seconds a slow error is answered from memory
+CHECK_SETTINGS = 5  # settings checked per version of a file (owner, CI-2 c)
+CHECK_QUEUE = 16  # checks waiting at most; more wait for a later request
+CHECK_STAGGER = 10.0  # seconds after a worker (re)start before a check runs
+CHECK_GAP = 1.0  # seconds between two checks
 
 
 def _bars_digest(bars: dict[str, np.ndarray]) -> str:
@@ -108,6 +119,7 @@ class CustomDefinition:
     line: int | None = None
     indicator: Indicator | None = None
     failures: int = 0  # crashes, timeouts and memory limits in a row
+    checks: dict[str, dict[str, Any]] = field(default_factory=dict)  # by settings, this version
 
     @property
     def file(self) -> str:
@@ -122,6 +134,7 @@ class CustomDefinition:
             "reason": self.reason,
             "line": self.line,
             "definition": None,
+            "checks": list(self.checks.values()),
         }
         if self.indicator is not None:
             out["definition"] = {**self.indicator.to_json(), "kind": "custom"}
@@ -139,6 +152,14 @@ class CustomIndicators:
         # A script's own errors, by (hash, params, bars), and slow ones by (hash, params).
         self._errors: OrderedDict[tuple[str, str, str], ScriptFailed] = OrderedDict()
         self._slow: dict[tuple[str, str], tuple[float, ScriptFailed]] = {}
+        self.check_stagger, self.check_gap = CHECK_STAGGER, CHECK_GAP
+        self._pending: deque[_CheckJob] = deque()
+        self._checker: asyncio.Task[None] | None = None
+        self._last_check = -1e9
+        # The check loop's pauses: on the runner's clock (`runner.clock`), slept with this
+        # (tests give a fake clock and a sleep that moves it).
+        self.sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep
+        self.check_log: deque[tuple[str, float, float]] = deque(maxlen=64)  # id, start, end
 
     def worker_ready(self, runner: IndicatorRunner | None, isolation: Isolation) -> None:
         self.runner, self.isolation = runner, isolation
@@ -264,12 +285,17 @@ class CustomIndicators:
         frame: pd.DataFrame,
         params: dict[str, Any],
         info: Info | None = None,
+        *,
+        warmup: int = 0,
     ) -> dict[str, pd.Series]:
         """Values from the worker. A script's own error is not counted toward the
         quarantine, so it is kept instead (owner, CI-1): the same script, parameters and
         bars answer the same error without running again, and a script that raised
         after more than half its deadline is not run again with those parameters for
-        SLOW_ERROR_PAUSE seconds. Editing the file (a new hash) runs it at once."""
+        SLOW_ERROR_PAUSE seconds. Editing the file (a new hash) runs it at once.
+
+        The first answer for new settings queues the save-time checks on these bars
+        (`warmup`: the declared warmup the bars were read with)."""
         runner, indicator = self._check_runnable(d)
         bars = {c: frame[c].to_numpy(dtype="float64") for c in ("ts", "o", "h", "l", "c", "v")}
         info_json = info.to_json() if info is not None else None
@@ -301,4 +327,197 @@ class CustomIndicators:
         d.failures = 0
         if d.status != "ok":
             d.status, d.reason, d.line = "ok", None, None
+        self._want_check(d, params, info, bars, series, warmup, runner.last_job_s)
         return series
+
+    # Save-time checks ---------------------------------------------------------------
+
+    def checks_for(self, d: CustomDefinition, params: dict[str, Any]) -> dict[str, Any] | None:
+        """The check of this version with these settings, or why there is none."""
+        key = _settings_key(params)
+        if key in d.checks:
+            return d.checks[key]
+        if len(d.checks) >= CHECK_SETTINGS:
+            why = (
+                f"not checked for these settings: this version was checked with "
+                f"{CHECK_SETTINGS} other settings already (their results are kept)"
+            )
+        elif len(self._pending) >= CHECK_QUEUE:
+            why = "not checked yet: too many checks are waiting; a later request queues it"
+        else:
+            return None
+        return {
+            "version": (d.digest or "")[:12],
+            "params": params,
+            "lookahead": "not_checked",
+            "warmup": "not_checked",
+            "findings": [],
+            "message": why,
+        }
+
+    def _want_check(self, d, params, info, bars, series, warmup, run_s) -> None:
+        key = _settings_key(params)
+        if key in d.checks or len(d.checks) >= CHECK_SETTINGS or len(self._pending) >= CHECK_QUEUE:
+            return
+        n = len(bars["ts"])
+        result = {
+            "version": d.digest[:12],
+            "params": params,
+            "instrument": info.instrument if info else None,
+            "timeframe": info.timeframe if info else None,
+            "price": info.price if info else None,
+            "bars": n,
+            "declared_warmup": int(warmup),
+            "lookahead": "pending",
+            "warmup": "pending",
+            "findings": [],
+        }
+        d.checks[key] = result
+        full = {k: s.to_numpy(dtype="float64") for k, s in series.items()}
+        info_json = info.to_json() if info is not None else None
+        self._pending.append(
+            _CheckJob(d, params, info_json, bars, full, int(warmup), run_s, result)
+        )
+        if self._checker is None or self._checker.done():
+            self._checker = asyncio.create_task(self._check_loop(), name="indicator-checks")
+
+    async def close(self) -> None:
+        self._pending.clear()
+        if self._checker is not None:
+            self._checker.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._checker
+            self._checker = None
+
+    async def _check_loop(self) -> None:
+        """One check at a time, CHECK_GAP apart, none within CHECK_STAGGER of a worker
+        (re)start; checks of a file that changed since are dropped."""
+        while self._pending:
+            runner = self.runner
+            if runner is None or runner.state == "stopped":
+                self._pending.clear()
+                return
+            now = runner.clock()
+            wait = (
+                max(runner.ready_at + self.check_stagger, self._last_check + self.check_gap) - now
+            )
+            if not runner.up:  # (re)starting or dead: its pause starts once a new one is up
+                wait = max(wait, 0.2)
+            if wait > 0:
+                await self.sleep(wait)
+                continue
+            job = self._pending.popleft()
+            if self._defs.get(job.d.id) is not job.d:
+                continue  # a newer version of the file
+            started = runner.clock()
+            try:
+                await self._check(runner, job)
+            except Exception:  # never let one check stop the others
+                log.exception("check of %s", job.d.file)
+                for name in ("lookahead", "warmup"):
+                    if job.result[name] == "pending":
+                        job.result[name] = "failed"
+            self._last_check = runner.clock()
+            self.check_log.append((job.d.id, started, self._last_check))
+
+    async def _check(self, runner: IndicatorRunner, job: _CheckJob) -> None:
+        d, result = job.d, job.result
+        findings: list[dict[str, Any]] = result["findings"]
+        n = len(job.bars["ts"])
+        plan = _checks.plan(n, job.warmup)
+        t = job.bars["ts"]
+        deadline = runner.limits.timeout_s
+        last = job.run_s  # how long the last run of this script took
+        stop: str | None = None  # why the warmup run should not start either
+
+        def budget(check: str) -> bool:
+            if _checks.fits(last, deadline):
+                return True
+            result[check] = "skipped"
+            findings.append(
+                _checks.note(
+                    check,
+                    f"{check} check skipped: one run took {last:.1f} s, and a check run "
+                    f"must fit in {_checks.RUN_SHARE * deadline:.1f} s "
+                    f"({_checks.RUN_SHARE:.0%} of the {deadline:g} s deadline)",
+                )
+            )
+            return False
+
+        if plan.cut is None:
+            result["lookahead"] = "skipped"
+            findings.append(_checks.note("lookahead", plan.lookahead_skip or ""))
+        elif budget("lookahead"):
+            part, last, stop = await self._run_check(runner, job, "lookahead", 0, n - plan.cut)
+            if part is not None:
+                found = _checks.lookahead_findings(d.indicator, job.full, part, t)
+                findings.extend(found)
+                result["lookahead"] = _checks.state(found)
+
+        if stop is not None:
+            result["warmup"] = "skipped"
+            findings.append(_checks.note("warmup", f"warmup check skipped: {stop}"))
+        elif plan.start is None:
+            result["warmup"] = "skipped"
+            findings.append(_checks.note("warmup", plan.warmup_skip or ""))
+        elif budget("warmup"):
+            offset, last, _ = await self._run_check(runner, job, "warmup", plan.start, n)
+            if offset is not None:
+                found = _checks.warmup_findings(d.indicator, job.full, offset, plan, t)
+                findings.extend(found)
+                result["warmup"] = _checks.state(found)
+        for f in findings:
+            if f["level"] == "warning":
+                log.info("custom indicator %s: %s", d.file, f["message"])
+
+    async def _run_check(
+        self, runner: IndicatorRunner, job: _CheckJob, check: str, start: int, stop: int
+    ) -> tuple[dict[str, np.ndarray] | None, float, str | None]:
+        """One shortened run in the worker, at the lowest priority, with the request's own
+        parameters and `info`. Never counted toward the quarantine, never kept as the
+        script's error: (values or None, seconds, why the next run should not start)."""
+        d, result = job.d, job.result
+        bars = {c: a[start:stop] for c, a in job.bars.items()}
+        try:
+            out = await runner.compute(
+                d.digest, d.file, d.source, job.params, bars, job.info_json, priority="low"
+            )
+            values = d.indicator.check_wire(out, stop - start)
+        except ScriptFailed as exc:
+            took = runner.last_job_s
+            if exc.kind == "timeout":
+                result[check] = "timeout"
+                why = f"the {check} run timed out ({exc.summary}); not counted against the file"
+            else:
+                result[check] = "failed"
+                why = f"the {check} run on fewer bars failed: {exc.summary}"
+            job.result["findings"].append(_checks.note(check, why))
+            return None, took, why if exc.kind != "error" else None
+        except ResultError as exc:
+            result[check] = "failed"
+            job.result["findings"].append(
+                _checks.note(check, f"the {check} run on fewer bars returned bad values: {exc}")
+            )
+            return None, runner.last_job_s, None
+        except WorkerUnavailable as exc:
+            result[check] = "skipped"
+            why = f"the indicator worker is not available: {exc}"
+            job.result["findings"].append(_checks.note(check, why))
+            return None, 0.0, why
+        return {k: s.to_numpy() for k, s in values.items()}, runner.last_job_s, None
+
+
+@dataclass
+class _CheckJob:
+    d: CustomDefinition
+    params: dict[str, Any]
+    info_json: dict[str, Any] | None
+    bars: dict[str, np.ndarray]
+    full: dict[str, np.ndarray]  # the chart request's own answer, checked
+    warmup: int
+    run_s: float
+    result: dict[str, Any]
+
+
+def _settings_key(params: dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(params, sort_keys=True).encode()).hexdigest()[:16]

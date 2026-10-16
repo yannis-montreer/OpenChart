@@ -2,7 +2,11 @@
 fraction of a second (tests/test_worker_runner.py).
 
 What a "script" does is written in its source: `HANG` loops, `SLEEP` sleeps, `CRASH`
-ends the process, `RAISE` raises, `SLOWRAISE` raises after 0.4 s, `FILL <folder>` and
+ends the process, `RAISE` raises, `SLOWRAISE` raises after 0.4 s, `GATE <folder>` writes
+`started-<n>` there and waits for a file `go` before it answers,
+`STALLBELOW <n>` loops and `ENDBELOW <n>` ends the process on fewer than n bars, `SHIFT`
+answers the next bar's close (lookahead), `STRICT` refuses any request but one with the
+colour #00ff00 on XAU_USD 5m, `WARMUP <n>` declares n bars of warmup, `FILL <folder>` and
 `FILLIDLE <folder>` fill a folder (during the job, or from a thread after it); anything
 else describes one output and echoes the closes.
 """
@@ -125,6 +129,7 @@ def main():
     fout.write(encode({"ready": True, "pid": os.getpid(), "python": "fake"}))
     fout.flush()
     sources = {}
+    jobs = 0
     while True:
         try:
             req, arrays = read_frame(read)
@@ -150,8 +155,9 @@ def main():
                 head = {"error": {"type": "NeedSource", "message": "send the source"}}
             elif cmd == "describe":
                 head = {"definition": DEFINITION_MARKERS if "MARKERS" in source else DEFINITION}
-            elif cmd == "warmup":
-                head = {"warmup": 0}
+            elif cmd == "warmup":  # `WARMUP <n>` declares n bars, else none
+                n = source.split("WARMUP ", 1)[1].split()[0] if "WARMUP " in source else 0
+                head = {"warmup": int(n)}
             else:
                 if "HANG" in source:
                     while True:
@@ -175,7 +181,38 @@ def main():
                         threading.Thread(target=fill, daemon=True).start()
                 if "SLOWRAISE" in source:
                     time.sleep(0.4)
-                if "RAISE" in source:
+                if "GATE " in source:  # says it started, then holds until <folder>/go exists
+                    gate = source.split("GATE ", 1)[1].split("\n", 1)[0].strip()
+                    jobs += 1
+                    with open(os.path.join(gate, f"started-{jobs}"), "w") as f:
+                        f.write(str(len(arrays["c"])))
+                    while not os.path.exists(os.path.join(gate, "go")):
+                        time.sleep(0.005)
+                if "STALLBELOW " in source and len(arrays["c"]) < int(
+                    source.split("STALLBELOW ", 1)[1].split()[0]
+                ):  # loops on fewer bars: a check's shorter run
+                    while True:
+                        pass
+                if "ENDBELOW " in source and len(arrays["c"]) < int(
+                    source.split("ENDBELOW ", 1)[1].split()[0]
+                ):  # ends the process on fewer bars
+                    os._exit(3)
+                params, info = req.get("params") or {}, req.get("info") or {}
+                strict = "STRICT" in source and (
+                    params.get("color") != "#00ff00"
+                    or info.get("instrument") != "XAU_USD"
+                    or info.get("timeframe") != "5m"
+                )
+                if strict:  # refuses anything but the one request's params and info
+                    head = {
+                        "error": {
+                            "type": "ValueError",
+                            "message": f"params {params} info {info}",
+                            "line": 1,
+                            "traceback": "",
+                        }
+                    }
+                elif "RAISE" in source:
                     head = {
                         "error": {
                             "type": "ZeroDivisionError",
@@ -187,6 +224,8 @@ def main():
                 else:
                     head = {"outputs": ["out"]}
                     out = {"out": arrays["c"]}
+                    if "SHIFT" in source:  # the next bar's close: lookahead
+                        out = {"out": np.append(arrays["c"][1:], np.nan)}
                     if "MARKERS" in source:
                         head, out = (
                             {"outputs": ["out", "hit"]},

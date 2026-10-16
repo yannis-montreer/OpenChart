@@ -319,6 +319,7 @@ class Server:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
         self._tasks.clear()
+        await self.custom.close()
         if self.indicator_runner is not None:
             await self.indicator_runner.stop()
             self.indicator_runner = None

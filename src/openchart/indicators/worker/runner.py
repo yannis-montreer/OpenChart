@@ -3,6 +3,8 @@
 - **One worker** by default, started in the background; requests queue for it and run one
   at a time. Pipes are read and written in threads, so the event loop (feeds, candles,
   alerts, the watchdog) never waits on the worker.
+- **Two priorities:** a save-time check's job (`priority="low"`) starts only when no job
+  runs and no chart request waits, so a chart waits for at most one check job.
 - **A deadline per job** (5 s by default, 1 to 30 s). When it passes, the worker is killed,
   that request answers "timed out after 5 s", and a new worker starts.
 - **Respawn:** a worker that dies or is killed is replaced. A queued job that finds the
@@ -22,7 +24,7 @@ import logging
 import os
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -125,8 +127,14 @@ class _Live:
 
 
 class IndicatorRunner:
-    def __init__(self, launcher: Launcher, limits: Limits | None = None):
+    def __init__(
+        self,
+        launcher: Launcher,
+        limits: Limits | None = None,
+        clock: Callable[[], float] = time.monotonic,
+    ):
         self.launcher = launcher
+        self.clock = clock  # for ready_at and last_job_s (tests give a fake one)
         self.limits = limits or Limits()
         self.level = launcher.level
         self.state = "stopped"  # starting | ready | restarting | failed | stopped
@@ -134,8 +142,14 @@ class IndicatorRunner:
         self.restarts = 0
         self.start_seconds: float | None = None
         self.stderr_tail: collections.deque[str] = collections.deque(maxlen=40)
+        self.ready_at = -1e9  # monotonic time the current worker became ready
+        self.last_job_s = 0.0  # the last job's exchange with the worker (no queue, no start)
         self._live: _Live | None = None
-        self._lock = asyncio.Lock()  # the queue: one job at a time
+        # The queue: one job at a time. A "low" job (a save-time check) starts only when no
+        # job runs and no "normal" one waits, so a chart waits for at most one check job.
+        self._turn = asyncio.Condition()
+        self._busy = False
+        self._normal_waiting = 0
         self._spawning: asyncio.Task[_Live] | None = None
         self._first: asyncio.Future[None] | None = None
         self._failed_at = -1e9
@@ -172,8 +186,15 @@ class IndicatorRunner:
             raise
         self._live = live
         self.state = "ready"
+        self.ready_at = self.clock()
         first.set_result(None)
         return {"hello": live.hello, "probes": probes}
+
+    @property
+    def up(self) -> bool:
+        """A worker is running and ready (one that died between jobs is not, though no job
+        has noticed yet)."""
+        return self.state == "ready" and self._live is not None and self._live.handle.alive()
 
     def kill_for_tests(self) -> None:
         """Kill the current worker as a crash would (tests)."""
@@ -228,11 +249,15 @@ class IndicatorRunner:
         params: dict[str, Any],
         bars: Mapping[str, np.ndarray],
         info: Mapping[str, Any] | None = None,
+        *,
+        priority: str = "normal",
     ) -> dict[str, np.ndarray]:
         header: dict[str, Any] = {"cmd": "compute", "params": params}
         if info is not None:
             header["info"] = dict(info)
-        head, out = await self.request(header, bars, script=(digest, file, source))
+        head, out = await self.request(
+            header, bars, script=(digest, file, source), priority=priority
+        )
         # The answer comes from code this server does not control: its list of outputs
         # must be a short list of names, each with an array, and nothing else.
         names = head.get("outputs")
@@ -258,58 +283,88 @@ class IndicatorRunner:
         arrays: Mapping[str, np.ndarray] | None = None,
         *,
         script: tuple[str, str, str] | None = None,
+        priority: str = "normal",
     ) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
         """One job: wait for the worker, send, answer within the deadline. Raises
-        ScriptFailed or WorkerUnavailable."""
+        ScriptFailed or WorkerUnavailable. `priority="low"` waits until nothing else does."""
         if self.state == "stopped":
             raise WorkerUnavailable("the indicator worker is stopped")
         arrays = arrays or {}
-        timeout = self.limits.timeout_s
-        async with self._lock:
-            retried = False
-            while True:
-                live = await self._ensure()
-                head = dict(header, deadline_s=timeout)
-                if script is not None:
-                    digest, file, source = script
-                    head.update(hash=digest, file=file)
-                    if digest not in live.known:
-                        head["source"] = source
-                wait = timeout + (2.0 if self.launcher.enforces_deadline else 0.0)
+        await self._take_turn(priority == "low")
+        try:
+            return await self._job(header, arrays, script)
+        finally:
+            async with self._turn:
+                self._busy = False
+                self._turn.notify_all()
+
+    async def _take_turn(self, low: bool) -> None:
+        async with self._turn:
+            if low:
+                await self._turn.wait_for(lambda: not self._busy and not self._normal_waiting)
+            else:
+                self._normal_waiting += 1
                 try:
-                    got, out = await self._ask(live, head, arrays, wait)
-                except TimeoutError:
-                    self._replace(live, f"a job ran past its {timeout:g} s deadline")
+                    await self._turn.wait_for(lambda: not self._busy)
+                finally:
+                    self._normal_waiting -= 1
+            self._busy = True
+
+    async def _job(
+        self,
+        header: dict[str, Any],
+        arrays: Mapping[str, np.ndarray],
+        script: tuple[str, str, str] | None,
+    ) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
+        timeout = self.limits.timeout_s
+        retried = False
+        while True:
+            live = await self._ensure()
+            head = dict(header, deadline_s=timeout)
+            if script is not None:
+                digest, file, source = script
+                head.update(hash=digest, file=file)
+                if digest not in live.known:
+                    head["source"] = source
+            wait = timeout + (2.0 if self.launcher.enforces_deadline else 0.0)
+            t = self.clock()
+            try:
+                got, out = await self._ask(live, head, arrays, wait)
+            except TimeoutError:
+                self.last_job_s = self.clock() - t
+                self._replace(live, f"a job ran past its {timeout:g} s deadline")
+                raise ScriptFailed(
+                    "timeout", {"type": "Timeout", "message": f"timed out after {timeout:g} s"}
+                ) from None
+            except _Died as died:
+                self.last_job_s = self.clock() - t
+                code = await asyncio.to_thread(self._exit_code, live)
+                why = self.launcher.describe_exit(code)
+                self._replace(live, f"the worker ended ({why})")
+                if not died.sent and not retried:
+                    retried = True  # it was gone before this job reached it
+                    continue
+                if live.over_folder:
                     raise ScriptFailed(
-                        "timeout", {"type": "Timeout", "message": f"timed out after {timeout:g} s"}
+                        "crash", {"type": "FolderLimit", "message": live.over_folder}
                     ) from None
-                except _Died as died:
-                    code = await asyncio.to_thread(self._exit_code, live)
-                    why = self.launcher.describe_exit(code)
-                    self._replace(live, f"the worker ended ({why})")
-                    if not died.sent and not retried:
-                        retried = True  # it was gone before this job reached it
-                        continue
-                    if live.over_folder:
-                        raise ScriptFailed(
-                            "crash", {"type": "FolderLimit", "message": live.over_folder}
-                        ) from None
-                    memory = code is not None and (code & 0xFFFFFFFF) == 0xC0000017
-                    raise ScriptFailed(
-                        "memory" if memory else "crash",
-                        {"type": "WorkerCrash", "message": f"the worker ended ({why})"},
-                    ) from None
-                error = got.get("error")
-                if error and error.get("type") == NEED_SOURCE and script is not None:
-                    live.known.discard(script[0])
-                    if not retried:
-                        retried = True
-                        continue
-                if script is not None and "source" in head and not error:
-                    live.known.add(script[0])
-                if error:
-                    raise ScriptFailed(self._kind(error), error)
-                return got, out
+                memory = code is not None and (code & 0xFFFFFFFF) == 0xC0000017
+                raise ScriptFailed(
+                    "memory" if memory else "crash",
+                    {"type": "WorkerCrash", "message": f"the worker ended ({why})"},
+                ) from None
+            self.last_job_s = self.clock() - t
+            error = got.get("error")
+            if error and error.get("type") == NEED_SOURCE and script is not None:
+                live.known.discard(script[0])
+                if not retried:
+                    retried = True
+                    continue
+            if script is not None and "source" in head and not error:
+                live.known.add(script[0])
+            if error:
+                raise ScriptFailed(self._kind(error), error)
+            return got, out
 
     def _kind(self, error: Mapping[str, Any]) -> str:
         if error.get("type") == "Timeout":
@@ -363,6 +418,7 @@ class IndicatorRunner:
             raise
         self._live = live
         self._spawning = None
+        self.ready_at = self.clock()
         if self.state != "stopped":
             self.state = "ready"
         return live

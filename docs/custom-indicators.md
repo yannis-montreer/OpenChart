@@ -61,6 +61,52 @@ The server log says which one this install got: `indicator sandbox: ready (AppCo
 `indicator sandbox: unavailable: <reason>`. `openchart sandbox check` starts a worker the
 same way, prints the probes and runs a script.
 
+## Checks for lookahead and a short warmup (CI-2)
+
+When a chart first asks for a new version of your file with some settings, the worker
+runs the script twice more on the same bars, in the background, and the server compares
+the answers. **They warn; they never block.** The file runs as before, and what the checks
+found is in `checks` (docs/api.md).
+
+- **Lookahead:** the same bars without the last 50 (a quarter of them on short charts).
+  Every value both runs share must be equal; if one differs, the script reads later bars
+  (`shift(-1)`, a centred window, `bfill`, `bars[i + 1]`, the mean of the whole series, the
+  last bar or the bar count), or it does not give the same result twice (random numbers,
+  the clock).
+- **Warmup:** the same bars starting `warmup` bars later (at least 50). Past that run's
+  own warmup the values must agree with the full run's. If they do not, the warning says
+  how many bars of warmup would have been enough. If they never agree, the output depends
+  on every earlier bar (`ta.cum`, a running total) and no warmup can fix it.
+- **Equal means:** a gap (NaN or an infinity) equals a gap; numbers within 1e-9
+  (lookahead) or 1e-7 (warmup) of the output's largest value; markers and backgrounds
+  exactly. A marker that differs only where every line agrees is shown as a note: two
+  values that are equal to within rounding (a near-tie), not a short warmup. A file with
+  only markers cannot be told apart, so there it stays a warning that mentions near-ties.
+
+**The checks find some lookahead, not all.** A passing check does not mean a script is
+free of lookahead. They do not see:
+
+- lookahead inside the warmup (`ta.sma(c, 20).bfill()` fills the first 19 bars from bar 19);
+- a read of later bars that the last 50 bars do not change (`c / c.max()` when the highest
+  close is earlier);
+- a branch on the bar count that both runs take the same way (`if len(bars) > 100`);
+- a true/false output whose lookahead does not change it on these bars;
+- in the warmup check, a marker built from a series that is not an output (an internal
+  average with too short a warmup) while every declared line agrees: it can show up only
+  as a near-tie note, not a warning;
+- anything that only shows with other settings, another instrument or other data.
+
+**What they cost:** at most 5 settings per version of a file are checked (later ones are
+"not checked for these settings"). Each run is its own job at the lowest priority: a chart
+waits for at most one of them, one check runs at a time, 1 s apart, and none within 10 s
+of the worker starting. A run that would not fit in 80% of the deadline is skipped and
+says so; one that runs past the deadline restarts the worker like any other, but is
+reported, not counted toward the 3 failures that stop a file.
+
+**Checking the checker** (development): `python tools/mutate_checks.py` breaks one rule at a
+time in a copy of `src/` and needs the checks' tests to fail on each; it refuses to run
+unless those tests pass on the unbroken code, and exits non-zero if a mutant survives.
+
 ## Editing in the browser (from CI-4)
 
 Editing custom code in a browser needs **all** of:
