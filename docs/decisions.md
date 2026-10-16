@@ -407,6 +407,14 @@ markers without a long task, no leftover pane after removal.
    timestamp resolution (FAT/exFAT 2 s) would not be seen. NTFS and ext4 are fine. Low severity; a
    content hash on every catalog read would fix it at the cost of reading each file.
 
+5. **A layout with a custom indicator cannot be saved today.** `POST /api/layouts` with an entry for a file of
+   yours (`all_kinds`) answers 400 `no indicator 'all_kinds'`: `routes_layouts.py` looks entries up in the
+   built-in registry only. The design plans it for CI-3 (layout entries gain `kind`, "old entries are read as
+   built-in"), but since CI-1 a custom indicator can be put on a chart, so "Save layout" fails for any chart
+   that has one (the chart itself keeps it in `localStorage`, which is why nothing else shows). Minimal fix
+   until CI-3: accept an id that is a custom file, and validate its parameters against that file's schema
+   (the same `normalize` the values route uses). Test: save a layout with a custom entry, load it.
+
 **Seen, not changed (frontend):**
 
 - When several outputs share one colour parameter, the other swatches in the open settings dialog keep the
