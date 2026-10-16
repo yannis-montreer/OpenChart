@@ -1,6 +1,6 @@
 """Run OpenChart on a fake broker in a scratch data folder, with the demo indicators.
 
-    python tools/demo_output_kinds.py                  # http://127.0.0.1:8765, password "demo"
+    python tools/demo_output_kinds.py                  # http://127.0.0.1:8765, password "demo-password"
     python tools/demo_output_kinds.py --port 8000 --days 30
 
 For looking at how the chart draws every indicator output kind (CI-2 step (d)). It never
