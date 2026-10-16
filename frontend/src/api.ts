@@ -303,7 +303,7 @@ export const alertsApi = {
 
 // Indicators (docs/api.md, docs/indicators.md)
 
-export type ParamType = "int" | "float" | "bool" | "choice" | "source" | "color" | "width";
+export type ParamType = "int" | "float" | "bool" | "choice" | "source" | "color" | "width" | "string";
 export type ParamValue = number | string | boolean;
 export type IndicatorParams = Record<string, ParamValue>;
 
@@ -316,15 +316,73 @@ export interface IndicatorParam {
   min?: number;
   max?: number;
   step?: number;
+  max_length?: number; // string inputs
   choices?: string[];
 }
 
-export interface IndicatorOutput {
-  name: string;
+export type LineStyleName = "solid" | "dashed" | "dotted";
+export type MarkerShape = "arrow_up" | "arrow_down" | "circle" | "square";
+export type MarkerPosition = "above" | "below" | "on";
+
+/**
+ * What the catalog says about one output (docs/api.md). `color` and `width` name
+ * parameters; the colour is read from the instance's params. An M7 output has no `kind`
+ * or `style`: it is a solid line.
+ */
+interface OutputBase {
+  name: string; // the key in values, hits and levels (`fill:1` and `level:1` for those kinds)
   label: string;
-  color: string; // the parameter holding its colour
-  width: string; // the parameter holding its width
 }
+export interface LineOutput extends OutputBase {
+  kind?: "line";
+  color: string;
+  width: string;
+  style?: LineStyleName;
+}
+export interface HistogramOutput extends OutputBase {
+  kind: "histogram";
+  color: string;
+  base: number;
+}
+export interface AreaOutput extends OutputBase {
+  kind: "area";
+  color: string;
+  width: string | null;
+}
+export interface FillOutput extends OutputBase {
+  kind: "fill";
+  between: [string, string]; // the names of two value outputs: upper, lower
+  color: string;
+  opacity: number;
+}
+export interface LevelOutput extends OutputBase {
+  kind: "level";
+  value: number | null;
+  input: string | null; // a Float input's name
+  color: string;
+  width: string | null;
+  style: LineStyleName;
+}
+export interface MarkerOutput extends OutputBase {
+  kind: "marker";
+  color: string;
+  shape: MarkerShape;
+  position: MarkerPosition;
+  text: string;
+}
+export interface BackgroundOutput extends OutputBase {
+  kind: "background";
+  color: string;
+  opacity: number;
+}
+export type IndicatorOutput =
+  | LineOutput
+  | HistogramOutput
+  | AreaOutput
+  | FillOutput
+  | LevelOutput
+  | MarkerOutput
+  | BackgroundOutput;
 
 export interface IndicatorDef {
   id: string;
@@ -349,6 +407,10 @@ export interface IndicatorValues {
   params: IndicatorParams;
   t: number[];
   values: Record<string, (number | null)[]>;
+  /** Marker and background outputs: ascending positions in `t` where each is on. */
+  hits?: Record<string, number[]>;
+  /** Level outputs: the number to draw at, resolved with this request's params. */
+  levels?: Record<string, number>;
 }
 
 export const indicatorsApi = {

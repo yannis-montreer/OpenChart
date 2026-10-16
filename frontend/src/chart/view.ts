@@ -574,16 +574,43 @@ export class ChartView {
 
   /** Chart time of the bar that starts at server time `t`, if we hold it. */
   chartTimeOf(t: number): number | undefined {
+    const i = this.indexOf(t);
+    return i < 0 ? undefined : this.times[i];
+  }
+
+  /** Index of the bar that starts at server time `t`, or -1. */
+  private indexOf(t: number): number {
     let lo = 0;
     let hi = this.bars.length - 1;
     while (lo <= hi) {
       const mid = (lo + hi) >> 1;
       const x = this.bars[mid].t;
-      if (x === t) return this.times[mid];
+      if (x === t) return mid;
       if (x < t) lo = mid + 1;
       else hi = mid - 1;
     }
-    return undefined;
+    return -1;
+  }
+
+  /**
+   * High, low and close of what the price series shows for the bar that starts at `t`: the
+   * Heikin Ashi bar for that chart type, the close alone for a line or area. Indicator
+   * markers sit against it.
+   */
+  displayedRange(t: number): { high: number; low: number; close: number } | undefined {
+    const i = this.indexOf(t);
+    if (i < 0) return undefined;
+    const b = this.bars[i];
+    if (this.chartType === "line" || this.chartType === "area") return { high: b.c, low: b.c, close: b.c };
+    const d = this.chartType === "heikin_ashi" ? (this.ha[i] ?? b) : b;
+    return { high: d.h, low: d.l, close: d.c };
+  }
+
+  /** Closes of the bars held, at chart times (for an indicator pane that has no values of its own). */
+  closeData(from = 0): { time: number; value: number }[] {
+    const out = [];
+    for (let i = Math.max(0, from); i < this.bars.length; i++) out.push({ time: this.times[i], value: this.bars[i].c });
+    return out;
   }
 
   /** Server times of the first and last bars held (and the one before the last). */

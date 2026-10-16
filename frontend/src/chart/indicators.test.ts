@@ -50,4 +50,11 @@ describe("indicators from their schema", () => {
     expect(paramProblem(color, "#12345g")).toBe("Pick a colour");
     expect(paramProblem(width, 4)).toBeNull();
   });
+
+  it("limits a text input to its length", () => {
+    const tag = { name: "tag", type: "string" as const, default: "hi", label: "Tag", group: "inputs" as const, max_length: 4 };
+    expect(paramProblem(tag, "abcd")).toBeNull();
+    expect(paramProblem(tag, "abcde")).toBe("At most 4 characters");
+    expect(paramProblem({ ...tag, max_length: undefined }, "x".repeat(101))).toBe("At most 100 characters");
+  });
 });

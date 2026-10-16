@@ -359,6 +359,77 @@ Design approved by the owner with decisions A and B and five additions. Tests fi
 - **A flaky test, caught by the mutation tool:** a mutant that cannot touch the runner was "killed" by `test_the_run_time_counts_neither_the_queue_nor_a_worker_start`. The test killed the worker and sent the next job at once, so the job could reach the dying process (a crash) instead of a new one. It now waits until the worker is gone, as the other kill test does; 30 runs in a row pass. The mutation script is now `tools/mutate_checks.py` (44 mutants, with the multi-edit ones: timing that starts before the worker start, a dead worker counted as up, the budget's `<=` made `<`); it refuses to run unless the tests pass on the unbroken copy, and exits 1 on a survivor, 2 on a mutant that no longer applies. Result: 43 killed, 1 equivalent (markers given the line tolerance).
 - **Stress runs (owner's review):** the new tests 20 times in a row, the 20th with a busy loop on each of the 12 cores. Runs 1 to 19 passed. **Run 20 failed in `test_checks_api.py`'s fixture: the real worker did not start within the server's 60 s.** Measured alone: the restricted worker starts in 1.7 s with 0 or 6 cores busy, and does not start within 60 s with all 12 busy, also when the busy loops run at the worker's own below-normal priority. So it is not the scheduling priority; most likely the job object's hard CPU cap (50% of one core) once every core is saturated (inferred, not proven). **This is CI-1's worker start, not the checks**, and CI runners do not run other loads; it is reported to the owner as a separate item. The fix here: `test_checks_api.py` did not need the real worker. What it proves (the format, the request's own params and `info` in the check's runs, built-ins skipped) is shown with the fake worker, which now refuses (`STRICT`) any request but the one colour on XAU_USD 5m. Real scripts are checked in `test_lookahead_checks.py`, in-process. Run again after the change: 20 of 20 passed, the 20th with all 12 cores busy (93 tests, 277 s instead of 40 s). The mutation tool then caught what the switch had lost: "the declared warmup not passed" survived, because the fake worker declared no warmup (the default). It now declares one (`WARMUP <n>`), and the API test checks 320 bars with a declared warmup of 20; the mutant is killed again.
 
+## Review of CI-2 (b) to (d) as someone else's work (2026-10-16)
+
+Method: read the code of (b) (schema and result validation), (c) (the checks and their scheduling)
+and (d) (the chart), then tried to break it: hostile and degenerate requests against the real routes
+and the real worker, the four documentation examples on empty, one-bar and weekly windows, and the
+chart in a real browser (edit a file while it is open, a stale layout, 16 outputs and 26 inputs in
+one legend, a marker on every bar, NaN-only outputs, marker-only panes, 25 rounds of hide/show on 6
+indicators, remove everything, a weekly chart of four bars). What held up: the schema and result
+checks on every hostile return value tried (13 shapes), warmup and window arithmetic on 0, 1, 2 and 3
+bars, every constant the docs quote (checked against the code), `print()` going to the log, 15,000
+markers without a long task, no leftover pane after removal.
+
+**Fixed, each on its own branch with the test first (frontend and docs):**
+
+- The chart did not redraw an **edited indicator file** (only the last two bars changed, so a line
+  mixed two versions of the code), did not show a script that then raised, and never retried one that
+  had failed: a full load on a new `checks.version`, on a server error, and every 5 s while in error
+  (`refresh.ts`, 7 tests; browser-checked).
+- A **layout's stored parameters** that the file no longer has (or has with another type or range) made
+  every request a 400 and the indicator "Could not compute" for good: `reconcileParams` (8 tests).
+- **Legend rows** with many outputs could not wrap (CSS; no automated test possible here).
+- **`docs/api.md`** did not describe 5 of the 8 keys of the catalog answer or the `kind` parameter and key
+  (a docs-consistency test, red before).
+- **`docs/roadmap.md`** listed merged steps as next.
+- The legend's `∅` for the live bar was real and is fixed on its own branch (see the section above on
+  indicators and the forming bar), as asked.
+
+**Backend, not fixed (for the owner; each has a repro):**
+
+1. `GET /api/indicators/ema?...&params={"length": Infinity}` (also `-Infinity`, `1e400`) is a **500**.
+   `Param.check` catches only `ValueError`, and `int(float("inf"))` raises `OverflowError`; Python's
+   JSON parser accepts `Infinity`. Any `Int` or `Width` input of any indicator. Suggested: test
+   `math.isfinite` before `int()` (the `float` branch already does), or catch `OverflowError`. Also
+   `NaN` answers "cannot convert float NaN to integer" instead of "must be a whole number".
+2. **A check can be spent on a tiny request.** `_want_check` keys the save-time check by (file version,
+   params) and the first values request for that key decides its bars. In the browser, after a file
+   edit the first request is the once-a-second two-bar refresh: lookahead and warmup are then "skipped:
+   too few bars" for that version and those params, and every later full request returns that same
+   stale result (`bars: 0`; reproduced with `from=0&to=1`, then `limit=600`). A script that peeks
+   (`shift(-3)`) gets no warning. Suggested: keep the result with the most bars, i.e. queue the check
+   again when a later request has more bars than the stored one and the stored one was skipped for too
+   few (the key is still bounded by `CHECK_SETTINGS`).
+3. **`from` or `to` beyond 64 bits is a 500** on `/api/indicators/{id}` and on `/api/candles` (SQLite
+   cannot bind the integer). Suggested: clamp, or 400. Authenticated route; low severity.
+4. A file's change stamp is `(mtime_ns, size)`: two edits of the same size within the file system's
+   timestamp resolution (FAT/exFAT 2 s) would not be seen. NTFS and ext4 are fine. Low severity; a
+   content hash on every catalog read would fix it at the cost of reading each file.
+
+5. **A layout with a custom indicator cannot be saved today.** `POST /api/layouts` with an entry for a file of
+   yours (`all_kinds`) answers 400 `no indicator 'all_kinds'`: `routes_layouts.py` looks entries up in the
+   built-in registry only. The design plans it for CI-3 (layout entries gain `kind`, "old entries are read as
+   built-in"), but since CI-1 a custom indicator can be put on a chart, so "Save layout" fails for any chart
+   that has one (the chart itself keeps it in `localStorage`, which is why nothing else shows). Minimal fix
+   until CI-3: accept an id that is a custom file, and validate its parameters against that file's schema
+   (the same `normalize` the values route uses). Test: save a layout with a custom entry, load it.
+
+**Seen, not changed (frontend):**
+
+- When several outputs share one colour parameter, the other swatches in the open settings dialog keep the
+  old colour until it is reopened (the chart updates at once).
+- Own-pane indicators are formatted with the instrument's decimals: `applyFormat` sets one chart-wide
+  `priceFormatter`, so an RSI reads `70.000` on gold and would read `70.00000` on EUR/USD (axis, level labels and
+  legend). A per-pane format means dropping that chart-wide formatter, which also formats the drawings' labels:
+  not done unattended.
+- The chart assumes `hits` ascending and without repeats, as the server guarantees; a wrong server would
+  hand the library unsorted markers.
+- Refreshes run only while ticks arrive, so with the market closed an edit is noticed at the next history
+  load.
+- Two marker outputs on the same bar and side overlap (the library does not stack them).
+- Every load of older history refetches every indicator in full (the M7 design; CI-5).
+
 ## The worker's start under full CPU load (2026-10-16)
 
 Found in CI-2 testing: with every core busy, the isolated worker did not say hello within
@@ -405,6 +476,106 @@ under load, each factor on its own, repeated).
   - The earlier note that the worker also failed to start with busy loops at its own
     below-normal priority was not reproduced here (those runs used normal-priority loops).
 
+## CI-2 (d): drawing the new output kinds (2026-10-16)
+
+Frontend only, plus two demo tools. Nothing in `src/openchart` changed. The mapping from the
+answer to what is drawn is in `frontend/src/chart/indicatorOutputs.ts` (no DOM, no chart, all
+unit-tested), the two primitives in `indicatorPrimitives.ts`, the wiring in `indicators.ts`.
+
+- **What each kind becomes.** `line`, `histogram`, `area`: a series of that type (line style
+  from the catalog, histogram `base`, area shaded 0.28 to 0.02 of its colour). `fill`: a primitive
+  painting the band between two value outputs, behind the series. `level`: a price line.
+  `marker`: the library's markers. `background`: a primitive of full-height columns, behind the
+  series, adjacent columns merged into one rectangle. Colours always come from the instance's
+  params through the names in the catalog; a name that is missing or not `#rrggbb` is grey.
+  Opacity comes from the catalog (clamped to 0 to 1).
+- **One host series per indicator.** Fills, levels, markers and backgrounds hang on the
+  indicator's first value output; an indicator with none (markers only, say) gets a hidden
+  line series holding the closes. So they move with it between panes and go when it goes. On the
+  price pane the hidden series does not take part in autoscale; in a pane of its own the closes
+  give the pane a scale.
+- **Markers use prices, not bar positions.** Above is `atPriceTop` at the bar's high, below
+  `atPriceBottom` at its low, on `atPriceMiddle` at its close. On the price pane the bar is what
+  the price series shows (the Heikin Ashi bar for that chart type, the close alone for a line or
+  area chart), and the markers are drawn again when the chart type changes. In a pane of its own
+  the price is the indicator's value on that bar (first value output that has one). Two marker
+  outputs on the same bar and side overlap; the library does not stack them.
+- **Hits stay sparse.** `hits` become a sorted list of bar start times (`t[i]`), kept as
+  that; positions outside `t` are ignored. A live refresh replaces the hits inside the two bars it
+  fetched and leaves the rest.
+- **Levels** are drawn at the number in `levels` (already resolved by the server for the request);
+  if the answer has none, from the catalog's number or the input's value. The axis label follows
+  "Labels on price scale"; the level's `label` is not shown anywhere yet.
+- **Lines break at gaps, like fills (owner's answer, 2026-10-16).** The library joins a line
+  across points that have no value (tried: Lightweight Charts 5.2.1 draws straight across
+  whitespace points), so a gap is drawn by giving the first value after it a transparent colour:
+  the segment leading to a point takes that point's colour. Lines and areas break that way
+  (an area's line and both fills); columns have nothing to join. Nothing is marked before the
+  first value (warmup), after the last, or on the last point (a transparent colour would hide
+  its price label, so a gap right before the live bar is bridged until it has a successor). Every
+  built-in and any M7 file whose only nulls are the warmup produce exactly the data the M7 chart
+  did (a test compares 200 random series of that shape with the M7 rule). A file with gaps in
+  the middle now draws them where M7 joined them. The once-a-second refresh sends the last bars
+  as a full load would, so a gap that ends there is kept; it never turns a held value into a gap.
+- **Hidden, removed, changed, failed.** Hiding turns off the series, the markers, the price
+  lines and both primitives. Removing detaches all of them and removes the series. A settings
+  change re-applies colours, widths, styles and level lines for every kind. An indicator whose
+  request fails clears every series, hit and level and shows "Could not compute" in the legend,
+  as before.
+- **A bug found in testing, fixed:** while an indicator was hidden, the once-a-second
+  refresh still ran and built the fill and background data as empty ("not shown, so nothing to
+  draw"); showing it again only switched the primitives on, so the band and tint were missing until
+  the next full reload (seen once in three tries, because the hide had to outlast a refresh). The
+  data is now built whether or not the indicator is shown (`buildBands`, tested), and the
+  visible flag decides. Checked in the browser with a hide of 4 s.
+- **A second one, caught by an M7-style file in the browser:** a file with no `warmup` gets
+  `null` from a two-bar refresh. The M7 chart skipped a null in a refresh (the value from the full
+  load stayed); my first version stored it and blanked the legend. A null never overwrites a held
+  value again (`tailPoints`, tested). The same file's markers in the last two bars do disappear after
+  the first refresh (the refreshed window answers "off"); that is a file the save-time warmup check
+  flags, so it is left.
+- **Settings dialog, minimal change beyond the brief.** The Style tab assumed every output has a
+  width parameter; histograms, fills, markers and backgrounds have none, and level and area may not.
+  It now shows a width control only where there is one. A `String` input (step (b)) had no
+  control and fell through to a number box: it is now a text field with the `max_length` check.
+  Nothing else in the dialog changed. Seen, not changed: when several outputs share one colour
+  parameter, the other swatches keep the old colour in the open dialog until it is reopened (the
+  chart updates at once).
+- **Tests** (`indicatorOutputs.test.ts`, `indicatorPrimitives.test.ts`, 62 more frontend tests,
+  113 in all): colour lookup, opacity, line styles, hits to marker times and placements, levels,
+  fill and background inputs, the refresh rules, and a compatibility block: the built-in EMA and
+  an M7-format file produce exactly the series options and data the M7 chart gave (a solid line
+  sends no `lineStyle`). Mutation check as in the earlier steps: 25 mutants, one rule broken in
+  each (index range and offset of hits, kind default, colour validation, opacity clamp, style codes,
+  gap handling in fills and lines, window replacement, marker prices and shapes, text, level
+  source, null in refreshes, area and histogram options, run splitting and merging, column
+  edges); all 25 killed. The layer itself (`indicators.ts`) has no DOM test: the frontend tests run
+  in node. It was checked in a real browser instead, below.
+- **Checked in Chromium against a fake broker** (`tools/demo_output_kinds.py`, scratch data
+  folder, no OANDA, no Telegram): every kind in both themes, a live theme switch, chart type and
+  timeframe switches, hide and show, settings changes and cancel, removal (no pane, line, marker or
+  tint left), an indicator that raises, an indicator hidden from the start, scrolling back eleven
+  days (loaded in pages of 5,000), live refreshes about once a second per indicator.
+- **Speed** (headless Chromium, software rendering, so absolute figures are pessimistic; mean
+  frame time while dragging, 60 Hz is 16.7 ms):
+  - normal zoom, 15,000+ bars held, three heavy demo indicators (11 value series, plus
+    markers, fills, tints and levels): 18.2 ms (none: 16.7, EMA alone: 16.8);
+  - zoomed all the way out (about 2,000 bars across, the library's limit): the same three 45 ms;
+    a stand-in with lines, a histogram and an area but none of the extras 28 ms; four plain
+    three-line panes 29 ms. Each extra kind costs about 0 to 2 ms per frame there. Merging adjacent background columns did not change it
+    and stayed in (fewer rectangles for long runs);
+  - a reload at 15,000 bars: about 77 ms in the library's `setData` for five series, about 11 ms
+    for markers, levels and bands. Every load of older history refetches every indicator for all
+    bars held (33 full fetches per indicator while scrolling back eleven days): the M7 design,
+    which CI-5 is for. Not changed here.
+- **The legend's `∅` for the live bar is real, not the demo's fake broker (checked by reading the
+  code and watching the clock, no change in this step).** `CandleBuilder` writes an M1 bar to the
+  database only when it closes; the forming minute lives in memory and on the websocket. `GET
+  /api/candles` and so the indicator values come from stored M1, so a bar whose first minute
+  has not closed is missing: for up to a minute after a 5m bar starts, and on the 1m chart the
+  forming bar is never there (15:30:07, 15:30:27 and 15:30:47 all ended at the 15:29 bar). It
+  was the same before CI-2 (M7 code, same server). The fix is on its own branch, see the PR.
+
 ## CI-3 backend: indicators per chart on the server (D1), 2026-10-16
 
 Design: `docs/custom-indicators-design.md` 1.2, 4 and 5.4. Code: `store/chart_indicators.py`, `api/chart_indicators.py` (the checks, shared), `api/routes_charts.py`, `api/routes_custom_indicators.py`, `api/routes_layouts.py`. No browser change: the M7 page keeps its own list until the frontend step, after the other session's chart work merges. Tests first (`tests/test_chart_indicators.py` with the fake worker, and the migration test in `tests/test_migrations.py`): run red against main with only the tests added, **40 failed and 7 passed**: the unknown-chart test and the six odd delete names, which got a 404 because no route existed. The mutation check below shows that each of them bites.
@@ -417,7 +588,7 @@ Design: `docs/custom-indicators-design.md` 1.2, 4 and 5.4. Code: `store/chart_in
 - **Bounds on stored values** (they hold even with no definition to ask): at most 30 instances, 64 values each, a value is `true/false`, a finite number or a text of at most 1000 characters, 8 KB of JSON per instance, `uid` `[A-Za-z0-9_-]{1,40}`, ids `[a-z][a-z0-9_]{0,39}`.
 - **NaN in a request body was a 500** (found while writing the tests): Python's JSON reader takes `NaN` and `Infinity`, pydantic refuses them, and FastAPI's 422 then echoes the input, which cannot be encoded as JSON. In CI-3's routes non-finite numbers are refused after parsing, with a plain 422. The same in the existing routes (drawings, alerts) is in `docs/security-review-custom-indicators.md`, not changed here.
 - **Kinds and namespaces.** Every instance has `kind`. An entry without one (M7 layouts, the browser's old list, a PUT that leaves it out) is the built-in with that id, or the custom one when only a file of yours has it. Where-used and delete count a layout entry without a kind as custom only when no built-in has the id, and never touch an instance of kind `builtin`.
-- **Layouts carry a copy.** A layout saved **without** `indicators` copies its instrument's list from the server; one saved **with** a list (the M7 browser always sends one) keeps that list, checked like a PUT, with `kind` and `uid` added. So the M7 page works unchanged and the new one can leave the list out. **Restoring is `POST /api/layouts/{id}/apply`** (a `GET` of a layout stays a read): it replaces the chart's list with the copy, keeping the uids, onto the layout's instrument or `?instrument=`. Before CI-3 a layout with a custom indicator was refused (only built-in ids were known to layouts).
+- **Layouts carry a copy.** A layout saved **without** `indicators` copies its instrument's list from the server; one saved **with** a list (the M7 browser always sends one) keeps that list, checked like a PUT, with `kind` and `uid` added. So the M7 page works unchanged and the new one can leave the list out. **Restoring is `POST /api/layouts/{id}/apply`** (a `GET` of a layout stays a read): it replaces the chart's list with the copy, keeping the uids, onto the layout's instrument or `?instrument=`. Before CI-3 a layout with a custom indicator was refused (only built-in ids were known to layouts): this fixes finding 5 of the review of CI-2 (b) to (d) above, tested by `test_a_layout_saved_without_indicators_copies_the_charts` (an M7 list with a custom entry is saved).
 - **The catalog's sections** were already in CI-1 (`builtin`, `custom`, each with `kind`). CI-3 adds `kind` to the `errors` entries (one existing assertion, in `tests/test_worker_windows.py`, gained the field) and pins the sections in a test. The flat `indicators` list still leaves out a file of yours with a built-in's id, until the browser reads the sections.
 - **Where-used and delete are behind CI-1's editing gate** (`require_editing`: the minimum isolation, then the setting and the request's origin), as the design gives every new `/api/custom-indicators` endpoint; the chart routes are not (adding an indicator from the phone is not editing code). Delete moves `<id>.py` and `.history/<id>/` to `.deleted/<id>-<UTC time>/` as `<id>.py` and `history/` (`-2`, `-3`, ... if that name exists). Order: check that `.deleted` and `.history` are plain folders inside the indicators folder (409 and no change otherwise: a file, a symlink or junction elsewhere), make the target folder, remove the instances from charts and layouts, then move the files. If a move failed after the instances were removed, the file would stay where it is and the delete can be repeated (now not in use); the other order would leave instances of a file that is gone.
 - **One lock for every write to charts' lists** (`ChartIndicators.lock`): PUT, import, apply and delete, so "never set", "the revision I read" and "where it is used" cannot change between the check and the write. The database is one shared aiosqlite connection: the store validates everything before writing and never rolls back, because a rollback would take other writers' uncommitted rows with it (as in the other stores).

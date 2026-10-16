@@ -87,14 +87,18 @@ Errors: `400` unknown timeframe or price, `404` unknown instrument, `422` invali
 
 | Route | |
 |---|---|
-| `GET /api/indicators` | the catalog, below |
-| `GET /api/indicators/{id}?instrument=&timeframe=&price=&params=&from=&to=&limit=` | `{id, name, instrument, timeframe, price, params, t, values, hits, levels}`, plus `checks` for your own files |
+| `GET /api/indicators` | `{indicators, errors, folder, builtin, custom, isolation, worker, editing}` (below) |
+| `GET /api/indicators/{id}?instrument=&timeframe=&price=&params=&kind=&from=&to=&limit=` | `{id, kind, name, instrument, timeframe, price, params, t, values, hits, levels}`, plus `checks` for your own files. `kind` is `builtin` or `custom` and picks the namespace (without it a built-in wins and a file of yours is found when no built-in has the id; anything else is a 400) |
 
-- **The catalog** has two sections, `builtin` and `custom`, which are separate namespaces: a file of yours named `ema.py` is another indicator than the built-in EMA, and every entry says its `kind` (`builtin` or `custom`).
-  - `builtin`: each indicator's `id, kind, name, title, overlay, params, outputs, builtin`.
-  - `custom`: each of your files: `{id, kind, file, status, reason, line, definition, checks}`; `status` is `ok`, `error`, `quarantined` or `not_run`; `definition` is as in `builtin` (with `kind: "custom"`), `null` when the file does not load.
-  - `indicators`: the flat list the M7 menu reads (built-in ones, then yours that run, without a file that has a built-in's id), each with its `kind`.
-  - `errors`: files that did not load, `{file, error, kind}`; `folder`: the folder for your own (docs/indicators.md); `isolation`, `worker` and `editing` (may this browser edit custom code, and why).
+- **The catalog answer.** `builtin` and `custom` are separate namespaces: a file of yours named `ema.py` is another indicator than the built-in EMA, and every entry, section and error says its `kind` (`builtin` or `custom`).
+  - `indicators`: the flat list the menu reads, built-in ones then yours that run (a file of yours with a built-in's id is only in `custom`), each with `id, name, title, overlay, params, outputs, builtin` and `kind` (`builtin` or `custom`);
+  - `errors`: files that did not load or run (`{file, error, kind}`);
+  - `folder`: the folder for your own (docs/indicators.md);
+  - `builtin`: every built-in indicator (same entries as above);
+  - `custom`: one entry per file, `{id, kind: "custom", file, status, reason, line, definition, checks}`; `status` is `ok`, `error`, `quarantined` or `not_run` (the worker is not available); `definition` is the entry as in `indicators` (null if it did not load); `checks` is the save-time checks of the current version (below);
+  - `isolation`: how this install isolates your files, `{level, minimum_met, reason, notice, probes, notes}` (docs/custom-indicators.md); `{level: "starting"}` until the worker has started;
+  - `worker`: `{state, level, restarts, error, start_seconds, pid}`, or null before there is one;
+  - `editing`: whether code may be edited in the browser from this request, `{allowed, setting, reason}` (docs/custom-indicators.md).
 - A parameter: `{name, type, default, label, group, min?, max?, step?, max_length?, choices?}`; `type` is `int`, `float`, `bool`, `choice`, `string`, `source`, `color` or `width`; `group` is `inputs` or `style` (the settings tabs). `max_length` is for `string` (1 to 1000, default 100).
 - **An output** always has `kind`, `name` and `label`; the rest depends on the kind. `color` and `width` name parameters (the browser reads the value from `params`); `width` is `null` where the output has none. Line styles are `solid`, `dashed`, `dotted`.
 
