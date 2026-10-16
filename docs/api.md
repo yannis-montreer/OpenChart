@@ -88,7 +88,7 @@ Errors: `400` unknown timeframe or price, `404` unknown instrument, `422` invali
 | Route | |
 |---|---|
 | `GET /api/indicators` | `{indicators, errors, folder}`: each indicator's `id, name, title, overlay, params, outputs, builtin`; files that did not load (`{file, error}`); the folder for your own (docs/indicators.md) |
-| `GET /api/indicators/{id}?instrument=&timeframe=&price=&params=&from=&to=&limit=` | `{id, name, instrument, timeframe, price, params, t, values, hits, levels}` |
+| `GET /api/indicators/{id}?instrument=&timeframe=&price=&params=&from=&to=&limit=` | `{id, name, instrument, timeframe, price, params, t, values, hits, levels}`, plus `checks` for your own files |
 
 - A parameter: `{name, type, default, label, group, min?, max?, step?, max_length?, choices?}`; `type` is `int`, `float`, `bool`, `choice`, `string`, `source`, `color` or `width`; `group` is `inputs` or `style` (the settings tabs). `max_length` is for `string` (1 to 1000, default 100).
 - **An output** always has `kind`, `name` and `label`; the rest depends on the kind. `color` and `width` name parameters (the browser reads the value from `params`); `width` is `null` where the output has none. Line styles are `solid`, `dashed`, `dotted`.
@@ -111,6 +111,26 @@ Errors: `400` unknown timeframe or price, `404` unknown instrument, `422` invali
   - Every key of `values`, `hits` and `levels` is the `name` of an output; `fill` outputs have none (the browser draws them from the two outputs they name).
   - 404 for an unknown indicator or instrument, 400 for bad `params`. **422 when the indicator's code fails or returns something that cannot be drawn** (a missing or undeclared output, the wrong number of values, text in a line, numbers in a marker, ...): `{"detail": "SMA cross failed: ResultError: output 'up' must be true/false values ..."}`. The server checks every answer itself, also those of the worker. A bad result is not counted toward the quarantine (it is not a crash or a timeout), and the worker keeps running; the cost of repeating one is bounded by the job deadline and by the server remembering the same error for the same script, parameters and bars.
   - **A marker or background is only checked to be 0 or 1** on the server (booleans reach it as numbers); the worker's own check that the script returned real `True/False` is the only one that can tell them apart.
+- **Checks (your own files only):** the first request for a version of a file with given `params` queues the save-time checks on its bars (docs/custom-indicators.md). They never hold up or block the answer. `checks` in the values answer is the check for these `params`; each entry of `custom` in `GET /api/indicators` has `checks`, the list for its current version (at most 5 settings). Built-in indicators have no `checks`.
+
+  ```json
+  {
+    "version": "3f2a9c1d4e5b", "params": {"length": 20, "color": "#2962ff", "width": 1},
+    "instrument": "XAU_USD", "timeframe": "5m", "price": "mid",
+    "bars": 320, "declared_warmup": 20,
+    "lookahead": "warned", "warmup": "ok",
+    "findings": [
+      {"check": "lookahead", "level": "warning", "output": "x", "t": 1760535900,
+       "full": 2005.12, "other": null,
+       "message": "'x' changes when the last 50 bars are removed: on this bar it is 2005.12 with all 320 bars and a gap with 270. The script reads later bars, or does not give the same result twice (random numbers, the clock)."}
+    ]
+  }
+  ```
+
+  - `version`: the first 12 hex digits of the file's SHA-256. `bars`: how many bars were checked (the request's, with its warm-up bars).
+  - `lookahead`, `warmup`: `pending`, `ok`, `warned`, `skipped`, `timeout`, `failed`, or `not_checked` (with a `message`: this version was already checked with 5 other settings, or too many checks are waiting).
+  - **A finding:** `check` (`lookahead` or `warmup`), `level` (`warning`, or `note` for what is not a problem with the script), `output` (an output's name, or `null` for a note about the check itself), `t` (the start time of the first bar that differs, or `null`), `full` (the value there with all the bars), `other` (the value with fewer bars, or with less history), `message`. Values are numbers, `null` for a gap, 0/1 for markers and backgrounds. A warmup warning also has `needed`: the warmup that would have been enough in this check, or `null` when no warmup can fix it.
+  - One finding per output and check, at its first differing bar.
 
 ## Layouts
 

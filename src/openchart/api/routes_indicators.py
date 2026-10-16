@@ -157,7 +157,7 @@ def indicator_routes(server: Server) -> APIRouter:
 
         try:
             if custom is not None:
-                series = await server.custom.compute(custom, frame, settings, info)
+                series = await server.custom.compute(custom, frame, settings, info, warmup=warm)
             else:
                 series = await asyncio.to_thread(indicator.run, frame, settings, info)
         except ScriptFailed as exc:
@@ -180,7 +180,7 @@ def indicator_routes(server: Server) -> APIRouter:
                 hits[oid] = np.flatnonzero(tail).tolist()
             elif o.kind == "level":
                 levels[oid] = float(settings[o.value] if isinstance(o.value, str) else o.value)
-        return {
+        out = {
             "id": indicator.id,
             "kind": "custom" if custom is not None else "builtin",
             "name": indicator.name,
@@ -193,6 +193,9 @@ def indicator_routes(server: Server) -> APIRouter:
             "hits": hits,
             "levels": levels,
         }
+        if custom is not None:  # the save-time checks of this version with these settings
+            out["checks"] = server.custom.checks_for(custom, settings)
+        return out
 
     return router
 

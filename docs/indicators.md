@@ -167,7 +167,7 @@ one starts.
 | `change(x, n=1)` | `x - shift(x, n)` | `n` bars |
 | `nz(x, r=0)` | gaps replaced by `r` | none |
 | `crossover(a, b)`, `crossunder`, `cross` | `a > b` now and `a <= b` on the bar before; either side may be a number (`crossover(rsi, 30)`) | one bar after the inputs' own |
-| `barssince(cond)` | bars since `cond` was True (0 on a True bar); NaN before the first | none (it counts from the first bar it sees) |
+| `barssince(cond)` | bars since `cond` was True (0 on a True bar); NaN before the first | until `cond` has been True once (it counts from the first bar it sees) |
 | `valuewhen(cond, x, n=0)` | `x` on the bar where `cond` was True the `n`-th time back | until `cond` has been True `n + 1` times |
 | `rising(x, n)`, `falling(x, n)` | each of the last `n` steps went up (down): `x[0] > x[1] > ... > x[n]` | `n + 1` bars |
 | `rsi(x, n)` | `100 - 100 / (1 + up / down)`, `up`/`down` the `rma` of gains/losses; 100 with no loss in the window (also when nothing moved), 0 with no gain | first value at bar `n`; about `20 * n` to agree to 1e-8 |

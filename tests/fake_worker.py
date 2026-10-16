@@ -2,7 +2,10 @@
 fraction of a second (tests/test_worker_runner.py).
 
 What a "script" does is written in its source: `HANG` loops, `SLEEP` sleeps, `CRASH`
-ends the process, `RAISE` raises, `SLOWRAISE` raises after 0.4 s, `FILL <folder>` and
+ends the process, `RAISE` raises, `SLOWRAISE` raises after 0.4 s, `PAUSEMS <n>` waits n ms
+and answers, `STALLBELOW <n>` loops and `ENDBELOW <n>` ends the process on fewer than n
+bars, `SHIFT` answers the next bar's
+close (lookahead), `FILL <folder>` and
 `FILLIDLE <folder>` fill a folder (during the job, or from a thread after it); anything
 else describes one output and echoes the closes.
 """
@@ -175,6 +178,17 @@ def main():
                         threading.Thread(target=fill, daemon=True).start()
                 if "SLOWRAISE" in source:
                     time.sleep(0.4)
+                if "PAUSEMS " in source:
+                    time.sleep(int(source.split("PAUSEMS ", 1)[1].split()[0]) / 1000)
+                if "STALLBELOW " in source and len(arrays["c"]) < int(
+                    source.split("STALLBELOW ", 1)[1].split()[0]
+                ):  # loops on fewer bars: a check's shorter run
+                    while True:
+                        pass
+                if "ENDBELOW " in source and len(arrays["c"]) < int(
+                    source.split("ENDBELOW ", 1)[1].split()[0]
+                ):  # ends the process on fewer bars
+                    os._exit(3)
                 if "RAISE" in source:
                     head = {
                         "error": {
@@ -187,6 +201,8 @@ def main():
                 else:
                     head = {"outputs": ["out"]}
                     out = {"out": arrays["c"]}
+                    if "SHIFT" in source:  # the next bar's close: lookahead
+                        out = {"out": np.append(arrays["c"][1:], np.nan)}
                     if "MARKERS" in source:
                         head, out = (
                             {"outputs": ["out", "hit"]},
