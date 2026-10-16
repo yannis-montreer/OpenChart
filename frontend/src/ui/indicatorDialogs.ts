@@ -6,6 +6,7 @@
 
 import type { IndicatorCatalog, IndicatorDef, IndicatorEntry, IndicatorParam, ParamValue } from "../api";
 import { outputWidth } from "../chart/indicatorOutputs";
+import { paramProblem } from "../chart/params";
 import { indicatorLabel } from "../chart/indicators";
 import { PALETTE } from "../drawings/toolbar";
 import { button, closeMenu, h, icon, menuItem, showMenu } from "./dom";
@@ -123,19 +124,7 @@ export interface SettingsOptions {
   onCancel: (entry: IndicatorEntry) => void;
 }
 
-/** Why `value` is not acceptable for `p`, or null. */
-export function paramProblem(p: IndicatorParam, value: ParamValue): string | null {
-  if (p.type === "int" || p.type === "float" || p.type === "width") {
-    if (typeof value !== "number" || !Number.isFinite(value)) return "Enter a number";
-    if (p.type !== "float" && !Number.isInteger(value)) return "Enter a whole number";
-    if (p.min !== undefined && value < p.min) return `At least ${p.min}`;
-    if (p.max !== undefined && value > p.max) return `At most ${p.max}`;
-  }
-  if (p.type === "string" && String(value).length > (p.max_length ?? 100)) return `At most ${p.max_length ?? 100} characters`;
-  if ((p.type === "source" || p.type === "choice") && !(p.choices ?? []).includes(String(value))) return "Pick a value";
-  if (p.type === "color" && !/^#[0-9a-f]{6}$/i.test(String(value))) return "Pick a colour";
-  return null;
-}
+export { paramProblem };
 
 export function openIndicatorSettings(opts: SettingsOptions): void {
   const { def } = opts;
