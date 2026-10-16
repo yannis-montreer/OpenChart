@@ -13,6 +13,8 @@ The legend's "no value for the live bar" was the indicator route (fixed with `fo
 this is the same gap in the candles themselves.
 """
 
+import time
+
 import pytest
 
 from openchart.market.sessions import bar_bounds
@@ -27,6 +29,22 @@ from tests.test_forming_bar import (  # noqa: F401  (fixtures and helpers)
     store,
 )
 from tests.test_indicators import candles, values
+
+
+@pytest.fixture(autouse=True)
+def hold_the_minute_open(request, monkeypatch):
+    """These tests are about the route and the reader, not about when the feed closes a minute.
+
+    The feed's 1 s loop closes (and stores) a forming minute once the clock is `close_grace`
+    past its end, and the test timeline runs on from the start of the run, so late in a run, or
+    on a slow machine, the minute of a tick pushed here can be over between the push and the
+    request, or between two snapshots. Without this, a run that reached these tests a minute in
+    failed one of them on CI (seen on ubuntu 3.11); under a clock moved late and a fast loop six
+    failed every time."""
+    if "client" in request.fixturenames:
+        client = request.getfixturevalue("client")
+        monkeypatch.setattr(client.server.builder, "on_clock", lambda now: None)
+
 
 LIVE = [Tick("XAU_USD", NOW + 30, 2000.0, 2000.2), Tick("XAU_USD", NOW + 31, 2003.0, 2003.2)]
 HUGE = [Tick("XAU_USD", NOW + 30, 9000.0, 9000.2), Tick("XAU_USD", NOW + 31, 100.0, 100.2)]
@@ -117,8 +135,23 @@ def test_seconds_bars_have_no_flag(client):
 # Never stored
 
 
+def settle(client) -> None:
+    """Wait for the feed's startup work (the deep-history fill, which also fills the cache of
+    4h, D and W bars) to finish: it writes those tables while a test runs, as fast as the machine
+    lets it, and a snapshot taken meanwhile differs from the next for no reason of ours."""
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        task = client.server.feed._background
+        if task is not None and task.done():
+            return
+        time.sleep(0.05)
+    pytest.fail("the feed's startup work did not finish")
+
+
 def snapshot(client) -> dict[str, list]:
-    """Every row of every table: the whole database."""
+    """Every row of every table, whole database (rows sorted: a rewrite of the same row moves
+    it in the table, which is no change)."""
+    settle(client)
 
     async def rows():
         conn = client.server.db.conn
@@ -127,7 +160,7 @@ def snapshot(client) -> dict[str, list]:
             names = sorted(r[0] for r in await cur.fetchall())
         for name in names:
             async with conn.execute(f'SELECT * FROM "{name}"') as cur:
-                out[name] = [tuple(r) for r in await cur.fetchall()]
+                out[name] = sorted((tuple(r) for r in await cur.fetchall()), key=repr)
         return out
 
     return client.portal.call(rows)
