@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from openchart.market.aggregate import PRICES, empty_frame, resample, ticks_frame
+from openchart.market.aggregate import PRICES, Bar, empty_frame, resample, ticks_frame
 from openchart.market.cache import CandleCache, is_cached
 from openchart.market.sessions import bar_bounds
 from openchart.market.timeframes import Kind, Timeframe
@@ -42,8 +42,10 @@ class SeriesReader:
         ticks_root: str | Path | None = None,
         buffered_ticks=None,  # callable(instrument) -> list[Tick] not yet written to disk
         cache: CandleCache | None = None,
+        live=None,  # callable(instrument) -> the forming M1 `Bar` or None (see `forming`)
     ):
         self.store = store
+        self.live = live
         self.cache = cache
         self.ticks_root = Path(ticks_root) if ticks_root else None
         self.buffered_ticks = buffered_ticks
@@ -59,6 +61,7 @@ class SeriesReader:
         end: int | None = None,
         limit: int | None = None,
         now: float | None = None,
+        forming: bool = False,
     ) -> pd.DataFrame:
         """Bars with `start <= ts < end`.
 
@@ -66,6 +69,12 @@ class SeriesReader:
         again from the last `ts`). Without `start`, returns the latest `limit` bars.
 
         Adds a boolean `complete` column: False for a bar whose period is not over.
+
+        Stored M1 holds a minute only once it has closed, so the bar that is forming is not in
+        the bars above. With `forming`, the builder's forming M1 bar is folded in: into the bar
+        of its period if that is the last one, else as a bar of its own at the end (the 1m chart's
+        live bar, the first minute of a new period). The browser's candles do without it (it
+        draws the live bar from the websocket); indicators need it to have a value for that bar.
         """
         if price not in PRICES:
             raise ValueError(f"price must be one of {PRICES}")
@@ -81,6 +90,8 @@ class SeriesReader:
             bars = await self._from_base(source, instrument, tf, price, start, end)
         else:
             bars = await self._latest_from_base(source, instrument, tf, price, end, limit)
+        if forming and tf.kind is not Kind.TICK:
+            bars = self._fold_forming(bars, instrument, tf, price, start, end)
         bars = (bars.head(limit) if start is not None else bars.tail(limit)).reset_index(drop=True)
         if bars.empty:
             bars["complete"] = pd.Series(dtype=bool)
@@ -90,6 +101,28 @@ class SeriesReader:
         complete[-1] = last_end <= now
         bars["complete"] = complete
         return bars
+
+    def _fold_forming(self, bars, instrument, tf, price, start, end) -> pd.DataFrame:
+        live: Bar | None = self.live(instrument) if self.live else None
+        if live is None or live.ts >= end:
+            return bars
+        first, _ = bar_bounds(live.ts, tf)
+        o, h, low, c = live.series(price)
+        last = int(bars["ts"].iloc[-1]) if not bars.empty else None
+        if last == first:  # the live minute belongs to the last bar
+            bars = bars.copy()
+            i = bars.index[-1]
+            bars.loc[i, "h"] = max(bars.at[i, "h"], h)
+            bars.loc[i, "l"] = min(bars.at[i, "l"], low)
+            bars.loc[i, "c"] = c
+            bars.loc[i, "v"] = bars.at[i, "v"] + live.volume
+            return bars
+        if (last is not None and last > first) or (start is not None and first < start):
+            return bars  # not at the live edge of this window, or a bar the window cuts
+        row = pd.DataFrame(
+            {"ts": [first], "o": [o], "h": [h], "l": [low], "c": [c], "v": [live.volume]}
+        ).astype(bars.dtypes.to_dict())
+        return pd.concat([bars, row], ignore_index=True)
 
     @staticmethod
     def _uses_h1(tf: Timeframe) -> bool:
