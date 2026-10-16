@@ -124,8 +124,18 @@ try {
     Check ($notes -match "its own folder is writable: all scripts of one worker share it, and what they write stays there until the folder is emptied at the next worker start; capped at \d+ MB") "the note says its own folder is writable, shared, emptied at each start and capped"
     Check ($serviceLog -match "indicator sandbox notes: [^\r\n]*a private desktop of its own") "the worker has a private desktop"
     Check ($serviceLog -match "indicator worker ready \(appcontainer") "the worker runs in the AppContainer"
+    # The worker is created at normal priority and lowered by the service after its hello
+    # (docs/investigations/worker-start-under-load.md): the log must say both happened, for
+    # the same process, and the process itself must be below normal (base priority 6).
+    $ready = [regex]::Match($serviceLog, "indicator worker ready \(appcontainer, pid (\d+)\)")
+    $lowered = [regex]::Match($serviceLog, "indicator worker \(pid (\d+)\): priority lowered to below normal")
+    Check ($ready.Success) "the service log says the worker reached ready"
+    Check ($lowered.Success) "the service log says the worker's priority was lowered to below normal"
+    Check ($ready.Success -and $lowered.Success -and $ready.Groups[1].Value -eq $lowered.Groups[1].Value) "ready and lowered name the same worker process"
+    Check (-not ($serviceLog -match "could not lower the worker's priority")) "no priority failure in the service log"
     $workers = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like "$Release*" -and $_.CommandLine -like "*indicator-worker*" })
     Check ($workers.Count -eq 1) "one worker process runs ($($workers.Count))"
+    Check ($workers.Count -eq 1 -and $workers[0].Priority -eq 6) "the running worker is at below-normal priority (base priority $($workers[0].Priority))"
 
     Section "2. negative control: commands beside the running service"
     $m = Run "openchart migrate" @("migrate")

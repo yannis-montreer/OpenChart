@@ -5,6 +5,11 @@
   alerts, the watchdog) never waits on the worker.
 - **Two priorities:** a save-time check's job (`priority="low"`) starts only when no job
   runs and no chart request waits, so a chart waits for at most one check job.
+- **Start priority** (Windows): a worker is created at normal priority, so that it can
+  import numpy and pandas when every core is busy, and the server lowers it to below
+  normal as soon as its hello arrives, before anything is sent to it. The priority is read
+  back; if it is not below normal, the worker is killed and the indicators are unavailable
+  with that reason (fail closed). A respawn takes the same path.
 - **A deadline per job** (5 s by default, 1 to 30 s). When it passes, the worker is killed,
   that request answers "timed out after 5 s", and a new worker starts.
 - **Respawn:** a worker that dies or is killed is replaced. A queued job that finds the
@@ -35,7 +40,10 @@ from openchart.indicators.worker.protocol import ProtocolError, encode, exact_re
 
 log = logging.getLogger("openchart.indicators.worker")
 
-START_TIMEOUT = 60.0  # seconds for a new worker to say it is ready (pandas import, ~1-2 s)
+# Seconds for a new worker to say hello. The import takes 1 to 3 s on an idle machine and
+# about 7 s next to as many busy loops as cores (docs/investigations/worker-start-under-load.md).
+START_TIMEOUT = 90.0
+BELOW_NORMAL = "below_normal"
 STDERR_LINES_PER_MINUTE = 30
 RETRY_AFTER_FAILED_START = 10.0  # seconds before trying to start a worker again
 FOLDER_POLL = 0.5  # seconds between two measurements of a worker's own folder (B1)
@@ -64,9 +72,15 @@ class Handle(Protocol):
     def kill(self) -> None: ...
     def close(self) -> None: ...
 
+    # Optional (the Windows handle): `lower_priority()` lowers the process to below normal,
+    # `priority()` names its class now, `cpu_seconds()` is the CPU time it has used.
+
 
 class Launcher(Protocol):
     level: str  # appcontainer | sidecar | restricted | process-only
+    # True when the worker is created at normal priority and must be lowered by the
+    # runner after its hello (Windows). A handle that cannot do it is a failed start.
+    lowers_priority_after_hello: bool
     # The sidecar kills its own children at the deadline; the runner then waits a little
     # longer before it gives up on the connection.
     enforces_deadline: bool
@@ -453,17 +467,24 @@ class IndicatorRunner:
         try:
             hello = await asyncio.wait_for(frames.get(), START_TIMEOUT)
         except TimeoutError:
-            raise WorkerUnavailable(
-                f"the worker did not start within {START_TIMEOUT:g} s"
-            ) from None
+            # CPU used tells starvation (little) from a hang (a lot).
+            message = f"the worker did not start within {START_TIMEOUT:g} s{self._cpu_note(handle)}"
+            log.warning("indicator worker (pid %s): %s", handle.pid, message)
+            raise WorkerUnavailable(message) from None
         if hello is _EOF or not isinstance(hello, tuple) or not hello[0].get("ready"):
             code = await asyncio.to_thread(self._exit_code, live)
             await asyncio.sleep(0.05)  # let the stderr reader catch the last words
             tail = " | ".join(list(self.stderr_tail)[-3:])
-            raise WorkerUnavailable(
+            message = (
                 f"the worker ended before it was ready: {self.launcher.describe_exit(code)}"
                 + (f"; it said: {tail[:300]}" if tail else "")
+                + self._cpu_note(handle)
             )
+            log.warning("indicator worker (pid %s): %s", handle.pid, message)
+            raise WorkerUnavailable(message)
+        # Nothing has been sent to the worker yet. It runs at normal priority until now;
+        # it is lowered before the probes, the arming or any script reach it.
+        await asyncio.to_thread(self._lower_priority, handle)
         live.hello = hello[0]
         self.start_seconds = round(time.perf_counter() - t, 3)
         log.info(
@@ -476,6 +497,35 @@ class IndicatorRunner:
         if folder:
             loop.create_task(self._watch_folder(live, folder), name="worker-folder")
         return live
+
+    @staticmethod
+    def _cpu_note(handle: Handle) -> str:
+        cpu = getattr(handle, "cpu_seconds", lambda: None)
+        try:
+            used = cpu()
+        except Exception:  # a note for the log must never hide the failure itself
+            used = None
+        return "" if used is None else f" (it had used {used:.2f} s of CPU)"
+
+    def _lower_priority(self, handle: Handle) -> None:
+        """Below normal, read back; anything else is a failed start (fail closed): the
+        caller kills the worker, so none is left running at normal priority."""
+        if not getattr(self.launcher, "lowers_priority_after_hello", False):
+            return
+        lower = getattr(handle, "lower_priority", None)
+        read = getattr(handle, "priority", None)
+        if lower is None or read is None:
+            raise WorkerUnavailable("the worker's priority cannot be lowered: no way to set it")
+        try:
+            lower()
+            got = read()
+        except OSError as exc:
+            raise WorkerUnavailable(f"could not lower the worker's priority: {exc}") from exc
+        if got != BELOW_NORMAL:
+            raise WorkerUnavailable(
+                f"could not lower the worker's priority: it reads back as {got}, not below normal"
+            )
+        log.info("indicator worker (pid %s): priority lowered to below normal", handle.pid)
 
     async def _watch_folder(self, live: _Live, folder: str) -> None:
         """B1 (owner): where a worker can write into its own folder (the AppContainer's,

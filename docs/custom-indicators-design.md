@@ -345,7 +345,7 @@ takes a few milliseconds.
   a row is marked "stopped after repeated failures". It is not run again until its file
   changes. This keeps one bad script from killing the worker for everyone.
 - **Isolation from the server's work:**
-  - the worker runs at below-normal priority;
+  - the worker runs at below-normal priority (created at normal so that it can start on a busy machine, lowered by the server after its hello and read back: `docs/investigations/worker-start-under-load.md`);
   - the server talks to it with asyncio pipes and never blocks its event loop;
   - the feeds, candle building, alert engine and watchdog never wait on it.
   - Indicator alerts remain deferred. When they come, they will treat a failed or late

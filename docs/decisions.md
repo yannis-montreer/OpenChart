@@ -358,3 +358,49 @@ Design approved by the owner with decisions A and B and five additions. Tests fi
 - **Found while doing that: a worker that died between jobs counted as ready**, so a waiting check would have started it again and run without the pause. `runner.up` (ready, and the process alive) is what the check loop now waits for; tested by killing the worker under a waiting check.
 - **A flaky test, caught by the mutation tool:** a mutant that cannot touch the runner was "killed" by `test_the_run_time_counts_neither_the_queue_nor_a_worker_start`. The test killed the worker and sent the next job at once, so the job could reach the dying process (a crash) instead of a new one. It now waits until the worker is gone, as the other kill test does; 30 runs in a row pass. The mutation script is now `tools/mutate_checks.py` (44 mutants, with the multi-edit ones: timing that starts before the worker start, a dead worker counted as up, the budget's `<=` made `<`); it refuses to run unless the tests pass on the unbroken copy, and exits 1 on a survivor, 2 on a mutant that no longer applies. Result: 43 killed, 1 equivalent (markers given the line tolerance).
 - **Stress runs (owner's review):** the new tests 20 times in a row, the 20th with a busy loop on each of the 12 cores. Runs 1 to 19 passed. **Run 20 failed in `test_checks_api.py`'s fixture: the real worker did not start within the server's 60 s.** Measured alone: the restricted worker starts in 1.7 s with 0 or 6 cores busy, and does not start within 60 s with all 12 busy, also when the busy loops run at the worker's own below-normal priority. So it is not the scheduling priority; most likely the job object's hard CPU cap (50% of one core) once every core is saturated (inferred, not proven). **This is CI-1's worker start, not the checks**, and CI runners do not run other loads; it is reported to the owner as a separate item. The fix here: `test_checks_api.py` did not need the real worker. What it proves (the format, the request's own params and `info` in the check's runs, built-ins skipped) is shown with the fake worker, which now refuses (`STRICT`) any request but the one colour on XAU_USD 5m. Real scripts are checked in `test_lookahead_checks.py`, in-process. Run again after the change: 20 of 20 passed, the 20th with all 12 cores busy (93 tests, 277 s instead of 40 s). The mutation tool then caught what the switch had lost: "the declared warmup not passed" survived, because the fake worker declared no warmup (the default). It now declares one (`WARMUP <n>`), and the API test checks 320 bars with a declared warmup of 20; the mutant is killed again.
+
+## The worker's start under full CPU load (2026-10-16)
+
+Found in CI-2 testing: with every core busy, the isolated worker did not say hello within
+the server's 60 s. Measured in `docs/investigations/worker-start-under-load.md` (idle and
+under load, each factor on its own, repeated).
+
+- **Cause:** the worker was created at below-normal priority. Next to as many normal-priority
+  busy loops as cores it got 0.1 to 0.4 s of CPU in 75 to 150 s (importing numpy and pandas
+  takes 1.1 to 1.6 s of CPU). Normal priority alone brings the loaded start to about 7 s.
+  **Not the cause:** the 50% CPU cap (it doubles the idle start, 1.5 s to 3 s, and does nothing
+  under load), the thread-limit variables, the AppContainer, the restricted token, the job
+  setup (each under 100 ms). This corrects the inference written under "Stress runs" in
+  CI-2 (c) above ("most likely the job object's hard CPU cap"): it was the priority.
+- **Decided (owner):**
+  1. **Done: start at normal priority, lower it from the server after the hello.** The
+     process handle `CreateProcess` returned is used; the class is read back. Anything but
+     below normal kills the worker (fail closed) and the Custom section shows why; a respawn
+     follows the same path. Nothing (no script source, not even the probes or the arming) is
+     sent before the hello and the lowering. The log says `priority lowered to below normal`
+     with the pid, and a failed start says how much CPU the worker had used. The worker runs
+     user code only after it is lowered, so isolation is unchanged: priority is not a
+     boundary (the token, container, job limits and probes are).
+  2. **Considered, deferred: lift the CPU cap during the start and restore it after the
+     hello.** Benefit measured: about 1.5 s at idle (3.2 s to 1.5 s); nothing under load.
+     Risk: a second job-object change while the worker runs, for a gain only in an
+     occasional respawn. Not done.
+  3. **Done: the start deadline is 90 s** (was 60). 1 to 7 s measured with normal priority;
+     the deadline only has to cover the slow machine, not hide starvation (a start with
+     little CPU used is now told from a hang in the log).
+  4. **Rejected: lazy imports.** pandas is about 80% of the import time, but `compute`
+     builds a `DataFrame`, so the cost moves to the first request and can break its 5 s
+     deadline; it does not help under load.
+  5. **Rejected: prewarming a spare worker.** The first worker already starts at server
+     start and a respawn follows a kill; a spare doubles the memory and does nothing for
+     the first start.
+- **Seen, not changed:**
+  - On a machine whose cores are all busy with normal-priority work, a worker that runs
+    below normal gets CPU late: requests were answered in 10 to 20 ms (the pipe wakes it),
+    but a graceful exit took about 40 s and a timed sleep woke up about 40 s late. A script
+    that needs real CPU would then run into the 5 s job deadline. That is the design's
+    "yield to everything else" at its extreme, and the quarantine counts such timeouts.
+    Server shutdown under full load can wait for the worker's exit for as long (the tests
+    kill the worker instead).
+  - The earlier note that the worker also failed to start with busy loops at its own
+    below-normal priority was not reproduced here (those runs used normal-priority loops).

@@ -15,6 +15,10 @@ From the CI-0 spike (`docs/ci0-spike-report.md`), findings 1 to 10:
     frozen build cannot start at Low, so it keeps the server's level (finding 9).
   - `plain`: the server's own token, still inside the job (process only).
 - Pipes for stdin, stdout and stderr; an environment block built from nothing.
+- **Priority:** a worker is created at normal priority and the server lowers it to below
+  normal after its hello (`WinProcess.lower_priority`, read back by the runner). Created
+  below normal, it got no CPU to import numpy and pandas when every core was busy
+  (`docs/investigations/worker-start-under-load.md`).
 """
 
 from __future__ import annotations
@@ -130,6 +134,19 @@ class JOBOBJECT_CPU_RATE_CONTROL_INFORMATION(C.Structure):
     _fields_ = [("ControlFlags", DWORD), ("CpuRate", DWORD)]
 
 
+class JOBOBJECT_BASIC_ACCOUNTING_INFORMATION(C.Structure):
+    _fields_ = [
+        ("TotalUserTime", C.c_int64),  # 100 ns units
+        ("TotalKernelTime", C.c_int64),
+        ("ThisPeriodTotalUserTime", C.c_int64),
+        ("ThisPeriodTotalKernelTime", C.c_int64),
+        ("TotalPageFaultCount", DWORD),
+        ("TotalProcesses", DWORD),
+        ("ActiveProcesses", DWORD),
+        ("TotalTerminatedProcesses", DWORD),
+    ]
+
+
 class SECURITY_ATTRIBUTES(C.Structure):
     _fields_ = [("nLength", DWORD), ("lpSecurityDescriptor", PVOID), ("bInheritHandle", BOOL)]
 
@@ -173,6 +190,8 @@ WaitForSingleObject = _sig(k32, "WaitForSingleObject", DWORD, HANDLE, DWORD)
 GetExitCodeProcess = _sig(k32, "GetExitCodeProcess", BOOL, HANDLE, C.POINTER(DWORD))
 CloseHandle = _sig(k32, "CloseHandle", BOOL, HANDLE)
 GetCurrentProcess = _sig(k32, "GetCurrentProcess", HANDLE)
+SetPriorityClass = _sig(k32, "SetPriorityClass", BOOL, HANDLE, DWORD)
+GetPriorityClass = _sig(k32, "GetPriorityClass", DWORD, HANDLE)
 TerminateProcess = _sig(k32, "TerminateProcess", BOOL, HANDLE, W.UINT)
 LocalFree = _sig(k32, "LocalFree", PVOID, PVOID)
 OpenProcessToken = _sig(adv, "OpenProcessToken", BOOL, HANDLE, DWORD, C.POINTER(HANDLE))
@@ -245,7 +264,16 @@ EXTENDED_STARTUPINFO_PRESENT = 0x80000
 CREATE_SUSPENDED = 0x4
 CREATE_UNICODE_ENVIRONMENT = 0x400
 CREATE_NO_WINDOW = 0x08000000
+NORMAL_PRIORITY_CLASS = 0x20
 BELOW_NORMAL_PRIORITY_CLASS = 0x4000
+PRIORITY_NAMES = {
+    0x20: "normal",
+    0x4000: "below_normal",
+    0x40: "idle",
+    0x8000: "above_normal",
+    0x80: "high",
+    0x100: "realtime",
+}
 STARTF_USESTDHANDLES = 0x100
 PROC_THREAD_ATTRIBUTE_HANDLE_LIST = 0x20002
 PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES = 0x20009
@@ -500,6 +528,25 @@ class WinProcess:
         GetExitCodeProcess(self.process, C.byref(code))
         return None if code.value == STILL_ACTIVE else code.value
 
+    def lower_priority(self) -> None:
+        """Below normal, from the server, with the handle `CreateProcess` returned. The
+        runner reads it back (`priority`) and kills the worker when it is not."""
+        _check(SetPriorityClass(self.process, BELOW_NORMAL_PRIORITY_CLASS), "SetPriorityClass")
+
+    def priority(self) -> str | None:
+        """The process's priority class by name ("normal", "below_normal"...), or None."""
+        got = GetPriorityClass(self.process)
+        return PRIORITY_NAMES.get(got) if got else None
+
+    def cpu_seconds(self) -> float | None:
+        """CPU time the worker has used (user plus kernel, from the job), or None."""
+        if self.closed:
+            return None
+        info = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION()
+        if not QueryInformationJobObject(self.job, 1, C.byref(info), C.sizeof(info), None):
+            return None
+        return (info.TotalUserTime + info.TotalKernelTime) / 1e7
+
     def kill(self) -> None:
         if not self.closed:
             TerminateJobObject(self.job, 1)
@@ -599,7 +646,7 @@ def start(
                 EXTENDED_STARTUPINFO_PRESENT
                 | CREATE_SUSPENDED
                 | CREATE_NO_WINDOW
-                | BELOW_NORMAL_PRIORITY_CLASS
+                | NORMAL_PRIORITY_CLASS  # lowered by the server after the hello
                 | CREATE_UNICODE_ENVIRONMENT
             )
             block = env_block(env)
