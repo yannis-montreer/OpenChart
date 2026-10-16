@@ -504,3 +504,35 @@ unit-tested), the two primitives in `indicatorPrimitives.ts`, the wiring in `ind
   has not closed is missing: for up to a minute after a 5m bar starts, and on the 1m chart the
   forming bar is never there (15:30:07, 15:30:27 and 15:30:47 all ended at the 15:29 bar). It
   was the same before CI-2 (M7 code, same server). The fix is on its own branch, see the PR.
+
+## CI-2 (e): the guide, the examples and the Pine sheet (2026-10-16)
+
+`docs/custom-indicators.md` now starts with how to write a file: where to start, the four
+examples of the design (SMA cross, RSI with bands, Bollinger-style fill, an engulfing-candle
+marker), the output kinds, a cheat sheet from Pine Script and what has no equivalent, then the
+save-time checks, the worker, isolation by install, the gate on browser editing and what none of
+it protects against (the last four were written in CI-1 and CI-2 (c) and are only moved and
+renamed).
+
+- **The examples are files** in `docs/examples/indicators/`, and the page shows them verbatim
+  (`<!-- example: name.py -->` before each block). `tests/test_doc_examples.py` runs each against the
+  real worker on a seeded random walk (the synthetic bars of the other tests close up every bar, so
+  an engulfing pattern never occurs): the file loads, every line has values, every marker and
+  background fires and not on every bar, both save-time checks say `ok` with no findings, and the
+  values and hits on every bar are the same whichever later bars exist (4 cut points each).
+  Controls so the tests can fail: a variant of the SMA cross with `shift(-3)` is warned by the
+  lookahead check and changes under the prefix test. The page cannot drift: a test compares each
+  block with its file, one that every `ta.name(` in the sheet exists, one that every `ta` helper is
+  in the sheet, and one that every output kind is in the table.
+- **All four passed both checks at the first run**, including the marker-only file (the checks' own
+  caveat, that a file with only markers cannot be told apart, did not produce a warning here).
+- **The Pine sheet says what has no equivalent** instead of mapping loosely: anything that
+  looks ahead (negative `offset`, `x[-1]`), other symbols and timeframes, alerts and strategies,
+  `barstate.*`, drawing objects, a colour per bar, and 20 `ta` functions that `ta` lacks (with the
+  pandas one-liner where there is one). `ta.pivothigh` is described as Pine reports it (on the
+  confirming bar); the `offset=-right` that Pine scripts add to draw it back is the future.
+- **Not verified against TradingView:** the sheet states the definitions as the `ta` tests and
+  docs/indicators.md already do; the three items marked "to check in TradingView" in the roadmap are
+  unchanged.
+- `docs/indicators.md`: the `ta` heading no longer says "in progress", and "Not yet" says the usual
+  set is available as the four files rather than as built-ins.
