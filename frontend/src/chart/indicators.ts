@@ -67,6 +67,7 @@ import {
   type MarkerRef,
 } from "./indicatorOutputs";
 import { BackgroundPrimitive, FillPrimitive } from "./indicatorPrimitives";
+import { reconcileParams } from "./params";
 import { nextRefresh, versionChanged } from "./refresh";
 import type { ChartView } from "./view";
 
@@ -160,7 +161,7 @@ export class IndicatorLayer {
     this.active = [];
     for (const e of entries) {
       const def = this.catalog.get(e.id);
-      if (def) this.create(def, { ...newEntry(def), ...e, params: { ...newEntry(def).params, ...e.params } });
+      if (def) this.create(def, { ...newEntry(def), ...e, params: reconcileParams(def, e.params) });
     }
     this.layoutPanes();
     if (reload) this.reloadAll();
