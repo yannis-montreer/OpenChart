@@ -673,3 +673,48 @@ for the answer only. Checked first:
   default was renamed, as its name spoke of the route.
 - With a connection that joined mid-minute (after a start or a reconnect) the first minute is
   partial, in the answer as on the chart.
+
+## CI-3 frontend, steps 1 to 3: the sections, the states, deleting a definition (2026-10-16)
+
+The plan was approved with three decisions: (a) the default layout at start sets the
+non-indicator fields only; (b) a legacy list is imported once per chart at revision 0, never an
+empty list, the server's list is adopted on a 409, the legacy key is dropped once every enabled
+chart has a list, and a one-time toast says the old list was copied to this chart (M7's list was
+shared by all instruments); (c) `API_VERSION` is bumped so older clients warn. (a) to (c) belong to
+steps 4 to 6 and wait for #33 to merge. This is steps 1 to 3, on top of what `main` sends today.
+
+- **`instrument.source` is the `{source}` of the chart routes.** `/api/instruments` lists only the
+  server's own source (`store.instruments(server.source)`), `Instrument.source` is in the client's
+  type, and #33's `known_chart` compares the URL's source with `server.source`. Both path segments
+  are encoded one by one (`chartPath`). Checked against #33's real route in the browser pass.
+- **`API_VERSION` is not bumped here.** Version 2 means #33's routes exist, so it goes with step 4;
+  bumped now it would announce routes `main` does not have.
+- **Errors keep their body.** `request()` read `detail` as a string or a validation list, so #33's
+  409 (`detail: {message, usage}`) would have become "Conflict". `ApiError.detail` keeps it whole
+  (`apiErrorFrom`).
+- **The picker is a model plus a drawing** (`ui/pickerModel.ts`, `ui/indicatorDialogs.ts`): Built-in and
+  Your files, one search over title, name, id and file, and every file of yours listed with its
+  state instead of left out: `error` (reason, line), `quarantined` (edit the file to retry),
+  `not_run` (the worker's own error), and `shadowed`, a file with a built-in's id. That last state is
+  new: instances are keyed by id alone until step 4 gives them a kind, so such a file cannot be added yet.
+  The isolation notice and the worker's own-folder note sit on Your files; a built-in's load error
+  is a notice on Built-in. A server from before the sections still gets both sections, from the flat
+  list and `errors`.
+- **Deleting** asks `usage` first and lists charts and layouts when the file is in use; the answers are
+  `definitionDelete.ts`. 403 shows the server's reason; a 404 that says only "Not Found" means the
+  server has no such route (this server, until #33 merges); a 409 on the plain delete (it became used
+  meanwhile) asks again with the list; a 5xx or no answer re-reads everything, since #33's delete
+  removes the instances before it moves the file and a failure in between leaves the two out of step
+  (review finding of #33). Whether the editing gate is open decides the trash button; when it is not,
+  the button stays visible with the server's reason as its tooltip (`aria-disabled`, not `disabled`:
+  a disabled button shows no tooltip).
+- **Instances in this browser's list.** Until the list moves to the server (step 4), the legacy
+  entries of a deleted file are dropped from the chart once a re-read catalog no longer has it
+  (`IndicatorLayer.removeDefinition`), so nothing is left on the chart as "Could not compute".
+- **Checked.** 47 new unit tests (the API helpers, the picker model, the delete flow); a mutation check
+  of those: 41 mutants, 41 killed (one gap in the de-duplication test closed, one equivalent special case
+  deleted). `IndicatorLayer.removeDefinition` and the dialogs have no DOM test (the frontend tests run
+  in node): a Playwright pass on a scratch server with the catalog and the delete answers intercepted
+  (every state, 403, 404, 409, 500, both themes), and a real run of my build on #33's backend (charts'
+  lists and a layout made through #33's routes, the dialog lists them, the delete removes them, the file
+  is in `.deleted`, the broadcasts arrive): 18 of 18.
