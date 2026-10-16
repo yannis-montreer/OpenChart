@@ -575,3 +575,27 @@ unit-tested), the two primitives in `indicatorPrimitives.ts`, the wiring in `ind
   has not closed is missing: for up to a minute after a 5m bar starts, and on the 1m chart the
   forming bar is never there (15:30:07, 15:30:27 and 15:30:47 all ended at the 15:29 bar). It
   was the same before CI-2 (M7 code, same server). The fix is on its own branch, see the PR.
+
+## Indicators see the forming bar (2026-10-16)
+
+Found in review of CI-2 (d): the legend showed no value for the live bar for up to a minute after a
+5m bar started, and on the 1m chart for every live bar. Not the demo's fake broker: `CandleBuilder`
+writes an M1 bar to the database only when it closes (the forming minute is in memory and on the
+websocket), and both `GET /api/candles` and the indicator values read stored M1. Measured on the
+demo (1m, 15:30:07, :27 and :47): both answers ended at the 15:29 bar. The same on `main` before
+CI-2.
+
+- **Fix:** `SeriesReader.candles(..., forming=True)` folds the builder's forming M1 bar (a copy,
+  `CandleBuilder.forming_m1`) into the bars: into the last bar if it is the bar of that period,
+  else appended (the first minute of a period, the 1m chart). Only the indicator route asks for it.
+  `/api/candles` is unchanged: the chart merges websocket updates into the bar it has, and a bar
+  that changes under a reload is a different change. To decide later whether it should follow.
+- **Not applied** when the window ends before the forming minute (`to`), when it starts after
+  that minute's bar, for sub-minute timeframes (built from ticks, which are buffered live), or if the
+  builder's bar is older than the last stored bar (a stale builder must not put bars out of order).
+  A full page (`from` and `limit`) drops the appended bar like any other that does not fit.
+- **Consequence for the values:** the last value now moves with each tick (a bar that has not
+  closed), like the last bar of the chart. The cache of results keys on the bars, so a changed
+  last bar is a new computation, as it already was for a forming higher-timeframe bar.
+- Tests: `tests/test_forming_bar.py` (19). Mutation check: 9 mutants of the fold, two survived the first
+  version of the tests (a stale bar, and a high above all stored highs) and got tests; then all killed.

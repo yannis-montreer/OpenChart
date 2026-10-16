@@ -154,6 +154,7 @@ class Server:
             cfg.ticks_dir,
             lambda instrument: self.tick_writer.buffered(instrument) if self.tick_writer else [],
             cache=self.cache,
+            live=lambda instrument: self.builder.forming_m1(instrument),
         )
         with contextlib.suppress(OSError):
             self.indicators_dir.mkdir(parents=True, exist_ok=True)

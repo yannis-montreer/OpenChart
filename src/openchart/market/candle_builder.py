@@ -128,6 +128,12 @@ class CandleBuilder:
         bar = self._series_bar(instrument, series)
         return bar.to_candle(False) if bar else None
 
+    def forming_m1(self, instrument: str) -> Bar | None:
+        """A copy of the M1 bar that is forming, if any. It is in memory only: the database
+        gets it when it closes (see the module docstring)."""
+        forming = self._m1.get(instrument)
+        return forming.copy() if forming is not None else None
+
     def on_tick(self, tick: Tick) -> None:
         name = tick.instrument
         forming = self._m1.get(name)

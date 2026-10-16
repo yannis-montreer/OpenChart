@@ -133,7 +133,14 @@ def indicator_routes(server: Server) -> APIRouter:
 
         read = server.reader.candles
         bars = await read(
-            server.source, instrument, tf, price=price, start=from_, end=to, limit=limit
+            server.source,
+            instrument,
+            tf,
+            price=price,
+            start=from_,
+            end=to,
+            limit=limit,
+            forming=True,  # the bar that is forming has a value too (it is not stored yet)
         )
         bars = bars[COLUMNS]
         before: list[pd.DataFrame] = []
