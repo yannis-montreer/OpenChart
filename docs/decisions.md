@@ -404,3 +404,93 @@ under load, each factor on its own, repeated).
     kill the worker instead).
   - The earlier note that the worker also failed to start with busy loops at its own
     below-normal priority was not reproduced here (those runs used normal-priority loops).
+
+## CI-2 (d): drawing the new output kinds (2026-10-16)
+
+Frontend only, plus two demo tools. Nothing in `src/openchart` changed. The mapping from the
+answer to what is drawn is in `frontend/src/chart/indicatorOutputs.ts` (no DOM, no chart, all
+unit-tested), the two primitives in `indicatorPrimitives.ts`, the wiring in `indicators.ts`.
+
+- **What each kind becomes.** `line`, `histogram`, `area`: a series of that type (line style
+  from the catalog, histogram `base`, area shaded 0.28 to 0.02 of its colour). `fill`: a primitive
+  painting the band between two value outputs, behind the series. `level`: a price line.
+  `marker`: the library's markers. `background`: a primitive of full-height columns, behind the
+  series, adjacent columns merged into one rectangle. Colours always come from the instance's
+  params through the names in the catalog; a name that is missing or not `#rrggbb` is grey.
+  Opacity comes from the catalog (clamped to 0 to 1).
+- **One host series per indicator.** Fills, levels, markers and backgrounds hang on the
+  indicator's first value output; an indicator with none (markers only, say) gets a hidden
+  line series holding the closes. So they move with it between panes and go when it goes. On the
+  price pane the hidden series does not take part in autoscale; in a pane of its own the closes
+  give the pane a scale.
+- **Markers use prices, not bar positions.** Above is `atPriceTop` at the bar's high, below
+  `atPriceBottom` at its low, on `atPriceMiddle` at its close. On the price pane the bar is what
+  the price series shows (the Heikin Ashi bar for that chart type, the close alone for a line or
+  area chart), and the markers are drawn again when the chart type changes. In a pane of its own
+  the price is the indicator's value on that bar (first value output that has one). Two marker
+  outputs on the same bar and side overlap; the library does not stack them.
+- **Hits stay sparse.** `hits` become a sorted list of bar start times (`t[i]`), kept as
+  that; positions outside `t` are ignored. A live refresh replaces the hits inside the two bars it
+  fetched and leaves the rest.
+- **Levels** are drawn at the number in `levels` (already resolved by the server for the request);
+  if the answer has none, from the catalog's number or the input's value. The axis label follows
+  "Labels on price scale"; the level's `label` is not shown anywhere yet.
+- **Fills cut the band where either line has no value; lines still bridge gaps, as in M7.**
+  The EMA and M7 files must draw as before, so lines keep their data points unchanged (nulls
+  skipped, no whitespace points). Result for a file with gaps in the middle: the line joins across,
+  the band does not. To decide: whitespace points for all lines, or leave it.
+- **Hidden, removed, changed, failed.** Hiding turns off the series, the markers, the price
+  lines and both primitives. Removing detaches all of them and removes the series. A settings
+  change re-applies colours, widths, styles and level lines for every kind. An indicator whose
+  request fails clears every series, hit and level and shows "Could not compute" in the legend,
+  as before.
+- **A bug found in testing, fixed:** while an indicator was hidden, the once-a-second
+  refresh still ran and built the fill and background data as empty ("not shown, so nothing to
+  draw"); showing it again only switched the primitives on, so the band and tint were missing until
+  the next full reload (seen once in three tries, because the hide had to outlast a refresh). The
+  data is now built whether or not the indicator is shown (`buildBands`, tested), and the
+  visible flag decides. Checked in the browser with a hide of 4 s.
+- **A second one, caught by an M7-style file in the browser:** a file with no `warmup` gets
+  `null` from a two-bar refresh. The M7 chart skipped a null in a refresh (the value from the full
+  load stayed); my first version stored it and blanked the legend. A null never overwrites a held
+  value again (`tailPoints`, tested). The same file's markers in the last two bars do disappear after
+  the first refresh (the refreshed window answers "off"); that is a file the save-time warmup check
+  flags, so it is left.
+- **Settings dialog, minimal change beyond the brief.** The Style tab assumed every output has a
+  width parameter; histograms, fills, markers and backgrounds have none, and level and area may not.
+  It now shows a width control only where there is one. A `String` input (step (b)) had no
+  control and fell through to a number box: it is now a text field with the `max_length` check.
+  Nothing else in the dialog changed. Seen, not changed: when several outputs share one colour
+  parameter, the other swatches keep the old colour in the open dialog until it is reopened (the
+  chart updates at once).
+- **Tests** (`indicatorOutputs.test.ts`, `indicatorPrimitives.test.ts`, 62 more frontend tests,
+  113 in all): colour lookup, opacity, line styles, hits to marker times and placements, levels,
+  fill and background inputs, the refresh rules, and a compatibility block: the built-in EMA and
+  an M7-format file produce exactly the series options and data the M7 chart gave (a solid line
+  sends no `lineStyle`). Mutation check as in the earlier steps: 25 mutants, one rule broken in
+  each (index range and offset of hits, kind default, colour validation, opacity clamp, style codes,
+  gap handling in fills and lines, window replacement, marker prices and shapes, text, level
+  source, null in refreshes, area and histogram options, run splitting and merging, column
+  edges); all 25 killed. The layer itself (`indicators.ts`) has no DOM test: the frontend tests run
+  in node. It was checked in a real browser instead, below.
+- **Checked in Chromium against a fake broker** (`tools/demo_output_kinds.py`, scratch data
+  folder, no OANDA, no Telegram): every kind in both themes, a live theme switch, chart type and
+  timeframe switches, hide and show, settings changes and cancel, removal (no pane, line, marker or
+  tint left), an indicator that raises, an indicator hidden from the start, scrolling back eleven
+  days (loaded in pages of 5,000), live refreshes about once a second per indicator.
+- **Speed** (headless Chromium, software rendering, so absolute figures are pessimistic; mean
+  frame time while dragging, 60 Hz is 16.7 ms):
+  - normal zoom, 15,000+ bars held, three heavy demo indicators (11 value series, plus
+    markers, fills, tints and levels): 18.2 ms (none: 16.7, EMA alone: 16.8);
+  - zoomed all the way out (about 2,000 bars across, the library's limit): the same three 45 ms;
+    a stand-in with lines, a histogram and an area but none of the extras 28 ms; four plain
+    three-line panes 29 ms. Each extra kind costs about 0 to 2 ms per frame there. Merging adjacent background columns did not change it
+    and stayed in (fewer rectangles for long runs);
+  - a reload at 15,000 bars: about 77 ms in the library's `setData` for five series, about 11 ms
+    for markers, levels and bands. Every load of older history refetches every indicator for all
+    bars held (33 full fetches per indicator while scrolling back eleven days): the M7 design,
+    which CI-5 is for. Not changed here.
+- **Seen, not changed (server).** After a bar of a new period starts (5m, in the demo), `GET
+  /api/candles` and so the indicator values end at the previous bar for up to a minute or more
+  (14:50:32: last candle 14:45), so the legend shows `∅` for the new bar in that time. The server
+  was not touched in this step; to look at under CI-5 (forming-bar updates).
