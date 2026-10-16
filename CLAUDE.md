@@ -48,7 +48,7 @@ image. Python 3.11 and 3.13 are both tested.
 
 ## Conventions
 
-- Commit messages end with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`; PR descriptions with the Claude Code line.
+- Commit messages end with `Co-Authored-By: <the model that wrote the change> <noreply@anthropic.com>` (its real name and version, not a fixed one); PR descriptions with the Claude Code line.
 - Write decisions and findings into `docs/decisions.md` as part of the change.
 - New migrations take the next free number at merge time.
 - Tests go with every fix, written to fail without it.
