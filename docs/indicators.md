@@ -147,7 +147,7 @@ values..."), never a crash; it does not count toward the quarantine.
 They take and return series, so they compose: `ema(sma(source(bars, "close"), 5), 9)`.
 Leading NaN (another indicator's warm-up) are skipped before an EMA is seeded.
 
-### `ta`: the helper library (in progress, CI-2 step a)
+### `ta`: the helper library
 
 `from openchart.indicators import ta`. Helpers take series (or lists) and return a series
 with the same index. The value at a bar uses that bar and earlier ones only. Not enough
@@ -209,6 +209,7 @@ Speed (this PC, 5,000 bars): the recursive and series helpers take 0.1 to 1.2 ms
 
 ## Not yet
 
-Multi-timeframe indicators (an H1 EMA on an M5 chart), alerts on indicators and the rest
-of the first set (SMA, RSI, MACD, Bollinger Bands, ATR as files) come later; see
-docs/decisions.md.
+Multi-timeframe indicators (an H1 EMA on an M5 chart), alerts on indicators and built-in
+versions of the usual set (SMA, RSI, MACD, Bollinger Bands, ATR) come later; see
+docs/decisions.md. The four examples in [custom-indicators.md](custom-indicators.md) show
+how to write them as files today.
