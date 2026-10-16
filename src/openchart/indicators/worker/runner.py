@@ -24,7 +24,7 @@ import logging
 import os
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -127,8 +127,14 @@ class _Live:
 
 
 class IndicatorRunner:
-    def __init__(self, launcher: Launcher, limits: Limits | None = None):
+    def __init__(
+        self,
+        launcher: Launcher,
+        limits: Limits | None = None,
+        clock: Callable[[], float] = time.monotonic,
+    ):
         self.launcher = launcher
+        self.clock = clock  # for ready_at and last_job_s (tests give a fake one)
         self.limits = limits or Limits()
         self.level = launcher.level
         self.state = "stopped"  # starting | ready | restarting | failed | stopped
@@ -180,9 +186,15 @@ class IndicatorRunner:
             raise
         self._live = live
         self.state = "ready"
-        self.ready_at = time.monotonic()
+        self.ready_at = self.clock()
         first.set_result(None)
         return {"hello": live.hello, "probes": probes}
+
+    @property
+    def up(self) -> bool:
+        """A worker is running and ready (one that died between jobs is not, though no job
+        has noticed yet)."""
+        return self.state == "ready" and self._live is not None and self._live.handle.alive()
 
     def kill_for_tests(self) -> None:
         """Kill the current worker as a crash would (tests)."""
@@ -315,17 +327,17 @@ class IndicatorRunner:
                 if digest not in live.known:
                     head["source"] = source
             wait = timeout + (2.0 if self.launcher.enforces_deadline else 0.0)
-            t = time.monotonic()
+            t = self.clock()
             try:
                 got, out = await self._ask(live, head, arrays, wait)
             except TimeoutError:
-                self.last_job_s = time.monotonic() - t
+                self.last_job_s = self.clock() - t
                 self._replace(live, f"a job ran past its {timeout:g} s deadline")
                 raise ScriptFailed(
                     "timeout", {"type": "Timeout", "message": f"timed out after {timeout:g} s"}
                 ) from None
             except _Died as died:
-                self.last_job_s = time.monotonic() - t
+                self.last_job_s = self.clock() - t
                 code = await asyncio.to_thread(self._exit_code, live)
                 why = self.launcher.describe_exit(code)
                 self._replace(live, f"the worker ended ({why})")
@@ -341,7 +353,7 @@ class IndicatorRunner:
                     "memory" if memory else "crash",
                     {"type": "WorkerCrash", "message": f"the worker ended ({why})"},
                 ) from None
-            self.last_job_s = time.monotonic() - t
+            self.last_job_s = self.clock() - t
             error = got.get("error")
             if error and error.get("type") == NEED_SOURCE and script is not None:
                 live.known.discard(script[0])
@@ -406,7 +418,7 @@ class IndicatorRunner:
             raise
         self._live = live
         self._spawning = None
-        self.ready_at = time.monotonic()
+        self.ready_at = self.clock()
         if self.state != "stopped":
             self.state = "ready"
         return live

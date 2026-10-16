@@ -91,6 +91,9 @@ free of lookahead. They do not see:
   close is earlier);
 - a branch on the bar count that both runs take the same way (`if len(bars) > 100`);
 - a true/false output whose lookahead does not change it on these bars;
+- in the warmup check, a marker built from a series that is not an output (an internal
+  average with too short a warmup) while every declared line agrees: it can show up only
+  as a near-tie note, not a warning;
 - anything that only shows with other settings, another instrument or other data.
 
 **What they cost:** at most 5 settings per version of a file are checked (later ones are
@@ -99,6 +102,10 @@ waits for at most one of them, one check runs at a time, 1 s apart, and none wit
 of the worker starting. A run that would not fit in 80% of the deadline is skipped and
 says so; one that runs past the deadline restarts the worker like any other, but is
 reported, not counted toward the 3 failures that stop a file.
+
+**Checking the checker** (development): `python tools/mutate_checks.py` breaks one rule at a
+time in a copy of `src/` and needs the checks' tests to fail on each; it refuses to run
+unless those tests pass on the unbroken code, and exits non-zero if a mutant survives.
 
 ## Editing in the browser (from CI-4)
 

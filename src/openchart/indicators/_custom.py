@@ -25,6 +25,7 @@ import logging
 import re
 import time
 from collections import OrderedDict, deque
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -155,6 +156,10 @@ class CustomIndicators:
         self._pending: deque[_CheckJob] = deque()
         self._checker: asyncio.Task[None] | None = None
         self._last_check = -1e9
+        # The check loop's pauses: on the runner's clock (`runner.clock`), slept with this
+        # (tests give a fake clock and a sleep that moves it).
+        self.sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep
+        self.check_log: deque[tuple[str, float, float]] = deque(maxlen=64)  # id, start, end
 
     def worker_ready(self, runner: IndicatorRunner | None, isolation: Isolation) -> None:
         self.runner, self.isolation = runner, isolation
@@ -392,18 +397,19 @@ class CustomIndicators:
             if runner is None or runner.state == "stopped":
                 self._pending.clear()
                 return
-            now = time.monotonic()
+            now = runner.clock()
             wait = (
                 max(runner.ready_at + self.check_stagger, self._last_check + self.check_gap) - now
             )
-            if runner.state != "ready":
-                wait = max(wait, 0.2)  # a worker is (re)starting: its pause starts when it is up
+            if not runner.up:  # (re)starting or dead: its pause starts once a new one is up
+                wait = max(wait, 0.2)
             if wait > 0:
-                await asyncio.sleep(wait)
+                await self.sleep(wait)
                 continue
             job = self._pending.popleft()
             if self._defs.get(job.d.id) is not job.d:
                 continue  # a newer version of the file
+            started = runner.clock()
             try:
                 await self._check(runner, job)
             except Exception:  # never let one check stop the others
@@ -411,7 +417,8 @@ class CustomIndicators:
                 for name in ("lookahead", "warmup"):
                     if job.result[name] == "pending":
                         job.result[name] = "failed"
-            self._last_check = time.monotonic()
+            self._last_check = runner.clock()
+            self.check_log.append((job.d.id, started, self._last_check))
 
     async def _check(self, runner: IndicatorRunner, job: _CheckJob) -> None:
         d, result = job.d, job.result
