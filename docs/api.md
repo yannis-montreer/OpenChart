@@ -41,7 +41,7 @@ Before setup, the two test routes and `/api/setup/defaults` also work without a 
 | Route | Returns |
 |---|---|
 | `GET /api/health` | `{"status": "ok"}` |
-| `GET /api/version` | `{"version", "api_version"}` |
+| `GET /api/version` | `{"version", "api_version"}` (2 since the indicator lists live on the server) |
 | `GET /api/status` | feed state: `provider`, `provider_state` (`connecting`, `connected`, `reconnecting`, `stopped`, `not_configured`, `no_instruments`), `reconnects`, `error`, and per instrument `last_tick_age` (seconds) and `history` (backfill state) |
 | `GET /api/instruments` | stored instruments with `decimals`, `pip_size`, `display_name`, trading `hours`, and learned `closures` (`[[start, end], ...]`, holidays and early closes; SPEC section 9) |
 | `GET /api/candles` | see below |
@@ -247,7 +247,7 @@ Everything under `/api/custom-indicators` answers **`403`** `{detail: "Editing c
 | `DELETE /api/layouts/{id}` | delete it (and unset the default if it was) |
 
 - `layout`: `{instrument, timeframe, chart_type, price, theme, panel_open, panel_view, indicators}`; `chart_type` is `candles`, `bars`, `line`, `area` or `heikin_ashi`. At most one layout is the default.
-- **`indicators`** is a copy of a chart's instances (`{uid, kind, id, params, visible, price_labels, legend_values}`, as above). **Left out, the layout copies its instrument's list from the server**; given (as the M7 browser does), it is checked like a `PUT` to a chart and stored complete, with a `kind` and a `uid` added to each entry.
+- **`indicators`** is a copy of a chart's instances (`{uid, kind, id, params, visible, price_labels, legend_values}`, as above). **Left out, the layout copies its instrument's list from the server**; given (older clients did this), it is checked like a `PUT` to a chart and stored complete, with a `kind` and a `uid` added to each entry.
 - **`apply`** replaces the chart's list with the copy (the same `uid`s), broadcast as `chart_indicators_changed`. It reads the copy as the import reads a browser's list: values that no longer fit fall back with the `reset` note; entries whose definition is gone (or that cannot be used) are left out and listed in `skipped`. `400` when neither the layout nor the request names an instrument.
 
 ## Drawings
@@ -270,7 +270,7 @@ Everything under `/api/custom-indicators` answers **`403`** `{detail: "Editing c
 
 JSON messages, each with a `type`.
 
-On connect the server sends `hello` `{api_version, server_time}` and then `status`. Clients should warn if their `api_version` is older than the server's.
+On connect the server sends `hello` `{api_version, server_time}` and then `status`. Clients should warn if their `api_version` is older than the server's. The web page also warns when the server's is older than its own, since an older server has no chart indicator routes.
 
 ### Client to server
 
