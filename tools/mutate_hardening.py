@@ -145,6 +145,12 @@ MUTANTS = [
         "                    await step()\n",
         "                    pass\n",
     ),
+    one(
+        "a move does not wait for a reader",
+        "openchart/files.py",
+        "            if time.monotonic() >= end:",
+        "            if True:",
+    ),
     # The empty import
     one(
         "an empty import is written",

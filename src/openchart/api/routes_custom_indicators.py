@@ -13,6 +13,7 @@ instances go: a built-in with the same id is another indicator.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 import re
@@ -26,6 +27,7 @@ from fastapi import APIRouter, HTTPException, Request
 from openchart.api.chart_indicators import ChartIndicators
 from openchart.api.editing import require_editing
 from openchart.api.routes_layouts import layouts_message
+from openchart.files import move
 from openchart.server import Server
 from openchart.store.layouts import LayoutStore
 
@@ -111,7 +113,7 @@ def custom_routes(server: Server, charts: ChartIndicators) -> APIRouter:
     def put_back(moved: list[tuple[Path, Path]], target: Path) -> None:
         """Undo the moves of a delete that failed, newest first, and drop its empty folder."""
         for src, dst in reversed(moved):
-            os.replace(dst, src)
+            move(dst, src)
         with contextlib.suppress(OSError):
             target.rmdir()
 
@@ -171,14 +173,19 @@ def custom_routes(server: Server, charts: ChartIndicators) -> APIRouter:
             # All or nothing (Session A's review of #33): the files move first, each move
             # one rename; if a move or the database step fails, everything goes back.
             moved: list[tuple[Path, Path]] = []
-            try:
-                for src, dst in [(path, target / path.name)] + (
-                    [(history, target / "history")] if history is not None else []
-                ):
-                    os.replace(src, dst)
+            pairs = [(path, target / path.name)] + (
+                [(history, target / "history")] if history is not None else []
+            )
+
+            def move_all() -> None:  # in a thread: a move may wait out a reader (Windows)
+                for src, dst in pairs:
+                    move(src, dst)
                     moved.append((src, dst))
+
+            try:
+                await asyncio.to_thread(move_all)
             except OSError as exc:
-                put_back(moved, target)
+                await asyncio.to_thread(put_back, moved, target)
                 what = "its history" if moved else "the file"
                 raise HTTPException(
                     409, f"could not move {what} into .deleted ({exc}); nothing was changed"
@@ -187,7 +194,7 @@ def custom_routes(server: Server, charts: ChartIndicators) -> APIRouter:
                 if found["in_use"]:
                     await remove_instances(indicator_id, found)
             except BaseException:
-                put_back(moved, target)
+                await asyncio.to_thread(put_back, moved, target)
                 raise
         await server.custom.refresh()
         server.hub.broadcast({"type": "indicators_changed", "id": indicator_id, "op": "delete"})
