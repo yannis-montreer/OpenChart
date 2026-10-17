@@ -74,6 +74,11 @@ describe("checkDuplicate", () => {
     expect(checkDuplicate({ id: "Bad id", title: "" }, []).id).toBeDefined();
     expect(checkDuplicate({ id: "ok", title: "a\nb" }, []).title).toBe("A title is one line.");
   });
+
+  it("leaves an empty id to the server (the first free one)", () => {
+    expect(checkDuplicate({ id: "", title: "" }, ["x", "x_2"])).toEqual({});
+    expect(checkDuplicate({ id: "  ", title: "" }, [])).toEqual({});
+  });
 });
 
 describe("checkImport", () => {

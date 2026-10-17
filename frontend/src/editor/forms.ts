@@ -64,7 +64,7 @@ export function checkRename(v: { title: string }, current: string): Problems<"ti
 
 export function checkDuplicate(v: { id: string; title: string }, taken: readonly string[]): Problems<"id" | "title"> {
   const out: Problems<"id" | "title"> = {};
-  put(out, "id", idChecks(v.id, taken));
+  if (v.id.trim() !== "") put(out, "id", idChecks(v.id, taken)); // empty: the server picks the first free one
   if (v.title !== "") put(out, "title", titleProblem(v.title));
   return out;
 }
