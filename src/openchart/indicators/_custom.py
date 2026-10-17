@@ -119,6 +119,7 @@ class CustomDefinition:
     line: int | None = None
     indicator: Indicator | None = None
     failures: int = 0  # crashes, timeouts and memory limits in a row
+    error: dict[str, Any] | None = None  # the last problem: {type, message, line, traceback}
     checks: dict[str, dict[str, Any]] = field(default_factory=dict)  # by settings, this version
     # Settings whose check had too few bars for a check run: a request with at least twice
     # as many bars checks them again (Session A's review: the first request after an edit
@@ -190,6 +191,11 @@ class CustomIndicators:
                 await self._update(stem, path)
             return [self._defs[s] for s in sorted(self._defs)]
 
+    def forget(self, indicator_id: str) -> None:
+        """Drop what is known of a file, so the next read describes it again: after a
+        write through the API, whatever its modification time and size say."""
+        self._defs.pop(indicator_id, None)
+
     async def get(self, indicator_id: str) -> CustomDefinition | None:
         """One definition, read again if its file changed."""
         path = self.folder / f"{indicator_id}.py"
@@ -242,7 +248,7 @@ class CustomIndicators:
         try:
             schema = await self.runner.describe(d.digest, d.file, d.source)
             d.indicator = indicator_from_json(d.id, schema, d.file)
-            d.status, d.reason, d.line = "ok", None, None
+            d.status, d.reason, d.line, d.error = "ok", None, None, None
         except ScriptFailed as exc:
             self._failed(d, exc)
         except WorkerUnavailable as exc:
@@ -252,6 +258,12 @@ class CustomIndicators:
 
     def _failed(self, d: CustomDefinition, exc: ScriptFailed) -> None:
         d.line = exc.info.get("line")
+        d.error = {
+            "type": exc.info.get("type") or exc.kind,
+            "message": exc.info.get("message") or exc.summary,
+            "line": exc.info.get("line"),
+            "traceback": exc.info.get("traceback") or "",
+        }
         if exc.counts_for_quarantine:
             d.failures += 1
             if d.failures >= QUARANTINE_AFTER:
