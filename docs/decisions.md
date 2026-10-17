@@ -753,3 +753,15 @@ steps 4 to 6 and wait for #33 to merge. This is steps 1 to 3, on top of what `ma
   (every state, 403, 404, 409, 500, both themes), and a real run of my build on #33's backend (charts'
   lists and a layout made through #33's routes, the dialog lists them, the delete removes them, the file
   is in `.deleted`, the broadcasts arrive): 18 of 18.
+
+## CI-4: the API contract, before the code (2026-10-17)
+
+`docs/api.md`, "Your indicator definitions": the write endpoints of design section 4, written first so the editor (Session A) can be built against them. Choices made here, for review:
+
+- **Templates:** `blank` plus the four tested examples of docs/custom-indicators.md, shipped in the package; New takes a template id and an optional title.
+- **Import never overwrites:** an existing id is a `409` with a `suggested` free id; without an id it is made from the file name.
+- **Save never creates** (`404`; New and Import create), keeps the last 10 versions in `.history/<id>/`, and takes an optional `base_version` so two tabs (or the editor and a text editor) cannot overwrite each other silently: `409` with the stored version.
+- **Restore is a save** (undoable); Rename edits the single `TITLE = "..."` line or answers `409` "edit TITLE in the code" (design 1.1).
+- **Preview stores and counts nothing:** no file, no history, no quarantine count, no save-time checks; same query and bars as the values route.
+- **Sources:** 256 KB as UTF-8, NUL and lone surrogates refused, a leading BOM dropped, line endings kept; writes atomic (temporary file and rename) and serialized per id; plain files only, never through a link.
+- **`indicators_changed`** gains `{id, op}` (compatible: pages that ignore the fields still refetch).
