@@ -15,7 +15,7 @@ network): see [custom-indicators.md](custom-indicators.md).
 - **Your own indicators:** `.py` files in the `indicators` folder of the data folder
   (`<data dir>/indicators/`, for example `data/indicators/` next to the database). The
   Indicators menu shows the exact path. The server creates the folder on start.
-- **Built-in ones:** `src/openchart/indicators/` (for now only `ema.py`).
+- **Built-in ones:** `src/openchart/indicators/` (`ema.py`, `sma.py`, `rsi.py`, `macd.py`, `bollinger.py`, `atr.py`, `stochastic.py`, `volume.py`; see "Built-in indicators" below).
 
 A new or changed file is picked up without a restart (its modification time or size
 changed). Files whose name starts with `_` are skipped. The file name is the indicator's id
@@ -207,9 +207,40 @@ Speed (this PC, 5,000 bars): the recursive and series helpers take 0.1 to 1.2 ms
 `pivothigh` alike) and at length 2000 about 10 to 30 ms (`sum` 11, `pivothigh` 17,
 `highestbars` 30).
 
+## Built-in indicators
+
+Written with the same `ta` helpers a file of yours uses, and with TradingView's inputs and
+defaults, so they are also the examples to copy (`src/openchart/indicators/`). Each declares a
+`warmup` and passes the save-time lookahead and warmup checks; `tests/test_builtin_indicators.py`
+compares each with a reference written as plain loops.
+
+| Id | Pane | Inputs (defaults) | Draws |
+|---|---|---|---|
+| `ema` | price | length 9, source close | line |
+| `sma` | price | length 9, source close | line |
+| `rsi` | own | length 14, source close, overbought 70, oversold 30 | line, a level at each of the two |
+| `macd` | own | fast 12, slow 26, signal 9, source close | histogram, MACD line, signal line |
+| `bollinger` | price | length 20, source close, StdDev 2.0 | basis, upper and lower lines, a fill between the bands |
+| `atr` | own | length 14, smoothing RMA (or SMA, EMA, WMA) | line |
+| `stochastic` | own | %K length 14, %K smoothing 1, %D smoothing 3, overbought 80, oversold 20 | %K and %D lines, a level at each of the two |
+| `volume` | own | none | histogram labelled **Tick volume** |
+
+- **`volume` is tick volume.** OANDA gives no real volume: each bar's value is the number of
+  price updates in it, so it shows activity, not traded size, and differs from a volume
+  indicator on a venue with real volume. The label says so.
+- **What is not there (yet):** TradingView's choice of moving-average type for the MACD
+  (always EMA here) and for the Bollinger basis (always SMA), the Bollinger `offset`, a
+  histogram that changes colour with its sign (an output has one colour; the style tab sets
+  it), and the volume's own moving average.
+- **Level inputs** are ordinary `Float` inputs (0 to 100): change them in the Inputs tab and
+  the lines move.
+- **Warmups** (bars before the first one shown): `sma`, `bollinger`, `stochastic` and ATR with
+  SMA or WMA need only their window (the sum of the lengths for `stochastic`); the recursive
+  ones fade: `rsi` and ATR with RMA about `21 * length`, ATR with EMA `11 * length`, `macd`
+  about `11 * (slow + signal)`.
+
 ## Not yet
 
-Multi-timeframe indicators (an H1 EMA on an M5 chart), alerts on indicators and built-in
-versions of the usual set (SMA, RSI, MACD, Bollinger Bands, ATR) come later; see
-docs/decisions.md. The four examples in [custom-indicators.md](custom-indicators.md) show
+Multi-timeframe indicators (an H1 EMA on an M5 chart) and alerts on indicators come later;
+see docs/decisions.md. The four examples in [custom-indicators.md](custom-indicators.md) show
 how to write them as files today.
