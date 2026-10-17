@@ -16,14 +16,18 @@ export class DrawingsPanel {
   open(anchor: HTMLElement): void {
     this.content = h("div", { class: "drawings-list" });
     this.signature = "";
-    this.refresh();
+    this.render(); // before it is shown, so the menu is placed by its real size
     showMenu(anchor, this.content, "right");
   }
 
   /** Draw the list again when something in it changed (the chart repaints often). */
   private refresh(): void {
+    if (this.content?.isConnected) this.render();
+  }
+
+  private render(): void {
     const el = this.content;
-    if (!el?.isConnected) return;
+    if (!el) return;
     const list = this.ctl.list();
     const signature = JSON.stringify([this.ctl.selectedId, list.map((d) => [d.id, d.type, d.label, d.style.locked, d.style.hidden, d.points[0]?.p])]);
     if (signature === this.signature) return;

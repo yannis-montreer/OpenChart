@@ -110,6 +110,20 @@ SERVER = [
     one("fill below 0", DR, "Field(None, ge=0, le=100)", "Field(None, ge=-5, le=100)"),
     one("extend loosely typed", DR, "extend: StrictBool | None", "extend: bool | None"),
     one("fill loosely typed", DR, "fill: StrictInt | None", "fill: int | None"),
+    one("locked loosely typed", DR, "locked: StrictBool | None", "locked: bool | None"),
+    one("hidden loosely typed", DR, "hidden: StrictBool | None", "hidden: bool | None"),
+    one(
+        "a write to an unknown path is a 405 again",
+        "openchart/api/app.py",
+        'if scope["type"] == "http" and scope["method"] not in ("GET", "HEAD"):',
+        "if False:",
+    ),
+    one(
+        "any write to the page is a 404",
+        "openchart/api/app.py",
+        'scope["method"] not in ("GET", "HEAD")',
+        'scope["method"] not in ("GET", "HEAD", "DELETE", "POST", "PUT")',
+    ),
 ]
 
 SHAPES = "frontend/src/drawings/shapes.ts"
@@ -263,6 +277,139 @@ BROWSER = [
     one("contrast threshold", SHAPES, "lum > 0.6", "lum > 0.99"),
 ]
 
+HIST = "frontend/src/drawings/history.ts"
+MAN = "frontend/src/drawings/management.ts"
+BROWSER += [
+    one(
+        "an update is not inverted",
+        HIST,
+        'return { kind: "update", id: e.id, undo: e.redo, redo: e.undo };',
+        "return e;",
+    ),
+    one(
+        "a delete is undone as a delete",
+        HIST,
+        'return { kind: "create", drawing: e.drawing };',
+        'return { kind: "delete", drawing: e.drawing };',
+    ),
+    one(
+        "a create is undone as a create",
+        HIST,
+        'return { kind: "delete", drawing: e.drawing };',
+        'return { kind: "create", drawing: e.drawing };',
+    ),
+    one(
+        "a batch is undone in the same order",
+        HIST,
+        "e.entries.map(inverse).reverse()",
+        "e.entries.map(inverse)",
+    ),
+    one("every create or delete is renamed", HIST, "e.drawing.id === from ?", "true ?"),
+    one(
+        "every update is renamed",
+        HIST,
+        "return e.id === from ? { ...e, id: to } : e;",
+        "return { ...e, id: to };",
+    ),
+    one(
+        "a batch is not renamed",
+        HIST,
+        'return { kind: "batch", entries: e.entries.map((x) => renameId(x, from, to)) };',
+        "return e;",
+    ),
+    one(
+        "redo survives a new change",
+        HIST,
+        "    this.undone = [];\n  }\n\n  /** The entry to carry out to take back",
+        "  }\n\n  /** The entry to carry out to take back",
+    ),
+    one("no limit", HIST, "if (this.done.length > this.limit) this.done.shift();", ""),
+    one(
+        "limit off by one", HIST, "this.done.length > this.limit", "this.done.length >= this.limit"
+    ),
+    one(
+        "undo cannot be redone",
+        HIST,
+        "    this.undone.push(e);\n    return inverse(e);",
+        "    return inverse(e);",
+    ),
+    one("redo cannot be undone", HIST, "    this.done.push(e);\n    return e;", "    return e;"),
+    one(
+        "redo list not renamed",
+        HIST,
+        "    this.undone = this.undone.map((e) => renameId(e, from, to));\n",
+        "",
+    ),
+    one(
+        "undo list not renamed",
+        HIST,
+        "    this.done = this.done.map((e) => renameId(e, from, to));\n",
+        "",
+    ),
+    one(
+        "clear keeps the redo list",
+        HIST,
+        "    this.done = [];\n    this.undone = [];\n  }\n\n  rename",
+        "    this.done = [];\n  }\n\n  rename",
+    ),
+    one(
+        "a locked drawing can be moved",
+        MAN,
+        "export const canMove = (d: Flagged): boolean => !isLocked(d);",
+        "export const canMove = (d: Flagged): boolean => true;",
+    ),
+    one(
+        "a locked drawing can be deleted",
+        MAN,
+        "export const canDeleteFromChart = (d: Flagged): boolean => !isLocked(d);",
+        "export const canDeleteFromChart = (d: Flagged): boolean => true;",
+    ),
+    one(
+        "locked when the flag is set at all",
+        MAN,
+        "d.style.locked === true",
+        "d.style.locked !== undefined",
+    ),
+    one(
+        "hidden when the flag is set at all",
+        MAN,
+        "d.style.hidden === true",
+        "d.style.hidden !== undefined",
+    ),
+    one("hide all ignored", MAN, "return allHidden ? [] : list.filter", "return list.filter"),
+    one("hidden ones painted", MAN, "list.filter((d) => !isHiddenDrawing(d))", "list.slice()"),
+    one(
+        "bulk change names the unchanged",
+        MAN,
+        "(d.style[field] === true) !== value",
+        "(d.style[field] === true) === value",
+    ),
+    one("fill restored as zero", MAN, "fillOf(d.type, undefined)", "0"),
+    one("a flag restored as set", MAN, "else out[key] = false;", "else out[key] = true;"),
+    one("points not restored", MAN, "if (patch.points) out.points = d.points;", ""),
+    one("style not restored", MAN, "if (patch.style) out.style = styleBefore(d, patch.style);", ""),
+    one(
+        "no label restored as an empty one",
+        MAN,
+        "if (d.label) out.label = d.label;",
+        "if (true) out.label = d.label;",
+    ),
+    one(
+        "a clone is locked too",
+        MAN,
+        "const { locked: _locked, hidden: _hidden, ...rest } = style;",
+        "const { hidden: _hidden, ...rest } = style;",
+    ),
+    one(
+        "a clone is hidden too",
+        MAN,
+        "const { locked: _locked, hidden: _hidden, ...rest } = style;",
+        "const { locked: _locked, ...rest } = style;",
+    ),
+    one("no price in a line's row", MAN, 'd.type === "hline" ?', "false ?"),
+    one("no label in a row", MAN, "if (d.label) return", "if (false) return"),
+]
+
 
 def vitest() -> subprocess.CompletedProcess[str]:
     npx = shutil.which("npx") or "npx"
@@ -286,12 +433,14 @@ def browser() -> int:
     if base.returncode:
         print("the browser tests fail on the unbroken code: no mutation run")
         return 2
-    path = ROOT / SHAPES
-    original = path.read_bytes()  # bytes: the file keeps its line endings
+    originals = {
+        rel: (ROOT / rel).read_bytes() for rel in {m[1] for m in BROWSER}
+    }  # bytes: line endings kept
     killed, survived, stale = [], [], []
     try:
-        for name, _, edits, equivalent in BROWSER:
-            text = original.decode("utf-8")
+        for name, rel, edits, equivalent in BROWSER:
+            path = ROOT / rel
+            text = originals[rel].decode("utf-8")
             for old, new in edits:
                 if text.count(old) != 1:
                     break
@@ -299,7 +448,7 @@ def browser() -> int:
             else:
                 path.write_bytes(text.encode("utf-8"))
                 got = vitest()
-                path.write_bytes(original)
+                path.write_bytes(originals[rel])
                 if got.returncode:
                     killed.append(name)
                     failed = [ln.strip() for ln in got.stdout.splitlines() if "FAIL" in ln]
@@ -313,7 +462,8 @@ def browser() -> int:
             stale.append(name)
             print(f"{name}: NOT APPLIED (the code changed)", flush=True)
     finally:
-        path.write_bytes(original)
+        for rel, data in originals.items():
+            (ROOT / rel).write_bytes(data)
     print(
         f"\nbrowser: {len(killed)} killed, {len(survived)} survived, "
         f"{len(stale)} not applied, of {len(BROWSER)}"
@@ -322,7 +472,7 @@ def browser() -> int:
 
 
 def server() -> int:
-    runner.TESTS = ["tests/test_drawing_tools.py", "tests/test_drawings.py"]
+    runner.TESTS = ["tests/test_drawing_tools.py", "tests/test_drawings.py", "tests/test_api.py"]
     runner.MUTANTS = SERVER
     return runner.main([])
 

@@ -21,6 +21,7 @@ describe("lock rules", () => {
   it("treats a drawing without the flag as unlocked and visible", () => {
     expect(isLocked(d("a"))).toBe(false);
     expect(isHiddenDrawing(d("a"))).toBe(false);
+    expect(isHiddenDrawing(d("a", { hidden: false }))).toBe(false);
   });
 
   it("does not let a locked drawing be moved or deleted from the chart", () => {

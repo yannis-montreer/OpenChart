@@ -51,6 +51,9 @@ describe("renameId", () => {
     expect(renameId(move("a", 1, 2), "a", "z")).toEqual(move("z", 1, 2));
     expect(renameId(move("b", 1, 2), "a", "z")).toEqual(move("b", 1, 2));
     expect(renameId({ kind: "delete", drawing: drawing("a") }, "a", "z")).toEqual({ kind: "delete", drawing: drawing("z") });
+    expect(renameId({ kind: "delete", drawing: drawing("b") }, "a", "z")).toEqual({ kind: "delete", drawing: drawing("b") });
+    expect(renameId({ kind: "create", drawing: drawing("b") }, "a", "z")).toEqual({ kind: "create", drawing: drawing("b") });
+    expect(renameId({ kind: "create", drawing: drawing("a") }, "a", "z")).toEqual({ kind: "create", drawing: drawing("z") });
     expect(renameId({ kind: "batch", entries: [move("a", 1, 2)] }, "a", "z")).toEqual({ kind: "batch", entries: [move("z", 1, 2)] });
   });
 });
