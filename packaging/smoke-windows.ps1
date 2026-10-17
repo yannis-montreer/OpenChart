@@ -59,7 +59,7 @@ try {
     $setup = Invoke-RestMethod "http://127.0.0.1:$Port/api/setup/status"
     $logText = Get-Content $log -Raw
     foreach ($id in "ema", "sma", "rsi", "macd", "bollinger", "atr", "stochastic", "volume") {
-        if ($logText -notmatch "built-in indicators: .*$id") { throw "The built-in indicator $id was not loaded." }
+        if ($logText -notmatch "built-in indicators: .*$id") { throw "The built-in indicator $id was not loaded." }
     }
     if ($logText -notmatch "secrets: encrypted file") { throw "The encrypted secrets file was not used." }
     foreach ($i in 1..30) {
