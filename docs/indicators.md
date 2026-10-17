@@ -241,8 +241,11 @@ compares each with a reference written as plain loops.
   line with no values.
 - **Lengths stop at 900** for RSI, MACD, Bollinger and ATR (5000 for SMA, whose window is
   its whole warmup): the settled warmup of the recursive averages is about 21 lengths, and the
-  values route fetches at most 20,000 bars before the first one shown; a longer one would start
-  unsettled without saying so. Stochastic and volume stay within it at their maximums.
+  values route fetches at most 20,000 bars before the first one shown. A warmup beyond that
+  (these lengths if they were allowed, the built-in EMA above length 1999, a file of yours that
+  declares a large `warmup`) is cut, and the answer says so: a `notice` (and `checks.warmup_cut`
+  for your files), shown as a small "Warmup cut" warning on the legend row (docs/api.md, "Warmup
+  notice"). Stochastic and volume stay within the limit at their maximums.
 - **What is not there (yet):** the Bollinger `offset`, and a histogram that changes colour
   with its sign (an output has one colour; the style tab sets it). Prices are assumed to have
   `high >= low`; bars that break that (never from OANDA) can put %K outside 0 to 100.

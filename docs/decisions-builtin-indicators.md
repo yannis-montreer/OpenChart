@@ -96,3 +96,44 @@ longer than the data; lengths of 1; the longest settings; a gap in the middle (i
 - **Mutation check of the review:** 11 mutants (gaps filled with 0 or 50 in five indicators, the
   maximums put back to 5000 in five places, a volume average that reads a missing volume as
   zero): all killed; the last one survived at first and got its own test.
+
+## The cut warmup is said (2026-10-17, third round)
+
+At the owner's request. Before: the values route cut a declared warmup to `MAX_WARMUP` (20,000
+bars) without a word, so the values could be computed on too little history unnoticed.
+
+- **The route change is small:** `needed` is taken before the cut; if it is above the limit the
+  answer gets `notice = {kind: "warmup_cut", needed, limit, message}` (one 12-line helper,
+  `_warmup_cut`, and 6 lines in the handler). Custom files also get `checks.warmup_cut`, added to
+  the answer's *copy* of `checks` (the results stored for the file's version are untouched; a test
+  pins that). Absent when nothing is cut, so existing answers are unchanged. Contract: `docs/api.md`,
+  "Warmup notice".
+- **"Which length would be needed":** read as the number of bars the settings need (`needed`), for
+  built-ins and files alike. A length that would fit is not computed: it would need the indicator's
+  own formula (a search over its inputs, a worker call per probe for a file of yours), which is not
+  a small change. The message says "use a shorter length".
+- **The legend** shows a small "Warmup cut" warning (the message as its tip) beside the row's name,
+  unless the row is in error (`chart/notice.ts`, taken from the first page of a full load; a tail
+  refresh does not change it). This is the one frontend change of the PR.
+- **Covers:** the built-in EMA above length 1999 (`10 * n + 10 > 20,000`), a custom file with a
+  large `warmup`, and any built-in whose limits are raised later.
+- **Tests:** `tests/test_warmup_notice.py` (3 failed first: the notice, the custom one, the stored
+  checks), `frontend/src/chart/notice.test.ts` (failed first: no module). Mutation checks: 8 route
+  mutants (boundary `<`, twice the cap, never set, not in `checks`, stored `checks` mutated in
+  place, `needed` showing the cap, a message without the need, `needed` read after the cut) all
+  killed; 6 on the frontend helper, 5 killed and one equivalent (an empty message is also dropped
+  by the final check).
+
+**Should the 900 cap go back toward 5000? Recommendation: keep 900 for now.** Measured on 135,000
+synthetic gapped bars (the 20,000-bar warmup of the route against the full history), the largest
+difference over the 5,000 bars shown: RSI length 900 `4e-10`, length 2000 `3e-5`, length 5000
+`0.011` RSI points; ATR 5000 `5e-5` price units. So the cut is cheap in accuracy, and the case for
+5000 is TradingView parity, not correctness. Reasons to stay at 900 anyway:
+1. Up to 900 the values equal a full history to 1e-9 and the warning never shows; above about 950
+   it shows on every row, for differences nobody can see (3e-5 at 2000), which teaches people to
+   ignore it. The notice is for what we did not foresee (EMA, files), not a licence.
+2. A length of more than 900 is not used in practice for these (a 900-bar RSI on M5 is three days).
+3. Cost: a 5000-bar VWMA or WMA takes 0.7 s on 25,000 bars.
+4. Raising a maximum later breaks nothing; lowering one later breaks saved charts.
+If TradingView parity matters more, **raise to 2000** (not 5000): difference `3e-5`, and the
+warning appears only above 952. Open for the owner.

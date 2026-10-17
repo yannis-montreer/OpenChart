@@ -2,6 +2,7 @@
 
 import type { DrawingType, Point } from "./drawings/geometry";
 import type { Closure, TradingHoursJson } from "./drawings/tradingTime";
+import type { WarmupCut } from "./chart/notice";
 import type { SessionMeta } from "./time";
 
 /** The API version this client was written against. */
@@ -485,6 +486,8 @@ export interface IndicatorValues {
   levels?: Record<string, number>;
   /** Your own files only: the save-time checks of this version of the file (`version`: its digest). */
   checks?: { version?: string };
+  /** The settings need more history than the server uses: see chart/notice.ts. */
+  notice?: WarmupCut;
 }
 
 export const indicatorsApi = {

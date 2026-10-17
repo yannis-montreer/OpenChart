@@ -132,6 +132,7 @@ def indicator_routes(server: Server) -> APIRouter:
             raise HTTPException(
                 422, f"{indicator.name} failed: {type(exc).__name__}: {exc}"
             ) from None
+        needed = warm
         warm = min(max(warm, 0), MAX_WARMUP)
 
         read = server.reader.candles
@@ -203,11 +204,32 @@ def indicator_routes(server: Server) -> APIRouter:
             "hits": hits,
             "levels": levels,
         }
+        cut = _warmup_cut(needed)
+        if cut:
+            out["notice"] = cut
         if custom is not None:  # the save-time checks of this version with these settings
             out["checks"] = server.custom.checks_for(custom, settings)
+            if cut:  # a copy: the stored checks belong to the file's version, not to this request
+                out["checks"] = {**(out["checks"] or {}), "warmup_cut": cut}
         return out
 
     return router
+
+
+def _warmup_cut(needed: int) -> dict[str, Any] | None:
+    """What the answer says when the indicator needs more history than MAX_WARMUP bars."""
+    if needed <= MAX_WARMUP:
+        return None
+    return {
+        "kind": "warmup_cut",
+        "needed": needed,
+        "limit": MAX_WARMUP,
+        "message": (
+            f"These settings need {needed:,} bars of earlier history to settle, but only "
+            f"{MAX_WARMUP:,} are used, so the first values may differ from a longer history. "
+            "Use a shorter length to settle them."
+        ),
+    }
 
 
 def _failed(name: str, exc: ScriptFailed) -> HTTPException:

@@ -68,6 +68,7 @@ import {
   type MarkerRef,
 } from "./indicatorOutputs";
 import { BackgroundPrimitive, FillPrimitive } from "./indicatorPrimitives";
+import { warmupNotice } from "./notice";
 import { reconcileParams } from "./params";
 import { nextRefresh, versionChanged } from "./refresh";
 import type { ChartView } from "./view";
@@ -124,6 +125,8 @@ interface Active {
   /** Inputs that went back to their defaults because the definition changed (until the next save). */
   reset: string[];
   error?: string;
+  /** The server cut the warmup these settings need (chart/notice.ts); shown as a small warning. */
+  notice?: { label: string; tip: string } | null;
   /** The file's version the values were computed with (your own files; see refresh.ts). */
   version?: string;
   /** When a full load was last started, for trying again after an error. */
@@ -544,6 +547,7 @@ export class IndicatorLayer {
     const hits = new Map<string, number[]>([...a.hits.keys()].map((n) => [n, []]));
     let levels: Record<string, number> = {};
     let version: string | undefined;
+    let notice: Active["notice"] = null;
     try {
       let from = span.first;
       for (;;) {
@@ -556,6 +560,7 @@ export class IndicatorLayer {
         for (const [name, list] of hits) for (const t of hitTimes(page.hits?.[name], page.t)) list.push(t);
         if (page.levels) levels = page.levels;
         version = page.checks?.version;
+        notice = notice ?? warmupNotice(page.notice);
         if (page.t.length < PAGE) break;
         from = page.t[page.t.length - 1] + 1;
       }
@@ -565,6 +570,7 @@ export class IndicatorLayer {
     }
     a.error = undefined;
     a.version = version;
+    a.notice = notice;
     a.values = got;
     a.hits = hits;
     a.levels = levels;
@@ -698,6 +704,7 @@ export class IndicatorLayer {
       h("span", { class: "legend-row-name", "data-tip": a.def.title }, label),
       values,
       ...(a.error ? [h("span", { class: "legend-row-error", "data-tip": a.error }, icon("warn", 14), "Could not compute")] : []),
+      ...(!a.error && a.notice ? [h("span", { class: "legend-row-notice", "data-tip": a.notice.tip }, icon("warn", 14), a.notice.label)] : []),
       ...this.resetChip(a),
       h(
         "span",
