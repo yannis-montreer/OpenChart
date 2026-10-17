@@ -754,6 +754,72 @@ steps 4 to 6 and wait for #33 to merge. This is steps 1 to 3, on top of what `ma
   lists and a layout made through #33's routes, the dialog lists them, the delete removes them, the file
   is in `.deleted`, the broadcasts arrive): 18 of 18.
 
+## CI-3 frontend, steps 4 to 6: the list on the server, the import, layouts (2026-10-17)
+
+The owner's decisions for these steps: (a) the default layout at start takes the non-indicator fields only;
+(b) the old list is imported once per chart at revision 0, never empty, the server's list is adopted on a 409,
+the old key goes once every enabled chart has a list, and a toast says the old list was copied to this chart
+(M7's list was shared by every instrument); (c) `API_VERSION` is bumped so older pages warn.
+
+- **One list per chart, read from the server.** `ChartSync` (`chart/chartSync.ts`, no DOM, tested with a
+  fake server that has the 409 rules) reads the list when a chart is opened (`GET`), writes every change as
+  the whole list with the revision it was based on (`PUT`), and follows `chart_indicators_changed`. The
+  chart's own `instrument.source` is the `{source}` of the route (checked against the server: the same
+  value `GET /api/instruments` returns and #33 compares).
+- **Server wins.** A 409 on a save shows the server's list and says the last change was not saved; a list
+  another browser sent while ours was waiting drops our waiting edit too (it was based on the older one).
+  The alternative, saving again over the newer list, would silently undo someone else's change.
+- **One save at a time, the newest list per chart.** Changes made during a save go out as one save after
+  it. A save is always sent to the chart it was made on, also when the user has moved to another chart
+  since. Opening a chart waits for the saves still on their way (otherwise the read could show the list
+  from before the user's own last change).
+- **Our own write is not shown twice.** The server broadcasts before it answers, so a message for a chart
+  with a call under way waits for the answer, then is compared with the revision the answer gave.
+- **Nothing is written to a chart whose list is not on screen.** While a new chart's list is being read the
+  legend is empty and changes are not saved; when the read failed they are refused with a toast, because
+  saving a half list over the real one would lose indicators.
+- **A placeholder keeps what the server cannot draw.** An instance whose definition is gone, whose file has
+  an error, is switched off (quarantined), cannot run (worker off) or shares an id with a built-in stays in
+  the list as a legend row with the reason and Remove, and is saved back as it was (its kind and values
+  untouched). Before, `setEntries` dropped unknown ids, which with the list on the server would have
+  deleted them for good on the next save. One exception, found in a browser run: the server refuses a
+  save that holds an instance with no definition at all (`400`, "no custom indicator ..."), so those
+  (status `missing` from the server, not just absent from a catalog that may have failed to load) are left
+  out of the next save, the list is read back, and a toast names them. Without that every later change
+  would have failed until the user removed the row by hand. `shadowed` (same id as a built-in, listed as `custom`) is new on
+  the client: the values request has no `kind` yet, so that instance cannot be drawn.
+- **Entries carry `uid` and `kind`.** The browser makes the uid of a new instance (letters and digits,
+  well inside the server's rule) and sets `kind` from the definition, so a save never leaves the server to
+  guess. Only the layer assigns them; the settings dialog keeps the ones the entry had.
+- **The old list.** `prefs.indicators` is read apart (`readLegacyIndicators`) and no longer part of the
+  preferences the page works with, but `savePrefs` keeps it in storage until `dropLegacyIndicators`, so a
+  theme change does not lose it. It is offered to a chart at revision 0 only, once per chart and page, and
+  never empty. After the first open, and after every import, the other enabled charts are read; when all
+  have a list the key goes. A chart that is never opened keeps the key (it is a few hundred bytes, and the
+  chart gets the list the day it is opened). A 409 on the import is not an error: another browser was first.
+- **Layouts.** Saving a layout sends no `indicators`: the server copies the chart's own list, after the
+  page's pending saves have been answered. Loading one calls `POST /api/layouts/{id}/apply` for the chart on
+  screen (always with its instrument given) and shows the chart the server answers with; entries it
+  could not use are named in a toast. The default layout at start only sets the other fields, as decided.
+- **The "settings reset" note.** The legend row shows a "Settings reset" mark and a toast names the inputs,
+  once per revision. The mark goes with the next save, as the server's note does.
+- **After a delete here** the instances are removed from the legend without saving (the server already
+  removed them and broadcasts the lists); other browsers also re-read the catalog on `indicators_changed`.
+- **API version 2** (server `API_VERSION`, client `CLIENT_API_VERSION`). A page older than the server
+  warns as before; a page newer than its server now also warns, since it cannot save indicators there.
+  A test reads the server's number from `src/openchart/__init__.py` so the two cannot drift.
+- **Checked.** 83 new unit tests (the model, the controller against a fake server, the preferences, the
+  version notice); a mutation check of the new modules: 59 mutants, all killed (14 survived a first run
+  because the tests were too loose; they were tightened, and one equivalent change removed). A Playwright
+  pass on a scratch server with the fake broker (31 checks: the import with its toast and the key going,
+  lists per chart, a second browser following, a file with an error kept and saved back, an instance
+  whose file is gone left out with a note, the reset note and its removal, a layout saved and loaded, an
+  entry left out with a note, the default layout leaving the list alone, the older-server banner), dark
+  and light.
+- **Not done.** The values request still has no `kind`, so a custom file whose id is also a built-in's
+  cannot be drawn; the picker keeps saying so. A toast appears for every change another browser makes
+  (4 seconds); it is cheap to remove if it is too much.
+
 ## CI-4: the API contract, before the code (2026-10-17)
 
 `docs/api.md`, "Your indicator definitions": the write endpoints of design section 4, written first so the editor (Session A) can be built against them. Choices made here, for review:
