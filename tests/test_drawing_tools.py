@@ -202,3 +202,37 @@ def test_the_server_stores_the_lock_but_does_not_enforce_it(client):
     moved = client.put(f"/api/drawings/{drawing['id']}", json={"points": [pt(0, 2001.0)]})
     assert moved.status_code == 200 and moved.json()["points"][0]["p"] == 2001.0
     assert client.delete(f"/api/drawings/{drawing['id']}").status_code == 200
+
+
+def test_a_hidden_line_keeps_its_alert_armed_and_it_still_fires(client):
+    """Hiding is about the picture only: the alert follows the line's geometry, not its
+    visibility (the drawings list says so with a bell and a tooltip)."""
+    import time
+
+    from openchart.providers.base import Tick
+
+    def push(t, price):
+        client.portal.call(
+            client.server.feed.handle_tick, Tick("XAU_USD", t, price - 0.1, price + 0.1)
+        )
+
+    hline = {"instrument": "XAU_USD", "type": "hline", "points": [pt(0, 2000.0)]}
+    drawing = client.post("/api/drawings", json=hline).json()
+    alert_body = {"instrument": "XAU_USD", "type": "line_cross", "drawing_id": drawing["id"]}
+    alert = client.post("/api/alerts", json=alert_body).json()
+
+    hidden = client.put(f"/api/drawings/{drawing['id']}", json={"style": {"hidden": True}})
+    assert hidden.json()["style"]["hidden"] is True
+    [still] = client.get("/api/alerts", params={"drawing_id": drawing["id"]}).json()
+    assert still["id"] == alert["id"] and still["status"] == "active"
+
+    now = time.time()
+    push(now, 1999.0)
+    push(now + 1, 2001.0)  # crosses the hidden line
+    for _ in range(3):
+        client.portal.call(client.server.alerts.dispatcher.drain)
+        time.sleep(0.05)
+    [event] = client.get("/api/alerts/events").json()
+    assert event["alert_id"] == alert["id"] and event["cross"] == "up"
+    [after] = client.get("/api/alerts").json()
+    assert after["fire_count"] == 1

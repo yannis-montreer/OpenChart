@@ -279,6 +279,7 @@ Added with `docs/decisions-drawing-tools.md` (this section extends the `type`, `
 | `channel` | 3: base line (2), then a point on the parallel line | trading time between the first two, and the third not on the base line | the base line is extended in trading time; the offset of the third point from it is the channel's width |
 
 - `style` also takes `fill` (integer 0-100, opacity of the area of a `rect` or `channel`) and `extend` (boolean: a `channel` runs to the right as rays, a `fib`'s levels to the edge). Both are stored only when sent; without them the tool's default applies.
+- `style` also takes `locked` and `hidden` (booleans, stored only when sent). **Locks guard against accidents in this browser:** the web page will not move or delete a locked drawing, but the server stores the flag and does not enforce it, so `PUT` and `DELETE` on a locked drawing work. A hidden drawing is not drawn, and its alerts stay active.
 - A `line_cross` alert needs a `hline`, `trendline`, `ray` or `extended` line: on any other type `POST /api/alerts` answers `400`.
 - A change that breaks a rule is refused with `400` on create and on update, like the two-point lines.
 

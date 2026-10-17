@@ -877,3 +877,8 @@ kbd {
   padding: 10px;
   opacity: 0.7;
 }
+.dl-bell {
+  display: inline-flex;
+  color: var(--accent);
+  opacity: 0.9;
+}

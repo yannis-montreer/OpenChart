@@ -111,7 +111,7 @@ export class StyleToolbar {
     const locked = isLocked(d);
     this.lockBtn.replaceChildren(icon(locked ? "lockOpen" : "lock"));
     this.lockBtn.classList.toggle("active", locked);
-    this.lockBtn.dataset.tip = locked ? "Unlock (it cannot be moved or deleted while locked)" : "Lock (it cannot be moved or deleted)";
+    this.lockBtn.dataset.tip = locked ? "Unlock. Locks guard against accidents in this browser; the server does not enforce them" : "Lock. Guards against accidents in this browser: the chart will not move or delete it";
     this.trashBtn.disabled = locked;
     this.trashBtn.dataset.tip = locked ? "Unlock to delete" : "Delete (Del)";
     const alertable = isLineType(d.type);

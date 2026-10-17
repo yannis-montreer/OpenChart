@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { Drawing } from "../api";
+import type { Alert, Drawing } from "../api";
 import { UndoStack, inverse, renameId, type Entry } from "./history";
 
 const drawing = (id: string, over: Partial<Drawing> = {}): Drawing => ({
@@ -120,5 +120,59 @@ describe("UndoStack", () => {
     expect(s.redo()).toEqual(move("z", 2, 3));
     expect(s.undo()).toEqual(move("z", 3, 2));
     expect(s.undo()).toEqual(move("z", 2, 1));
+  });
+});
+
+const alert = (id: string, drawingId: string): Alert => ({
+  id,
+  instrument: "XAU_USD",
+  type: "line_cross",
+  drawing_id: drawingId,
+  level: null,
+  direction: "cross",
+  trigger_price: "mid",
+  trigger_mode: "touch",
+  timeframe: "1m",
+  frequency: "once",
+  cooldown_s: 0,
+  name: "n",
+  expires_at: null,
+  notify: ["app"],
+  status: "active",
+  created_at: 0,
+  updated_at: 0,
+  last_fired_at: null,
+  fire_count: 0,
+});
+
+describe("alerts in a delete", () => {
+  it("travel with the drawing through the inverse, both ways", () => {
+    const alerts = [alert("x", "a")];
+    const del: Entry = { kind: "delete", drawing: drawing("a"), alerts };
+    expect(inverse(del)).toEqual({ kind: "create", drawing: drawing("a"), alerts });
+    expect(inverse(inverse(del))).toEqual(del);
+  });
+
+  it("follow a rename of the drawing", () => {
+    const alerts = [alert("x", "a")];
+    const del: Entry = { kind: "delete", drawing: drawing("a"), alerts };
+    expect(renameId(del, "a", "z")).toEqual({ kind: "delete", drawing: drawing("z"), alerts });
+  });
+
+  it("are replaced by what the drawing has now, in both lists", () => {
+    const s = new UndoStack();
+    s.push({ kind: "delete", drawing: drawing("a"), alerts: [alert("x", "a")] });
+    s.push(move("b", 1, 2));
+    s.undo(); // the move
+    s.undo(); // the delete: now a create is next to redo
+    s.setAlerts("a", [alert("y", "a"), alert("w", "a")]);
+    expect(s.redo()).toEqual({ kind: "delete", drawing: drawing("a"), alerts: [alert("y", "a"), alert("w", "a")] });
+  });
+
+  it("leave other drawings' entries alone", () => {
+    const s = new UndoStack();
+    s.push({ kind: "delete", drawing: drawing("b"), alerts: [alert("x", "b")] });
+    s.setAlerts("a", []);
+    expect(s.undo()).toEqual({ kind: "create", drawing: drawing("b"), alerts: [alert("x", "b")] });
   });
 });

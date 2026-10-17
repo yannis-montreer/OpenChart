@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { Drawing } from "../api";
-import { bulkChange, canDeleteFromChart, canMove, cloneStyle, isHiddenDrawing, isLocked, patchBefore, rowTitle, visibleDrawings } from "./management";
+import type { Alert, Drawing } from "../api";
+import { alertBody, bulkChange, restorableAlerts, restoreSummary, canDeleteFromChart, canMove, cloneStyle, isHiddenDrawing, isLocked, patchBefore, rowTitle, visibleDrawings } from "./management";
 
 const d = (id: string, style: Partial<Drawing["style"]> = {}, over: Partial<Drawing> = {}): Drawing => ({
   id,
@@ -116,5 +116,74 @@ describe("rowTitle", () => {
     expect(rowTitle(d("a", {}, { label: "Range" }))).toBe("Rectangle: Range");
     expect(rowTitle(d("a", {}, { type: "text", label: "Support zone" }))).toBe("Text: Support zone");
     expect(rowTitle(d("a", {}, { type: "hline", points: [{ t: 1, p: 2650.5 }] }))).toBe("Horizontal line 2650.5");
+  });
+});
+
+const al = (status: Alert["status"], over: Partial<Alert> = {}): Alert => ({
+  id: "x",
+  instrument: "XAU_USD",
+  type: "line_cross",
+  drawing_id: "old",
+  level: null,
+  direction: "down",
+  trigger_price: "bid",
+  trigger_mode: "candle_close",
+  timeframe: "15m",
+  frequency: "repeating",
+  cooldown_s: 60,
+  name: "My alert",
+  expires_at: 4102444800,
+  notify: ["telegram"],
+  status,
+  created_at: 5,
+  updated_at: 6,
+  last_fired_at: 7,
+  fire_count: 3,
+  ...over,
+});
+
+describe("restoring a line's alerts after an undo", () => {
+  it("restores the active and the stopped ones, not the finished ones", () => {
+    const list = [al("active", { id: "a" }), al("stopped", { id: "b" }), al("triggered", { id: "c" }), al("expired", { id: "d" })];
+    const { restore, skipped } = restorableAlerts(list);
+    expect(restore.map((a) => a.id)).toEqual(["a", "b"]);
+    expect(skipped.map((a) => a.id)).toEqual(["c", "d"]);
+  });
+
+  it("re-creates an alert with its settings on the new drawing, and nothing of its history", () => {
+    expect(alertBody(al("active"), "new")).toEqual({
+      instrument: "XAU_USD",
+      type: "line_cross",
+      drawing_id: "new",
+      direction: "down",
+      trigger_price: "bid",
+      trigger_mode: "candle_close",
+      timeframe: "15m",
+      frequency: "repeating",
+      cooldown_s: 60,
+      name: "My alert",
+      expires_at: 4102444800,
+      notify: ["telegram"],
+    });
+  });
+
+  it("leaves out an expiry that was never set", () => {
+    expect("expires_at" in alertBody(al("active", { expires_at: null }), "new")).toBe(false);
+  });
+
+  it("says what happened to the alerts", () => {
+    expect(restoreSummary(0, 0, 0)).toBeNull();
+    expect(restoreSummary(1, 0, 0)).toBe("Drawing restored with its alert, armed again. The history of its fires is not restored.");
+    expect(restoreSummary(2, 0, 0)).toBe("Drawing restored with its 2 alerts, armed again. The history of their fires is not restored.");
+    expect(restoreSummary(1, 1, 0)).toBe("Drawing restored. 1 of 2 alerts could not be restored.");
+    expect(restoreSummary(0, 2, 0)).toBe("Drawing restored. 2 of 2 alerts could not be restored.");
+    expect(restoreSummary(1, 0, 2)).toBe("Drawing restored with its alert, armed again. The history of its fires is not restored. 2 finished alerts (triggered or expired) were not restored.");
+    expect(restoreSummary(0, 0, 1)).toBe("Drawing restored. 1 finished alert (triggered or expired) was not restored.");
+  });
+});
+
+describe("rowTitle with alerts", () => {
+  it("is unchanged by them (the bell is a marker beside the row)", () => {
+    expect(rowTitle(d("a"))).toBe("Rectangle");
   });
 });

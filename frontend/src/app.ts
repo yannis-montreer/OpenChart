@@ -310,6 +310,7 @@ export class App {
       undoBtn.disabled = !this.drawings.history.canUndo;
       redoBtn.disabled = !this.drawings.history.canRedo;
     };
+    this.drawings.onNotice = (body) => toast({ title: "Undo", body, icon: "info", timeout: 9000 });
     const drawingsPanel = new DrawingsPanel(this.drawings);
     const listBtn = button({ icon: "shapes", title: "Drawings: list, lock, hide", onClick: () => drawingsPanel.open(listBtn) });
     tools.append(

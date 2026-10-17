@@ -4,11 +4,12 @@
  * controller). Pure: no DOM, no network.
  */
 
-import type { Drawing, DrawingPatch } from "../api";
+import type { Alert, Drawing, DrawingPatch } from "../api";
 
 export type Entry =
-  | { kind: "create"; drawing: Drawing }
-  | { kind: "delete"; drawing: Drawing }
+  // A line's alerts go with it when it is deleted: the entry keeps them, so an undo can make them again.
+  | { kind: "create"; drawing: Drawing; alerts?: Alert[] }
+  | { kind: "delete"; drawing: Drawing; alerts?: Alert[] }
   | { kind: "update"; id: string; undo: DrawingPatch; redo: DrawingPatch }
   | { kind: "batch"; entries: Entry[] };
 
@@ -16,9 +17,9 @@ export type Entry =
 export function inverse(e: Entry): Entry {
   switch (e.kind) {
     case "create":
-      return { kind: "delete", drawing: e.drawing };
+      return { kind: "delete", drawing: e.drawing, alerts: e.alerts };
     case "delete":
-      return { kind: "create", drawing: e.drawing };
+      return { kind: "create", drawing: e.drawing, alerts: e.alerts };
     case "update":
       return { kind: "update", id: e.id, undo: e.redo, redo: e.undo };
     case "batch":
@@ -78,6 +79,17 @@ export class UndoStack {
     if (!e) return undefined;
     this.done.push(e);
     return e;
+  }
+
+  /** The alerts a drawing has now, for the create or delete entries about it (in both lists). */
+  setAlerts(drawingId: string, alerts: Alert[]): void {
+    const set = (e: Entry): Entry => {
+      if (e.kind === "batch") return { kind: "batch", entries: e.entries.map(set) };
+      if ((e.kind === "create" || e.kind === "delete") && e.drawing.id === drawingId) return { ...e, alerts };
+      return e;
+    };
+    this.done = this.done.map(set);
+    this.undone = this.undone.map(set);
   }
 
   clear(): void {

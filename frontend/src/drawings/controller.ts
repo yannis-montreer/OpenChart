@@ -16,7 +16,7 @@
 
 import type { Logical } from "lightweight-charts";
 
-import { ApiError, drawingsApi, type Alert, type Drawing, type DrawingPatch, type DrawingStyle } from "../api";
+import { ApiError, alertsApi, drawingsApi, type Alert, type Drawing, type DrawingPatch, type DrawingStyle } from "../api";
 import { lineAlertState, pointAlong, type LineAlertState } from "../ui/alertState";
 import type { ChartView } from "../chart/view";
 import { closeMenu, h, menuItem, showMenuAt } from "../ui/dom";
@@ -47,7 +47,19 @@ import {
 } from "./shapes";
 import { UndoStack, type Entry } from "./history";
 import { DrawingLayer, type MediaTarget } from "./layer";
-import { TYPE_NAMES, bulkChange, canDeleteFromChart, canMove, cloneStyle, isLocked, patchBefore, visibleDrawings } from "./management";
+import {
+  TYPE_NAMES,
+  alertBody,
+  bulkChange,
+  canDeleteFromChart,
+  canMove,
+  cloneStyle,
+  isLocked,
+  patchBefore,
+  restorableAlerts,
+  restoreSummary,
+  visibleDrawings,
+} from "./management";
 import { tradingClock, type Clock, type Closure, type TradingHoursJson } from "./tradingTime";
 import { StyleToolbar } from "./toolbar";
 
@@ -116,6 +128,8 @@ export class DrawingController {
   onError: (text: string) => void = (text) => console.warn(text);
   /** Undo or redo became possible or impossible. */
   onHistoryChange: () => void = () => {};
+  /** A message for the user about what an undo or redo did beyond the drawing itself. */
+  onNotice: (text: string) => void = (text) => console.info(text);
   /** The list of drawings or one of its rows changed (the list panel redraws). */
   onListChange: () => void = () => {};
   /** This browser session's changes, for Ctrl+Z; cleared on an instrument switch or reload. */
@@ -387,12 +401,13 @@ export class DrawingController {
   async remove(id: string): Promise<void> {
     const before = this.drawings.get(id);
     if (!before) return;
+    const alerts = this.alertsOf(id); // they go with the line; an undo makes them again
     this.drawings.delete(id);
     if (this.selectedId === id) this.select(undefined);
     this.redraw();
     try {
       await drawingsApi.remove(id);
-      this.record({ kind: "delete", drawing: before });
+      this.record({ kind: "delete", drawing: before, alerts });
     } catch (err) {
       if (!(err instanceof ApiError && err.status === 404)) {
         this.drawings.set(id, before);
@@ -419,6 +434,7 @@ export class DrawingController {
     const all = [...this.drawings.values()];
     const gone = all.filter(canDeleteFromChart);
     if (!gone.length) return;
+    const alertsBefore = new Map(gone.map((d) => [d.id, this.alertsOf(d.id)]));
     this.select(undefined);
     try {
       if (gone.length === all.length) {
@@ -432,7 +448,7 @@ export class DrawingController {
         }
         this.redraw();
       }
-      this.record(gone.length === 1 ? { kind: "delete", drawing: gone[0] } : { kind: "batch", entries: gone.map((drawing) => ({ kind: "delete" as const, drawing })) });
+      this.record(gone.length === 1 ? { kind: "delete", drawing: gone[0], alerts: alertsBefore.get(gone[0].id) } : { kind: "batch", entries: gone.map((drawing) => ({ kind: "delete" as const, drawing, alerts: alertsBefore.get(drawing.id) })) });
     } catch (err) {
       this.onError(`Could not delete the drawings: ${(err as Error).message}`);
       await this.reload();
@@ -479,15 +495,36 @@ export class DrawingController {
     }
   }
 
+  /** Make a deleted line's alerts again on the line that came back: same settings, armed afresh, no history. */
+  private async restoreAlerts(alerts: readonly Alert[], drawingId: string): Promise<void> {
+    const { restore, skipped } = restorableAlerts(alerts);
+    let restored = 0;
+    let failed = 0;
+    for (const a of restore) {
+      try {
+        const made = await alertsApi.create(alertBody(a, drawingId));
+        if (a.status === "stopped") await alertsApi.update(made.id, { status: "stopped" });
+        restored++;
+      } catch {
+        failed++;
+      }
+    }
+    const text = restoreSummary(restored, failed, skipped.length);
+    if (text) this.onNotice(text);
+  }
+
   private async apply(e: Entry): Promise<void> {
     switch (e.kind) {
       case "create": {
         const d = await this.create(e.drawing.type, e.drawing.points, e.drawing.style, e.drawing.label);
         if (!d) throw new Error("the drawing could not be created again");
         this.history.rename(e.drawing.id, d.id); // it has a new id now
+        await this.restoreAlerts(e.alerts ?? [], d.id);
         return;
       }
       case "delete":
+        // The line's alerts go with it: remember what they are now, for the next undo.
+        this.history.setAlerts(e.drawing.id, this.alertsOf(e.drawing.id));
         await this.remove(e.drawing.id);
         return;
       case "update":

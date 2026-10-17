@@ -29,7 +29,7 @@ export class DrawingsPanel {
     const el = this.content;
     if (!el) return;
     const list = this.ctl.list();
-    const signature = JSON.stringify([this.ctl.selectedId, list.map((d) => [d.id, d.type, d.label, d.style.locked, d.style.hidden, d.points[0]?.p])]);
+    const signature = JSON.stringify([this.ctl.selectedId, list.map((d) => [d.id, d.type, d.label, d.style.locked, d.style.hidden, d.points[0]?.p, this.ctl.alertsOf(d.id).length])]);
     if (signature === this.signature) return;
     this.signature = signature;
 
@@ -41,7 +41,7 @@ export class DrawingsPanel {
       h("strong", {}, `Drawings (${list.length})`),
       h("div", { class: "grow" }),
       button({ label: allHidden ? "Show all" : "Hide all", title: allHidden ? "Show every drawing" : "Hide every drawing", disabled: !list.length, onClick: () => void this.ctl.setAll("hidden", !allHidden) }),
-      button({ label: allLocked ? "Unlock all" : "Lock all", title: allLocked ? "Unlock every drawing" : "Lock every drawing", disabled: !list.length, onClick: () => void this.ctl.setAll("locked", !allLocked) }),
+      button({ label: allLocked ? "Unlock all" : "Lock all", title: allLocked ? "Unlock every drawing" : "Lock every drawing (locks guard against accidents in this browser)", disabled: !list.length, onClick: () => void this.ctl.setAll("locked", !allLocked) }),
     );
     const rows = list.length ? list.map((d) => this.row(d)) : [h("div", { class: "dl-empty" }, "No drawings on this instrument")];
     el.replaceChildren(head, ...rows);
@@ -56,6 +56,10 @@ export class DrawingsPanel {
       return b;
     };
     const title = h("button", { type: "button", class: "dl-title", title: "Select" }, rowTitle(d));
+    const alerts = this.ctl.alertsOf(d.id).length;
+    const bell = alerts
+      ? h("span", { class: "dl-bell", "data-tip": `${alerts === 1 ? "1 alert" : `${alerts} alerts`} on this line. Alerts stay active while hidden.`, "aria-label": "Has alerts: they stay active while hidden" }, icon("bell", 14))
+      : null;
     title.addEventListener("click", () => this.ctl.select(hidden ? undefined : d.id));
     return h(
       "div",
@@ -63,8 +67,9 @@ export class DrawingsPanel {
       h("span", { class: "dl-swatch", style: `background:${d.style.color}` }),
       icon(d.type, 16),
       title,
+      bell,
       iconBtn(hidden ? "eyeOff" : "eye", hidden ? "Show" : "Hide", () => void this.ctl.update(d.id, { style: { hidden: !hidden } }), { active: hidden }),
-      iconBtn(locked ? "lockOpen" : "lock", locked ? "Unlock" : "Lock", () => void this.ctl.update(d.id, { style: { locked: !locked } }), { active: locked }),
+      iconBtn(locked ? "lockOpen" : "lock", locked ? "Unlock (locks guard against accidents in this browser)" : "Lock (guards against accidents in this browser)", () => void this.ctl.update(d.id, { style: { locked: !locked } }), { active: locked }),
       iconBtn("trash", locked ? "Unlock to delete" : "Delete", () => void this.ctl.remove(d.id), { disabled: locked }),
     );
   }

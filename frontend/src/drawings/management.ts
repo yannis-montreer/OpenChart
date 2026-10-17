@@ -1,6 +1,6 @@
 /** Locking, hiding and listing drawings, and the patch that takes a change back (pure). */
 
-import type { Drawing, DrawingPatch, DrawingStyle } from "../api";
+import type { Alert, Drawing, DrawingPatch, DrawingStyle } from "../api";
 import type { DrawingType } from "./geometry";
 import { fillOf } from "./shapes";
 
@@ -72,4 +72,41 @@ export function rowTitle(d: Drawing): string {
   const title = name[0].toUpperCase() + name.slice(1);
   if (d.label) return `${title}: ${d.label}`;
   return d.type === "hline" ? `${title} ${d.points[0].p}` : title;
+}
+
+/** Alerts an undo can make again: the ones still watching or stopped by hand. A finished alert (triggered or expired) stays gone, so a "once" alert cannot fire a second time. */
+export function restorableAlerts(alerts: readonly Alert[]): { restore: Alert[]; skipped: Alert[] } {
+  const restore = alerts.filter((a) => a.status === "active" || a.status === "stopped");
+  return { restore, skipped: alerts.filter((a) => !restore.includes(a)) };
+}
+
+/** The request that makes alert `a` again on drawing `drawingId`: its settings, none of its history. */
+export function alertBody(a: Alert, drawingId: string) {
+  return {
+    instrument: a.instrument,
+    type: a.type,
+    drawing_id: drawingId,
+    direction: a.direction,
+    trigger_price: a.trigger_price,
+    trigger_mode: a.trigger_mode,
+    timeframe: a.timeframe,
+    frequency: a.frequency,
+    cooldown_s: a.cooldown_s,
+    name: a.name,
+    ...(a.expires_at === null ? {} : { expires_at: a.expires_at }),
+    notify: a.notify,
+  };
+}
+
+/** What to tell the user after an undo brought a line back (null: it had no alerts). */
+export function restoreSummary(restored: number, failed: number, skipped: number): string | null {
+  const total = restored + failed;
+  if (total + skipped === 0) return null;
+  let text = "Drawing restored";
+  if (restored > 0 && failed === 0) {
+    text += restored === 1 ? " with its alert, armed again. The history of its fires is not restored." : ` with its ${restored} alerts, armed again. The history of their fires is not restored.`;
+  } else text += ".";
+  if (failed > 0) text += ` ${failed} of ${total} alerts could not be restored.`;
+  if (skipped > 0) text += ` ${skipped} finished ${skipped === 1 ? "alert (triggered or expired) was" : "alerts (triggered or expired) were"} not restored.`;
+  return text;
 }
