@@ -13,6 +13,7 @@ instances go: a built-in with the same id is another indicator.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import time
@@ -107,18 +108,28 @@ def custom_routes(server: Server, charts: ChartIndicators) -> APIRouter:
                 continue
         raise HTTPException(409, f"too many deleted copies of {indicator_id} at {stamp}")
 
+    def put_back(moved: list[tuple[Path, Path]], target: Path) -> None:
+        """Undo the moves of a delete that failed, newest first, and drop its empty folder."""
+        for src, dst in reversed(moved):
+            os.replace(dst, src)
+        with contextlib.suppress(OSError):
+            target.rmdir()
+
     async def remove_instances(indicator_id: str, usage: dict[str, Any]) -> None:
-        """Take the definition off every chart and layout using it. Holding `charts.lock`."""
-        for c in usage["charts"]:
-            source, instrument = c["source"], c["instrument"]
-            kept = [
-                i
-                for i in await charts.store().list(source, instrument)
-                if not (i.kind == "custom" and i.indicator == indicator_id)
-            ]
-            await charts.replace(source, instrument, kept)
-        if usage["layouts"]:
-            store = LayoutStore(server.db.conn)
+        """Take the definition off every chart and layout using it. Holding `charts.lock`.
+        If a step fails, what was already changed is put back (best effort) before the
+        error goes up, so the caller can move the files back too."""
+        undo: list[Any] = []  # coroutine factories that put a changed chart or layout back
+        store = LayoutStore(server.db.conn)
+        try:
+            for c in usage["charts"]:
+                source, instrument = c["source"], c["instrument"]
+                before = await charts.store().list(source, instrument)
+                kept = [
+                    i for i in before if not (i.kind == "custom" and i.indicator == indicator_id)
+                ]
+                await charts.replace(source, instrument, kept)
+                undo.append(lambda s=source, i=instrument, b=before: charts.replace(s, i, b))
             for summary in usage["layouts"]:
                 layout = await store.get(summary["id"])
                 if layout is None:
@@ -126,7 +137,18 @@ def custom_routes(server: Server, charts: ChartIndicators) -> APIRouter:
                 entries = layout.state.get("indicators") or []
                 layout.state["indicators"] = [e for e in entries if not uses(e, indicator_id)]
                 await store.save(layout)
+                undo.append(lambda x=layout, e=entries: _put_back(store, x, e))
+        except BaseException:
+            for step in reversed(undo):
+                with contextlib.suppress(Exception):
+                    await step()
+            raise
+        if usage["layouts"]:
             server.hub.broadcast(await layouts_message(server))
+
+    async def _put_back(store: LayoutStore, layout: Any, entries: list[Any]) -> None:
+        layout.state["indicators"] = entries
+        await store.save(layout)
 
     @router.get("/{indicator_id}/usage")
     async def get_usage(indicator_id: str, request: Request) -> dict[str, Any]:
@@ -145,11 +167,27 @@ def custom_routes(server: Server, charts: ChartIndicators) -> APIRouter:
                 message = where(found, await title(indicator_id))
                 raise HTTPException(409, {"message": message, "usage": found})
             target, history = target_folder(indicator_id)
-            if found["in_use"]:
-                await remove_instances(indicator_id, found)
-            os.replace(path, target / path.name)
-            if history is not None:
-                os.replace(history, target / "history")
+            # All or nothing (Session A's review of #33): the files move first, each move
+            # one rename; if a move or the database step fails, everything goes back.
+            moved: list[tuple[Path, Path]] = []
+            try:
+                for src, dst in [(path, target / path.name)] + (
+                    [(history, target / "history")] if history is not None else []
+                ):
+                    os.replace(src, dst)
+                    moved.append((src, dst))
+            except OSError as exc:
+                put_back(moved, target)
+                what = "its history" if moved else "the file"
+                raise HTTPException(
+                    409, f"could not move {what} into .deleted ({exc}); nothing was changed"
+                ) from None
+            try:
+                if found["in_use"]:
+                    await remove_instances(indicator_id, found)
+            except BaseException:
+                put_back(moved, target)
+                raise
         await server.custom.refresh()
         server.hub.broadcast({"type": "indicators_changed"})
         moved = target.relative_to(server.custom.folder).as_posix()

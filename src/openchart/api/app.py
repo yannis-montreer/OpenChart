@@ -190,9 +190,11 @@ def create_app(server: Server) -> FastAPI:
         instrument: str,
         timeframe: str = "1m",
         price: str = "mid",
-        from_: int | None = Query(None, alias="from"),
-        to: int | None = None,
-        limit: int | None = Query(None, ge=1),
+        # Times as UTC epoch seconds, bounded so SQLite can take them (beyond 64 bits it
+        # cannot: a 500 before); 2**53 is the largest a browser holds exactly.
+        from_: int | None = Query(None, alias="from", ge=-(2**53), le=2**53),
+        to: int | None = Query(None, ge=-(2**53), le=2**53),
+        limit: int | None = Query(None, ge=1, le=2**31),
         forming: bool = True,
     ) -> dict[str, Any]:
         tf = _timeframe(timeframe)

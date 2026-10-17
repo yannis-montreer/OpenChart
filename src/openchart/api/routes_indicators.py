@@ -75,9 +75,11 @@ def indicator_routes(server: Server) -> APIRouter:
         price: str = "mid",
         params: str = "{}",
         kind: str | None = None,
-        from_: int | None = Query(None, alias="from"),
-        to: int | None = None,
-        limit: int | None = Query(None, ge=1),
+        # Times as UTC epoch seconds, bounded so SQLite can take them (beyond 64 bits it
+        # cannot: a 500 before); 2**53 is the largest a browser holds exactly.
+        from_: int | None = Query(None, alias="from", ge=-(2**53), le=2**53),
+        to: int | None = Query(None, ge=-(2**53), le=2**53),
+        limit: int | None = Query(None, ge=1, le=2**31),
     ) -> dict[str, Any]:
         if kind not in (None, "builtin", "custom"):
             raise HTTPException(400, "kind must be builtin or custom")
