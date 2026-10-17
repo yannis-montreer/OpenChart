@@ -50,6 +50,8 @@ def parse_header(raw: bytes) -> tuple[dict[str, Any], list[tuple[str, int]]]:
         header = json.loads(raw)
     except (UnicodeDecodeError, ValueError) as exc:
         raise ProtocolError(f"header is not JSON: {exc}") from None
+    except RecursionError:  # nested too deep for the parser (S2): not a header either
+        raise ProtocolError("header is nested too deeply") from None
     if not isinstance(header, dict):
         raise ProtocolError("header is not a JSON object")
     listed = header.pop("arrays", [])

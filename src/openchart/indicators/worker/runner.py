@@ -95,7 +95,8 @@ class WorkerUnavailable(RuntimeError):
 
 class ScriptFailed(Exception):
     """A request the script did not complete. `kind`: error (its own exception), timeout,
-    memory, crash."""
+    memory, crash, protocol (the worker sent something that is not a frame; it was
+    replaced at once)."""
 
     def __init__(self, kind: str, info: Mapping[str, Any]):
         self.kind = kind
@@ -105,7 +106,7 @@ class ScriptFailed(Exception):
     @property
     def summary(self) -> str:
         message = self.info.get("message") or ""
-        if self.kind in ("timeout", "crash"):
+        if self.kind in ("timeout", "crash", "protocol"):
             return message
         if self.kind == "memory":
             return message or "ran out of memory"
@@ -119,12 +120,27 @@ class ScriptFailed(Exception):
 
     @property
     def counts_for_quarantine(self) -> bool:
+        """Crashes, timeouts and memory limits count. A bad frame counts only when no other
+        script had run in that worker (`fresh`; a new worker after each bad frame): one
+        script can break the stream after its own answer, during another's job (S2), and
+        must not get that other definition quarantined."""
+        if self.kind == "protocol":
+            return self.info.get("fresh") is True
         return self.kind in ("timeout", "memory", "crash")
 
 
 class _Died(Exception):
     def __init__(self, sent: bool):
         self.sent = sent
+
+
+class _BadFrame(Exception):
+    """The worker sent something that is not a frame (the reader killed it)."""
+
+
+@dataclass(frozen=True)
+class _Bad:
+    reason: str
 
 
 _EOF = object()
@@ -136,6 +152,7 @@ class _Live:
     frames: asyncio.Queue
     hello: dict[str, Any]
     known: set[str] = field(default_factory=set)  # script hashes it has the source of
+    ran: set[str] = field(default_factory=set)  # hashes of the scripts that had jobs here
     started: float = field(default_factory=time.monotonic)
     over_folder: str | None = None  # why the folder watch killed it
 
@@ -342,8 +359,22 @@ class IndicatorRunner:
                     head["source"] = source
             wait = timeout + (2.0 if self.launcher.enforces_deadline else 0.0)
             t = self.clock()
+            # No other script has run in this worker (its own describe or warmup may have).
+            fresh = live.ran <= {script[0] if script else ""}
+            live.ran.add(script[0] if script else "")
             try:
                 got, out = await self._ask(live, head, arrays, wait)
+            except _BadFrame as bad:
+                self.last_job_s = self.clock() - t
+                self._replace(live, f"it sent something that is not a frame ({bad})")
+                raise ScriptFailed(
+                    "protocol",
+                    {
+                        "type": "ProtocolError",
+                        "message": f"the worker sent an answer that is not a frame ({bad})",
+                        "fresh": fresh,
+                    },
+                ) from None
             except TimeoutError:
                 self.last_job_s = self.clock() - t
                 self._replace(live, f"a job ran past its {timeout:g} s deadline")
@@ -566,6 +597,8 @@ class IndicatorRunner:
             got = await live.frames.get()
             if got is _EOF:
                 raise _Died(sent=True)
+            if isinstance(got, _Bad):
+                raise _BadFrame(got.reason)
             return got
 
         return await asyncio.wait_for(exchange(), wait)
@@ -580,6 +613,7 @@ class IndicatorRunner:
         handle: Handle, frames: asyncio.Queue, loop: asyncio.AbstractEventLoop
     ) -> None:
         read = exact_reader(handle.stdout)
+        end: object = _EOF
         try:
             while True:
                 got = read_frame(read)
@@ -588,8 +622,9 @@ class IndicatorRunner:
             if isinstance(exc, ProtocolError):
                 log.error("indicator worker sent a bad frame: %s", exc)
                 handle.kill()
+                end = _Bad(str(exc))  # the job waiting for an answer fails at once
         with contextlib.suppress(RuntimeError):  # the loop may be closed at shutdown
-            loop.call_soon_threadsafe(frames.put_nowait, _EOF)
+            loop.call_soon_threadsafe(frames.put_nowait, end)
 
     def _read_stderr(self, handle: Handle) -> None:
         """What the worker (and print() in scripts) writes: kept for diagnostics and
