@@ -326,7 +326,7 @@ def definition_routes(server: Server, charts: ChartIndicators) -> APIRouter:
         )
         try:
             warm = min(max(await runner.warmup(digest, file, text, settings), 0), MAX_WARMUP)
-            bars, frame = await read_bars(
+            bars, frame, _ = await read_bars(
                 server, body.instrument, tf, body.price, body.from_, body.to, body.limit, warm
             )
             arrays = {c: frame[c].to_numpy(dtype="float64") for c in COLUMNS}
