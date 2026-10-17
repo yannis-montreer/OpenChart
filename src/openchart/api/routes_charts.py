@@ -67,7 +67,12 @@ def chart_routes(server: Server, charts: ChartIndicators) -> APIRouter:
                 )
             entries, unusable = parse_entries(body.indicators)
             instances, resets, skipped = await charts.checked(entries, strict=False)
+            if not instances:
+                # Nothing to bring (an empty list, or nothing usable in it): the chart stays
+                # never set, so another browser's real list can still come.
+                chart = await charts.view(source, instrument)
+                return {**chart, "skipped": unusable + skipped, "imported": False}
             chart = await charts.replace(source, instrument, instances, resets)
-        return {**chart, "skipped": unusable + skipped}
+        return {**chart, "skipped": unusable + skipped, "imported": True}
 
     return router

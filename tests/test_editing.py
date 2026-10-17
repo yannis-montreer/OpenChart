@@ -13,7 +13,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from openchart.api.editing import FORWARDING_HEADERS, decide, is_loopback
+from openchart.api.editing import decide
 from openchart.indicators.worker.isolation import Isolation
 from openchart.main import main
 from openchart.settings import new_secret_key
@@ -36,27 +36,27 @@ def gate(setting="auto", *, peer="127.0.0.1", headers=None, behind_proxy=False, 
 # The gate --------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("peer", ["127.0.0.1", "127.8.9.10", "::1"])
-def test_auto_allows_the_servers_own_machine(peer):
-    assert gate(peer=peer).allowed
-
-
 @pytest.mark.parametrize(
-    "peer", ["100.101.102.103", "192.168.1.20", "172.17.0.1", "", None, "testclient"]
+    "peer, headers, behind_proxy",
+    [
+        ("127.0.0.1", {}, False),  # the browser on the PC itself
+        ("::1", {"host": "localhost:8000"}, False),
+        ("127.0.0.1", {"host": "localhost:8000"}, False),  # what an SSH tunnel looks like
+        ("100.101.102.103", {}, False),  # Tailscale
+        ("192.168.1.20", {}, False),
+        ("172.17.0.1", {}, False),  # the Docker bridge
+        (None, {}, False),
+        ("127.0.0.1", {"x-forwarded-for": "203.0.113.9"}, False),
+        ("127.0.0.1", {}, True),
+    ],
 )
-def test_auto_refuses_other_devices_tailscale_and_the_docker_bridge(peer):
-    editing = gate(peer=peer)
-    assert not editing.allowed and "own machine" in editing.reason
-
-
-@pytest.mark.parametrize("header", FORWARDING_HEADERS)
-def test_auto_refuses_a_request_that_came_through_a_proxy(header):
-    editing = gate(headers={header: "203.0.113.9"})
-    assert not editing.allowed and header in editing.reason
-
-
-def test_auto_refuses_behind_a_proxy():
-    assert not gate(behind_proxy=True).allowed
+def test_auto_never_allows_editing(peer, headers, behind_proxy):
+    """S1 (owner's decision): `auto`, the default, is off from everywhere, the server's own
+    machine included: a local forwarder (an SSH tunnel) made a remote browser look local.
+    Editing needs `on`, set on the server's machine."""
+    editing = gate(peer=peer, headers=headers, behind_proxy=behind_proxy)
+    assert not editing.allowed
+    assert "openchart settings set indicator-editing on" in editing.reason
 
 
 def test_on_allows_from_anywhere_but_never_below_the_minimum():
@@ -70,11 +70,6 @@ def test_on_allows_from_anywhere_but_never_below_the_minimum():
 def test_off_refuses():
     editing = gate("off")
     assert not editing.allowed and "openchart settings set" in editing.reason
-
-
-def test_loopback():
-    assert is_loopback("127.0.0.1") and is_loopback("::1") and is_loopback("fe80::1%3") is False
-    assert not is_loopback("localhost")  # a peer is an address, never a name
 
 
 # The catalog shows it --------------------------------------------------------------------

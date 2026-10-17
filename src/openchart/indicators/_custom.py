@@ -48,7 +48,7 @@ from openchart.indicators.worker.runner import IndicatorRunner, ScriptFailed, Wo
 
 log = logging.getLogger(__name__)
 
-ID = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
+ID = re.compile(r"^[a-z][a-z0-9_]{0,39}\Z")  # \Z, not $: `$` also matches before a newline
 QUARANTINE_AFTER = 3
 WORKER_WAIT = 90.0  # seconds a request waits for the worker's first start
 ERROR_CACHE_SIZE = 256  # a script's own errors kept, by script, parameters and bars
@@ -120,6 +120,10 @@ class CustomDefinition:
     indicator: Indicator | None = None
     failures: int = 0  # crashes, timeouts and memory limits in a row
     checks: dict[str, dict[str, Any]] = field(default_factory=dict)  # by settings, this version
+    # Settings whose check had too few bars for a check run: a request with at least twice
+    # as many bars checks them again (Session A's review: the first request after an edit
+    # is often the browser's two-bar refresh).
+    short: set[str] = field(default_factory=set)
 
     @property
     def file(self) -> str:
@@ -357,9 +361,17 @@ class CustomIndicators:
 
     def _want_check(self, d, params, info, bars, series, warmup, run_s) -> None:
         key = _settings_key(params)
-        if key in d.checks or len(d.checks) >= CHECK_SETTINGS or len(self._pending) >= CHECK_QUEUE:
-            return
         n = len(bars["ts"])
+        if len(self._pending) >= CHECK_QUEUE:
+            return
+        if key in d.checks:
+            old = d.checks[key]
+            settled = "pending" not in (old["lookahead"], old["warmup"])
+            if not (key in d.short and settled and n >= 2 * old["bars"]):
+                return
+            d.short.discard(key)  # checked again on these bars, in place of the short one
+        elif len(d.checks) >= CHECK_SETTINGS:
+            return
         result = {
             "version": d.digest[:12],
             "params": params,
@@ -444,6 +456,8 @@ class CustomIndicators:
             )
             return False
 
+        if plan.cut is None or plan.start is None:  # too few bars for one of the runs
+            d.short.add(_settings_key(job.params))
         if plan.cut is None:
             result["lookahead"] = "skipped"
             findings.append(_checks.note("lookahead", plan.lookahead_skip or ""))

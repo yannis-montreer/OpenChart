@@ -990,8 +990,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser(
         "settings",
         help="settings only this machine may change (works while the server runs)",
-        description="indicator-editing (auto, on, off): editing custom indicators in a "
-        "browser; behind-proxy (on, off): a reverse proxy is in front of the server.",
+        description="indicator-editing (on, off; auto, the default, is off): editing custom "
+        "indicators in a browser, which also needs the minimum isolation; behind-proxy (on, "
+        "off): a reverse proxy is in front of the server.",
     )
     p.add_argument("action", choices=["get", "set"])
     p.add_argument("key", nargs="?", help="indicator-editing or behind-proxy")
