@@ -93,9 +93,9 @@ Errors: `400` unknown timeframe or price, `404` unknown instrument, `422` invali
 | `GET /api/indicators` | `{indicators, errors, folder, builtin, custom, isolation, worker, editing}` (below) |
 | `GET /api/indicators/{id}?instrument=&timeframe=&price=&params=&kind=&from=&to=&limit=` | `{id, kind, name, instrument, timeframe, price, params, t, values, hits, levels}`, plus `checks` for your own files. `kind` is `builtin` or `custom` and picks the namespace (without it a built-in wins and a file of yours is found when no built-in has the id; anything else is a 400) |
 
-- **The catalog answer:**
-  - `indicators`: the flat list the menu reads, built-in ones then yours that run, each with `id, name, title, overlay, params, outputs, builtin` and `kind` (`builtin` or `custom`);
-  - `errors`: files that did not load or run (`{file, error}`);
+- **The catalog answer.** `builtin` and `custom` are separate namespaces: a file of yours named `ema.py` is another indicator than the built-in EMA, and every entry, section and error says its `kind` (`builtin` or `custom`).
+  - `indicators`: the flat list the menu reads, built-in ones then yours that run (a file of yours with a built-in's id is only in `custom`), each with `id, name, title, overlay, params, outputs, builtin` and `kind` (`builtin` or `custom`);
+  - `errors`: files that did not load or run (`{file, error, kind}`);
   - `folder`: the folder for your own (docs/indicators.md);
   - `builtin`: every built-in indicator (same entries as above);
   - `custom`: one entry per file, `{id, kind: "custom", file, status, reason, line, definition, checks}`; `status` is `ok`, `error`, `quarantined` or `not_run` (the worker is not available); `definition` is the entry as in `indicators` (null if it did not load); `checks` is the save-time checks of the current version (below);
@@ -144,6 +144,42 @@ Errors: `400` unknown timeframe or price, `404` unknown instrument, `422` invali
   - **A finding:** `check` (`lookahead` or `warmup`), `level` (`warning`, or `note` for what is not a problem with the script), `output` (an output's name, or `null` for a note about the check itself), `t` (the start time of the first bar that differs, or `null`), `full` (the value there with all the bars), `other` (the value with fewer bars, or with less history), `message`. Values are numbers, `null` for a gap, 0/1 for markers and backgrounds. A warmup warning also has `needed`: the warmup that would have been enough in this check, or `null` when no warmup can fix it.
   - One finding per output and check, at its first differing bar.
 
+## A chart's indicators
+
+A chart is a source and an instrument (the source is `provider` in `GET /api/status`). Its indicators are kept on the server, so they are the same in every browser and on the phone. These routes need the login, not the custom-indicator editing setting.
+
+| Route | |
+|---|---|
+| `GET /api/charts/{source}/{instrument}/indicators` | `{source, instrument, revision, indicators}` |
+| `PUT /api/charts/{source}/{instrument}/indicators` | `{indicators, revision?}`: the whole list, in legend order → the chart as `GET` answers it |
+| `POST /api/charts/{source}/{instrument}/indicators/import` | `{indicators}`: a browser's list from before (its `localStorage`) → the chart plus `skipped` |
+
+- **An instance:** `{uid, kind, id, params, visible, price_labels, legend_values}`.
+  - `uid`: the instance's stable id (letters, digits, `_` and `-`, at most 40); a new one is given when it is left out.
+  - `kind`: `builtin` or `custom`. Left out, it is the built-in with that `id`, or the custom one when only a file of yours has it (how older lists are read).
+  - `params`: at most 64 values, each `true`/`false`, a finite number or a text of at most 1000 characters, 8 KB of JSON in all. `visible`, `price_labels` and `legend_values` are `true` or `false` (no other value is read as one) and default to `true`.
+  - **Answers add** `status` (`ok`; `missing` when no definition has that id in that kind; or a custom file's `error`, `quarantined`, `not_run`) and `reset`, the inputs whose values no longer fitted (below).
+- **`revision`** is 0 for a chart whose list was never set and goes up by one with every write. A `PUT` that gives `revision` (a whole number, not `true` or text) is refused with `409` `{detail: {message, chart}}` if the chart has moved on since.
+- **A refused body is a `422`** with FastAPI's usual `detail` list; a `NaN` or an infinity in the input it echoes is sent as text (`"nan"`), since JSON cannot carry it (that was a 500 before, for every route).
+- **Validation:** `PUT` stores the values complete (every input, defaults for those not given). An unknown definition, a `uid` used twice or a value its input does not accept is a `400`; values outside the bounds above, NaN or infinities are a `422`. A value for an input the definition does not have (removed, or never there) is dropped and listed in `reset`. An instance of a file of yours that does not load at the moment keeps its values as given; they are checked once it loads again.
+- **"Settings reset":** when the definition was edited after the values were stored (an input removed, a choice renamed, a range narrowed), `GET` answers those inputs with their defaults and lists them in `reset`, without changing what is stored (editing the file back brings the values back). The next write stores the list as it now fits; its answer and broadcast carry the note once.
+- **Import:** accepted only for a chart whose list was never set (`revision` 0), also not after it was set to an empty list: `409` `{detail: {message, chart}}` otherwise. The list is read entry by entry (at most 200): entries that are not an instance, hold a value that cannot be kept, have no definition any more, or come after the first 30 are left out and listed in `skipped` (`[{id, kind, reason}]`), the rest is imported; values that no longer fit fall back to their defaults with the note.
+- Every change is sent to all connected browsers as a websocket `chart_indicators_changed` message.
+
+## Your indicator definitions
+
+These answer `403` unless editing custom indicators is allowed for this request (the minimum isolation, then the `indicator-editing` setting; `editing` in the catalog says why not).
+
+| Route | |
+|---|---|
+| `GET /api/custom-indicators/{id}/usage` | `{id, in_use, charts: [{source, instrument, instances}], layouts: [{id, name, instances}]}` |
+| `DELETE /api/custom-indicators/{id}` | moves `<id>.py` and `.history/<id>/` to `.deleted/<id>-<UTC time>/` (as `<id>.py` and `history/`) → `{id, moved_to, removed}` |
+
+- `404` for an id that is not one of your files (`id` is the file name: lowercase letters, digits and `_`, at most 40).
+- **In use:** `DELETE` answers `409` `{detail: {message, usage}}`, the message as the confirmation shows it (`"SMA cross" is on 2 charts (EUR_USD, XAU_USD) and in 1 saved layout ("Gold H1"). Deleting it removes it from all of them.`). `?confirm=true` removes its instances from every chart and saved layout first (`chart_indicators_changed` for each chart, `layouts_changed`), then moves the files. Only custom instances count and go: a built-in indicator with the same id is untouched, and a layout entry saved without a `kind` counts only when no built-in has that id.
+- `409` without any change when `.deleted` or `.history/<id>` is not a plain folder inside yours (a file, or a link elsewhere).
+- After a delete, every page gets `indicators_changed` (fetch the catalog again).
+
 ## Layouts
 
 | Route | |
@@ -152,9 +188,12 @@ Errors: `400` unknown timeframe or price, `404` unknown instrument, `422` invali
 | `GET /api/layouts/{id}` | the same plus `layout` |
 | `POST /api/layouts` | `{name, layout, default?}` → the layout |
 | `PUT /api/layouts/{id}` | any of `name`, `layout`, `default` (`true` makes it the one that loads on start, `false` unsets it) |
+| `POST /api/layouts/{id}/apply?instrument=` | put the layout's indicators on a chart (the layout's instrument unless `instrument` is given) → `{layout, chart, skipped}` |
 | `DELETE /api/layouts/{id}` | delete it (and unset the default if it was) |
 
-- `layout`: `{instrument, timeframe, chart_type, price, theme, panel_open, panel_view, indicators}`; `chart_type` is `candles`, `bars`, `line`, `area` or `heikin_ashi`; each indicator is `{id, params, visible, price_labels, legend_values}`. Indicator parameters are validated and stored complete. At most one layout is the default.
+- `layout`: `{instrument, timeframe, chart_type, price, theme, panel_open, panel_view, indicators}`; `chart_type` is `candles`, `bars`, `line`, `area` or `heikin_ashi`. At most one layout is the default.
+- **`indicators`** is a copy of a chart's instances (`{uid, kind, id, params, visible, price_labels, legend_values}`, as above). **Left out, the layout copies its instrument's list from the server**; given (as the M7 browser does), it is checked like a `PUT` to a chart and stored complete, with a `kind` and a `uid` added to each entry.
+- **`apply`** replaces the chart's list with the copy (the same `uid`s), broadcast as `chart_indicators_changed`. It reads the copy as the import reads a browser's list: values that no longer fit fall back with the `reset` note; entries whose definition is gone (or that cannot be used) are left out and listed in `skipped`. `400` when neither the layout nor the request names an instrument.
 
 ## Drawings
 
@@ -197,7 +236,9 @@ On connect the server sends `hello` `{api_version, server_time}` and then `statu
 | `alert_changed` `{op, alert}` | an alert was created, edited, stopped, expired or deleted |
 | `alert_triggered` `{alert, event}` | an alert fired |
 | `alert_event` `{event}` | the delivery state of an event changed |
-| `layouts_changed` `{layouts}` | a layout was saved, renamed, deleted or made the default: the list, as `GET /api/layouts` |
+| `layouts_changed` `{layouts}` | a layout was saved, renamed, deleted or made the default, or lost a deleted indicator: the list, as `GET /api/layouts` |
+| `chart_indicators_changed` `{source, instrument, revision, indicators}` | a chart's indicators changed (a `PUT`, an import, a layout applied, a definition deleted): the chart as `GET /api/charts/.../indicators` answers it, with this write's `reset` notes |
+| `indicators_changed` | the catalog changed (a definition of yours was deleted): fetch `GET /api/indicators` again |
 | `closures` `{instrument, closures}` | learned market closures changed (a holiday passed): `[[start, end], ...]` in UTC epoch seconds |
 | `error` `{error}` | invalid message |
 
