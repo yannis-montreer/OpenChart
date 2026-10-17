@@ -6,7 +6,7 @@ NAME = "BB"
 TITLE = "Bollinger Bands"
 OVERLAY = True
 PARAMS = [
-    Int("length", 20, min=1, max=5000),
+    Int("length", 20, min=1, max=900),
     Source("source", "close"),
     Float("mult", 2.0, min=0.001, max=50, step=0.1, label="StdDev"),
     Choice("ma_type", "SMA", ["SMA", "EMA", "RMA", "WMA", "VWMA"], label="Basis MA type"),

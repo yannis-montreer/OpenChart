@@ -6,7 +6,7 @@ NAME = "RSI"
 TITLE = "Relative Strength Index"
 OVERLAY = False
 PARAMS = [
-    Int("length", 14, min=1, max=5000),
+    Int("length", 14, min=1, max=900),
     Source("source", "close"),
     Float("overbought", 70, min=0, max=100, label="Overbought level"),
     Float("oversold", 30, min=0, max=100, label="Oversold level"),

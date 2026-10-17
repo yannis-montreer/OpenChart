@@ -522,3 +522,184 @@ def test_a_gap_in_the_prices_is_a_gap_not_an_error():
         got = computed(oid, frame)
         for name, values in got.items():
             assert len(values) == len(frame), (oid, name)
+
+
+# Adversarial review of the seven (hostile inputs) ---------------------------------------
+# Findings are marked FINDING; the rest pin behaviour found sound.
+
+SEVEN = ["sma", "rsi", "macd", "bollinger", "atr", "stochastic", "volume"]
+HOSTILE_SETTINGS = {
+    "sma": [{}],
+    "rsi": [{}, {"length": 1}],
+    "macd": [{}, {"osc_ma": "SMA", "signal_ma": "SMA"}, {"fast": 1, "slow": 1, "signal": 1}],
+    "bollinger": [{}, {"length": 1}] + [{"ma_type": k} for k in ("EMA", "RMA", "WMA", "VWMA")],
+    "atr": [{}, {"length": 1}, {"smoothing": "WMA"}],
+    "stochastic": [{}, {"k_length": 1}],
+    "volume": [{}, {"show_ma": True}],
+}
+HOSTILE_CASES = [(oid, p) for oid in SEVEN for p in HOSTILE_SETTINGS[oid]]
+HOSTILE_IDS = [
+    f"{oid}-{'-'.join(f'{k}={v}' for k, v in p.items()) or 'default'}" for oid, p in HOSTILE_CASES
+]
+
+
+def sized(n, **columns):
+    frame = gapped(max(n, 1), seed=2).iloc[:n].reset_index(drop=True)
+    for k, v in columns.items():
+        frame[k] = v
+    return frame
+
+
+@pytest.mark.parametrize("oid,params", HOSTILE_CASES, ids=HOSTILE_IDS)
+@pytest.mark.parametrize("n", [0, 1, 2, 3])
+def test_tiny_and_empty_inputs_give_gaps_not_errors(oid, params, n):
+    got = computed(oid, sized(n), **params)
+    for name, values in got.items():
+        assert len(values) == n, (oid, name)
+
+
+@pytest.mark.parametrize("oid,params", HOSTILE_CASES, ids=HOSTILE_IDS)
+def test_nan_only_prices_give_only_gaps(oid, params):
+    frame = sized(60, o=np.nan, h=np.nan, l=np.nan, c=np.nan)
+    got = computed(oid, frame, **params)
+    for name, values in got.items():
+        if oid == "volume":
+            continue  # volume does not depend on the prices
+        assert np.isnan(values).all(), (oid, name)
+
+
+@pytest.mark.parametrize("oid,params", HOSTILE_CASES, ids=HOSTILE_IDS)
+def test_a_length_longer_than_the_data_gives_only_gaps(oid, params):
+    longest = {
+        "length": 500,
+        "k_length": 500,
+        "ma_length": 500,
+        "fast": 400,
+        "slow": 500,
+        "signal": 100,
+    }
+    ind = indicator(oid)
+    big = {k: v for k, v in longest.items() if k in {p.name for p in ind.params}}
+    got = computed(
+        oid, sized(80), **{**params, **big, **({"show_ma": True} if oid == "volume" else {})}
+    )
+    for name, values in got.items():
+        if oid == "volume" and name == "volume":
+            continue
+        assert np.isnan(values).all(), (oid, name)
+
+
+def test_constant_prices():
+    frame = sized(120, o=5.0, h=5.0, l=5.0, c=5.0)
+    assert (computed("sma", frame)["sma"][8:] == 5.0).all()
+    assert (computed("rsi", frame)["rsi"][14:] == 100.0).all()  # nothing moved: no loss
+    macd = computed("macd", frame)
+    for name in ("macd", "signal", "hist"):
+        assert (macd[name][~np.isnan(macd[name])] == 0.0).all()
+    bands = computed("bollinger", frame)
+    for name in ("basis", "upper", "lower"):
+        assert (bands[name][19:] == 5.0).all()  # no deviation: the bands close on the basis
+    assert (computed("atr", frame)["atr"][13:] == 0.0).all()
+    assert np.isnan(computed("stochastic", frame)["k"]).all()  # high == low: no range
+
+
+def test_high_equal_to_low_on_moving_prices():
+    frame = FRAME.copy()
+    frame["h"] = frame["c"]
+    frame["l"] = frame["c"]
+    frame["o"] = frame["c"]
+    k = computed("stochastic", frame, k_length=3)["k"]
+    assert np.nanmin(k) >= 0 and np.nanmax(k) <= 100
+    atr = computed("atr", frame)["atr"]
+    assert (atr[~np.isnan(atr)] > 0).all()  # the true range still sees the close-to-close moves
+
+
+def test_zero_volume():
+    frame = sized(100, v=0.0)
+    got = computed("volume", frame, show_ma=True)
+    assert (got["volume"] == 0).all() and (got["ma"][19:] == 0).all()
+    assert np.isnan(computed("bollinger", frame, ma_type="VWMA")["basis"]).all()
+    # Only the volume-weighted basis reads the volume.
+    real = sized(100)
+    same(computed("bollinger", frame)["basis"], computed("bollinger", real)["basis"])
+
+
+def test_nan_volume_leaves_the_price_indicators_alone():
+    frame = FRAME.copy()
+    frame["v"] = np.nan
+    for oid in ("sma", "rsi", "macd", "bollinger", "atr", "stochastic"):
+        a, b = computed(oid, frame), computed(oid, FRAME)
+        for name in a:
+            same(a[name], b[name])
+
+
+def test_integer_columns_give_the_same_values():
+    ints = FRAME.copy()
+    ints["v"] = ints["v"].astype("int64")
+    for oid in SEVEN:
+        a, b = computed(oid, FRAME), computed(oid, ints)
+        for name in a:
+            same(b[name], a[name], tol=1e-12)
+
+
+def test_a_gap_in_the_middle_heals():
+    frame = FRAME.copy()
+    frame.loc[300:302, ["o", "h", "l", "c"]] = np.nan
+    for oid in SEVEN:
+        if oid == "volume":
+            continue
+        got = computed(oid, frame)
+        for name, values in got.items():
+            assert not np.isnan(values[-50:]).any(), (oid, name)
+
+
+# FINDING 1: a declared warmup beyond what the values route will fetch (MAX_WARMUP) is cut
+# silently, so a long RSI, MACD or ATR starts unsettled at the left edge with nothing to say
+# so. The input maximums keep every declared warmup inside the cap.
+
+
+def maximum_settings(ind):
+    """Every length input at its maximum, and each choice (and flag) in turn."""
+    lengths = {p.name: p.max for p in ind.params if p.type == "int" and p.max is not None}
+    options = [{}]
+    for p in ind.params:
+        if p.type == "choice":
+            options = [{**o, p.name: c} for o in options for c in p.choices]
+        if p.type == "bool":
+            options = [{**o, p.name: b} for o in options for b in (False, True)]
+    return [{**lengths, **o} for o in options]
+
+
+@pytest.mark.parametrize("oid", SEVEN)
+def test_no_declared_warmup_is_beyond_the_fetch_cap(oid):
+    from openchart.api.routes_indicators import MAX_WARMUP
+
+    ind = indicator(oid)
+    for settings in maximum_settings(ind):
+        warm = ind.warmup(ind.normalize(settings))
+        assert warm <= MAX_WARMUP, (settings, warm)
+
+
+@pytest.mark.parametrize(
+    "oid,params",
+    [
+        ("rsi", {"length": 900}),
+        ("atr", {"length": 900}),
+        ("bollinger", {"length": 900, "ma_type": "RMA"}),
+        ("macd", {"fast": 450, "slow": 900, "signal": 900}),
+    ],
+    ids=lambda v: v if isinstance(v, str) else "-".join(f"{k}={x}" for k, x in v.items()),
+)
+def test_the_save_time_checks_find_nothing_at_the_longest_settings(oid, params):
+    frame = gapped(30000, seed=9)
+    plan, ahead, behind = check(compiled(oid), frame, params)
+    assert plan.cut and plan.start is not None
+    assert ahead == [] and behind == []
+
+
+def test_a_missing_volume_is_a_gap_in_the_average_not_a_zero():
+    frame = FRAME.copy()
+    frame.loc[100, "v"] = np.nan
+    got = computed("volume", frame, show_ma=True, ma_length=5)
+    assert np.isnan(got["volume"][100])
+    assert np.isnan(got["ma"][100:105]).all() and not np.isnan(got["ma"][105])

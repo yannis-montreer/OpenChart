@@ -6,7 +6,7 @@ NAME = "ATR"
 TITLE = "Average True Range"
 OVERLAY = False
 PARAMS = [
-    Int("length", 14, min=1, max=5000),
+    Int("length", 14, min=1, max=900),
     Choice("smoothing", "RMA", ["RMA", "SMA", "EMA", "WMA"]),
     Color("color", "#b71c1c", label="Colour"),
     Width("width", 1),

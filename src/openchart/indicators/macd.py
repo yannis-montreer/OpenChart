@@ -6,9 +6,9 @@ NAME = "MACD"
 TITLE = "Moving Average Convergence Divergence"
 OVERLAY = False
 PARAMS = [
-    Int("fast", 12, min=1, max=5000, label="Fast length"),
-    Int("slow", 26, min=1, max=5000, label="Slow length"),
-    Int("signal", 9, min=1, max=5000, label="Signal smoothing"),
+    Int("fast", 12, min=1, max=900, label="Fast length"),
+    Int("slow", 26, min=1, max=900, label="Slow length"),
+    Int("signal", 9, min=1, max=900, label="Signal smoothing"),
     Source("source", "close"),
     Choice("osc_ma", "EMA", ["EMA", "SMA"], label="Oscillator MA type"),
     Choice("signal_ma", "EMA", ["EMA", "SMA"], label="Signal MA type"),
