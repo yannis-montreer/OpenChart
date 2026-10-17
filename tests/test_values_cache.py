@@ -49,7 +49,8 @@ def count_computes(c):
     real = runner.compute
 
     async def counted(*args, **kwargs):
-        calls.append(args[3] if len(args) > 3 else kwargs.get("params"))
+        if kwargs.get("priority", "normal") != "low":  # a check's own runs are not counted
+            calls.append(args[3] if len(args) > 3 else kwargs.get("params"))
         return await real(*args, **kwargs)
 
     runner.compute = counted
@@ -279,3 +280,51 @@ def test_the_runner_reads_with_the_jobs_bar_count(vc):
         tracemalloc.stop()
     assert r.status_code == 422 and "3,000,000 values for 20 bars" in r.json()["detail"]
     assert peak < 16 * 2**20
+
+
+# Found in the review of this change ----------------------------------------------------------
+
+
+def settled_checks(c, indicator, params="{}"):
+    end = time.monotonic() + 30
+    while True:
+        got = values(c, indicator, params=params)["checks"]
+        if got is not None and "pending" not in (got["lookahead"], got["warmup"]):
+            return got
+        assert time.monotonic() < end, got
+        time.sleep(0.05)
+
+
+def test_a_restyled_indicator_still_has_its_check(vc):
+    """Review finding 2: the values of a restyle come from the cache, so no computation
+    queued a check for the new colours, and `checks` stayed null for them for good."""
+    write(vc.folder, "ahead.py", "SHIFT\n")
+    first = settled_checks(vc, "ahead")
+    assert first["lookahead"] == "warned"
+    restyled = settled_checks(vc, "ahead", params='{"color": "#00ff00"}')
+    assert restyled["lookahead"] == "warned" and restyled["params"]["color"] == "#00ff00"
+    assert len(vc.computes) == 1  # the values themselves came from the cache
+
+
+async def test_a_cancelled_first_request_does_not_fail_the_others():
+    """Review finding 3: the computation ran inside the first request, so a tab closed
+    while it computed cancelled it for every request sharing it."""
+    import asyncio
+
+    from openchart.indicators._cache import ValueCache
+
+    cache, started, release = ValueCache(), asyncio.Event(), asyncio.Event()
+
+    async def compute():
+        started.set()
+        await release.wait()
+        return {"out": pd.Series([1.0])}
+
+    first = asyncio.create_task(cache.get("k", compute))
+    await started.wait()
+    second = asyncio.create_task(cache.get("k", compute))
+    await asyncio.sleep(0.01)  # the second is waiting for the first's computation
+    first.cancel()
+    release.set()
+    assert (await second)["out"].tolist() == [1.0]
+    assert (await cache.get("k", compute))["out"].tolist() == [1.0]  # and it was kept
