@@ -820,6 +820,18 @@ the old key goes once every enabled chart has a list, and a toast says the old l
   cannot be drawn; the picker keeps saying so. A toast appears for every change another browser makes
   (4 seconds); it is cheap to remove if it is too much.
 
+## CI-4: the API contract, before the code (2026-10-17)
+
+`docs/api.md`, "Your indicator definitions": the write endpoints of design section 4, written first so the editor (Session A) can be built against them. Choices made here, for review:
+
+- **Templates:** `blank` plus the four tested examples of docs/custom-indicators.md, shipped in the package; New takes a template id and an optional title.
+- **Import never overwrites:** an existing id is a `409` with a `suggested` free id; without an id it is made from the file name.
+- **Save never creates** (`404`; New and Import create), keeps the last 10 versions in `.history/<id>/`, and takes an optional `base_version` so two tabs (or the editor and a text editor) cannot overwrite each other silently: `409` with the stored version.
+- **Restore is a save** (undoable); Rename edits the single `TITLE = "..."` line or answers `409` "edit TITLE in the code" (design 1.1).
+- **Preview stores and counts nothing:** no file, no history, no quarantine count, no save-time checks; same query and bars as the values route.
+- **Sources:** 256 KB as UTF-8, NUL and lone surrogates refused, a leading BOM dropped, line endings kept; writes atomic (temporary file and rename) and serialized per id; plain files only, never through a link.
+- **`indicators_changed`** gains `{id, op}` (compatible: pages that ignore the fields still refetch).
+
 ## Hardening after the security review (2026-10-17)
 
 The owner approved the plan in `docs/security-review-custom-indicators.md` ("After the review"): S1, S2, S3, S5, Session A's findings 1 to 3 of CI-2 (b)-(d), the non-atomic delete and the empty import are fixed; S4, S6, S7, S8, S9 and the change stamp are documented. Tests first: 27 failed against main before the code (each on its own assertion); three passed already and the mutation check shows they bite (the database-failure delete, which today's order happened to survive, and two guards: no rerun for a few more bars, times in range still accepted).
@@ -833,19 +845,6 @@ The owner approved the plan in `docs/security-review-custom-indicators.md` ("Aft
 - **The Settings dialog** showing the editing state and reason read-only is left to the frontend session (Session A): the catalog's `editing` already carries `{allowed, setting, reason}` with the command to run.
 - **Mutation check** (`tools/mutate_hardening.py`, 27 mutants: the gate's three rules, the deep header caught, the reader's bad-frame end, the quarantine rule in four ways, the worker kept after a bad frame, the whole-number and overflow checks, each of the six bounds, both id patterns, the rerun rule in four ways, the delete's three undo paths, the empty import): **25 killed, 2 equivalent**: the built-in registry's pattern (only files shipped in the package reach it, and no name there can hold a newline on Windows) and a rerun while the short check is still pending (a request answered meanwhile has its own result). Some kills are reported by the runner under a log line that starts with `ERROR` instead of the test's name; the verdict is the exit code, so they are kills.
 - **Found later, in the full run of the stacked CI-5 branch (test first, red on Windows every time):** on Windows a file another thread or process has open cannot be renamed (WinError 32, Python opens files without `FILE_SHARE_DELETE`), so a catalog read of `<id>.py` at the moment of a delete made the delete a spurious 409 "could not move the file". The delete's moves now go through `files.move`, which retries for up to a second while Windows reports the file in use (and fails at once for anything else, and on Linux and macOS), in a thread so the event loop does not wait. CI-4's saves use the same helper.
-
-
-## CI-4: the API contract, before the code (2026-10-17)
-
-`docs/api.md`, "Your indicator definitions": the write endpoints of design section 4, written first so the editor (Session A) can be built against them. Choices made here, for review:
-
-- **Templates:** `blank` plus the four tested examples of docs/custom-indicators.md, shipped in the package; New takes a template id and an optional title.
-- **Import never overwrites:** an existing id is a `409` with a `suggested` free id; without an id it is made from the file name.
-- **Save never creates** (`404`; New and Import create), keeps the last 10 versions in `.history/<id>/`, and takes an optional `base_version` so two tabs (or the editor and a text editor) cannot overwrite each other silently: `409` with the stored version.
-- **Restore is a save** (undoable); Rename edits the single `TITLE = "..."` line or answers `409` "edit TITLE in the code" (design 1.1).
-- **Preview stores and counts nothing:** no file, no history, no quarantine count, no save-time checks; same query and bars as the values route.
-- **Sources:** 256 KB as UTF-8, NUL and lone surrogates refused, a leading BOM dropped, line endings kept; writes atomic (temporary file and rename) and serialized per id; plain files only, never through a link.
-- **`indicators_changed`** gains `{id, op}` (compatible: pages that ignore the fields still refetch).
 
 ## CI-4 backend: the editor's endpoints (2026-10-17)
 
