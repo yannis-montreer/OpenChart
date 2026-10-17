@@ -162,6 +162,8 @@ def indicator_routes(server: Server) -> APIRouter:
                 series = await server.values_cache.get(
                     key, compute, window=window if forming else None
                 )
+                if custom is not None:  # no-op unless this came from the cache
+                    server.custom.from_cache(custom, frame, settings, info, series, warmup=warm)
         except ScriptFailed as exc:
             raise _failed(indicator.name, exc) from None
         except WorkerUnavailable as exc:

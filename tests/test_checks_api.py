@@ -83,7 +83,9 @@ def test_the_checks_run_with_the_requests_parameters_and_info(fc):
     (fc.folder / "strict.py").write_text("STRICT\n")
     params = {"color": "#00ff00"}
     assert values(fc, "strict", params).status_code == 200
-    assert values(fc, "strict").status_code == 422  # the refusal works
+    # The refusal works (another timeframe: a restyle alone is answered from the values
+    # cache since CI-5, without asking the worker).
+    assert values(fc, "strict", params, timeframe="1m").status_code == 422
     got = settled(fc, "strict", params)
     assert (got["lookahead"], got["warmup"], got["findings"]) == ("ok", "ok", [])
 

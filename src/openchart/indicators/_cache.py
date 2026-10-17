@@ -93,20 +93,22 @@ class ValueCache:
         if got is not None:
             return got
         flight = self._flights.get(key)
-        if flight is not None:
-            return await asyncio.shield(flight)
-        self.misses += 1
-        flight = asyncio.get_running_loop().create_future()
-        self._flights[key] = flight
+        if flight is None:
+            self.misses += 1
+            # The computation is the cache's own task, not the first request's: a request
+            # that is cancelled (its tab closed) stops waiting, the others still get it.
+            flight = asyncio.ensure_future(self._compute(key, compute, window))
+            flight.add_done_callback(lambda t: t.cancelled() or t.exception())
+            self._flights[key] = flight
+        return await asyncio.shield(flight)
+
+    async def _compute(
+        self, key: Hashable, compute: Callable[[], Awaitable[Series]], window: Hashable | None
+    ) -> Series:
         try:
             series = await compute()
-        except BaseException as exc:
-            flight.set_exception(exc)
-            flight.exception()  # retrieved: the waiters, if any, get it too
-            raise
         finally:
             self._flights.pop(key, None)
-        flight.set_result(series)
         self._store(key, series)
         if window is not None:
             self._forming[window] = (self.clock(), key)
