@@ -265,6 +265,23 @@ Everything under `/api/custom-indicators` answers **`403`** `{detail: "Editing c
 - Every change is sent to all connected browsers as a websocket `drawing_changed` message.
 - Line geometry (how `points` define the line, in trading time): SPEC section 9.
 
+### More drawing tools
+
+Added with `docs/decisions-drawing-tools.md` (this section extends the `type`, `points` and `style` rules above). No migration; the `drawings` table, the routes and `drawing_changed` are the same.
+
+| `type` | `points` | Valid when | Notes |
+|---|---|---|---|
+| `vline` | 1 | always | `t` is the line; `p` is kept but not drawn |
+| `text` | 1 | `label` has 1-100 characters after trimming | the text is `label`; `clear_label` and a blank `label` are refused (`400`); `style.width` 1-4 is the size |
+| `rect` | 2 opposite corners | trading time between them and different prices | |
+| `fib` | 2: start (level 1), end (level 0) | trading time between them and different prices | levels 0, 0.236, 0.382, 0.5, 0.618, 0.786, 1 are fixed |
+| `measure` | 2 | the points differ in trading time or in price | |
+| `channel` | 3: base line (2), then a point on the parallel line | trading time between the first two, and the third not on the base line | the base line is extended in trading time; the offset of the third point from it is the channel's width |
+
+- `style` also takes `fill` (integer 0-100, opacity of the area of a `rect` or `channel`) and `extend` (boolean: a `channel` runs to the right as rays, a `fib`'s levels to the edge). Both are stored only when sent; without them the tool's default applies.
+- A `line_cross` alert needs a `hline`, `trendline`, `ray` or `extended` line: on any other type `POST /api/alerts` answers `400`.
+- A change that breaks a rule is refused with `400` on create and on update, like the two-point lines.
+
 ## WebSocket `/ws`
 
 JSON messages, each with a `type`.

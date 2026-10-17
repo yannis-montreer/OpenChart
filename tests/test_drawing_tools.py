@@ -114,6 +114,8 @@ def test_text_needs_its_text_and_keeps_it(client):
     assert client.post("/api/drawings", json={**body, "label": "  "}).status_code == 400
     note = client.post("/api/drawings", json={**body, "label": "Support"}).json()
     assert client.put(f"/api/drawings/{note['id']}", json={"clear_label": True}).status_code == 400
+    blank = client.put(f"/api/drawings/{note['id']}", json={"label": "   "})
+    assert blank.status_code == 400
     changed = client.put(f"/api/drawings/{note['id']}", json={"label": "Resistance"}).json()
     assert changed["label"] == "Resistance"
 
@@ -128,7 +130,7 @@ def test_fill_and_extend_are_stored_only_when_given_and_validated(client):
     assert styled["style"]["fill"] == 30 and styled["style"]["extend"] is True
     again = client.put(f"/api/drawings/{styled['id']}", json={"style": {"color": "#ff0000"}}).json()
     assert again["style"]["fill"] == 30 and again["style"]["color"] == "#ff0000"
-    for bad in ({"fill": 101}, {"fill": -1}, {"extend": "yes"}):
+    for bad in ({"fill": 101}, {"fill": -1}, {"fill": "30"}, {"fill": 30.5}, {"extend": "yes"}):
         assert client.post("/api/drawings", json={**body, "style": bad}).status_code == 422
 
 

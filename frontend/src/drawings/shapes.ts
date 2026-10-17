@@ -124,7 +124,6 @@ export function dragHandle(type: DrawingType, pts: Point[], handle: number, to: 
       }
       const d = channelOffset(pts, clock);
       const base = pts.slice(0, 2).map((q, i) => (i === handle ? to : q));
-      if (clock(base[0].t) === clock(base[1].t)) return null;
       const t3 = pts[2].t;
       next = [...base, { t: t3, p: extendedPrice(base[0], base[1], t3, clock) + d }];
       break;
@@ -185,7 +184,7 @@ export function formatDuration(seconds: number): string {
   for (const [name, size] of units) {
     const n = Math.floor(s / size);
     s -= n * size;
-    if (n > 0 && parts.length < 2) parts.push(`${n}${name}`);
+    if (n > 0) parts.push(`${n}${name}`);
     if (parts.length === 2) break;
   }
   return parts.length ? parts.join(" ") : "0s";

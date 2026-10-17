@@ -48,6 +48,13 @@ describe("channel", () => {
     expect(channelOffset([...base, P(300, 25)], identity)).toBeCloseTo(-5);
   });
 
+  it("measures the offset in trading time, as the server does", () => {
+    // Time between 100 and 200 does not count: the same case as tests/test_drawing_tools.py.
+    const pts = [P(0, 0), P(300, 15), P(250, 13.25)];
+    expect(channelOffset(pts, closure(100, 200))).toBeCloseTo(2);
+    expect(channelOffset(pts, identity)).toBeCloseTo(0.75);
+  });
+
   it("draws the base and a parallel line moved by the offset", () => {
     const [a, b] = channelLines([...base, P(50, 8)], identity, false);
     expect(a).toEqual({ type: "trendline", pts: base });
@@ -190,6 +197,8 @@ describe("formatting", () => {
     expect(withAlpha("#4d8dff", 15)).toBe("rgba(77,141,255,0.15)");
     expect(withAlpha("#000000", 0)).toBe("rgba(0,0,0,0)");
     expect(withAlpha("#FFFFFF", 100)).toBe("rgba(255,255,255,1)");
+    expect(withAlpha("#ffffff", 150)).toBe("rgba(255,255,255,1)");
+    expect(withAlpha("#ffffff", -20)).toBe("rgba(255,255,255,0)");
   });
 
   it("maps the width 1-4 to a text size", () => {
