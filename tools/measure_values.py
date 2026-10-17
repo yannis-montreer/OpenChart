@@ -1,7 +1,10 @@
 """Measure custom indicator values against the design's targets (design 3.8, CI-5), with
 the real worker on synthetic prices in a scratch folder (never your data, never OANDA):
 
-    PYTHONPATH=src python tools/measure_values.py [--runs 30]
+    PYTHONPATH=src python tools/measure_values.py [--runs 30] [--bar-cache on|off]
+
+`--bar-cache off` reads every request's bars from the database, as before the bar cache
+(docs/decisions-bar-cache.md); the two runs give the before and after.
 
 Targets, for a typical script (SMA cross, RSI with bands, Bollinger fill) on 5,000 bars
 plus warmup: compute at most 20 ms in the worker; a request at most 60 ms end to end at
@@ -47,6 +50,12 @@ def p95(xs: list[float]) -> float:
 def main() -> int:
     args = argparse.ArgumentParser()
     args.add_argument("--runs", type=int, default=30)
+    args.add_argument(
+        "--bar-cache",
+        choices=("on", "off"),
+        default="on",
+        help="read bars through the server's bar cache (on, as the server does) or not",
+    )
     opts = args.parse_args()
     folder = Path(tempfile.mkdtemp(prefix="openchart-measure-"))
     try:
@@ -68,6 +77,9 @@ def main() -> int:
         with TestClient(create_app(harness.server)) as c:
             c.server = harness.server
             assert run_setup(c).status_code == 200
+            if opts.bar_cache == "off":
+                c.server.reader.bars = None
+            print(f"bar cache: {opts.bar_cache}")
             end = time.monotonic() + 90
             while c.server.isolation is None:
                 assert time.monotonic() < end, "the worker did not start"
