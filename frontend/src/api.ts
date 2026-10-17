@@ -5,7 +5,7 @@ import type { Closure, TradingHoursJson } from "./drawings/tradingTime";
 import type { SessionMeta } from "./time";
 
 /** The API version this client was written against. */
-export const CLIENT_API_VERSION = 1;
+export const CLIENT_API_VERSION = 2;
 
 export type Price = "mid" | "bid" | "ask";
 
@@ -512,6 +512,10 @@ export type ChartType = "candles" | "bars" | "line" | "area" | "heikin_ashi";
 
 /** One indicator on the chart, as a layout stores it. */
 export interface IndicatorEntry {
+  /** The instance's id on the server's list for the chart (CI-3); a new one is made in the browser. */
+  uid?: string;
+  /** Which namespace `id` is in; left out, the server reads it as it reads an older list. */
+  kind?: IndicatorKind;
   id: string;
   params: IndicatorParams;
   visible: boolean;
@@ -527,7 +531,8 @@ export interface LayoutState {
   theme: "dark" | "light";
   panel_open: boolean;
   panel_view: "watchlist" | "alerts";
-  indicators: IndicatorEntry[];
+  /** Left out when saving: the server copies the chart's own list. Always present in what it answers. */
+  indicators?: IndicatorEntry[];
 }
 
 export interface LayoutSummary {

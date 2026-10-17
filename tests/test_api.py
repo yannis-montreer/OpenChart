@@ -18,6 +18,12 @@ def test_health_and_version(client):
     assert client.get("/api/version").json()["api_version"] == API_VERSION
 
 
+def test_api_version_covers_the_per_chart_indicator_lists():
+    # 2: the indicator list of a chart lives on the server (CI-3), so a page that still keeps
+    # it in the browser has to be told it is older than the server.
+    assert API_VERSION >= 2
+
+
 def test_instruments(client):
     [gold] = client.get("/api/instruments").json()
     assert gold["instrument"] == "XAU_USD" and gold["decimals"] == 3
