@@ -9,7 +9,8 @@ answers the next bar's close (lookahead), `STRICT` refuses any request but one w
 colour #00ff00 on XAU_USD 5m, `WARMUP <n>` declares n bars of warmup, `FILL <folder>` and
 `FILLIDLE <folder>` fill a folder (during the job, or from a thread after it), `MODE` and
 `MODE2` describe other inputs (a choice instead of the width; MODE2 renames a choice),
-`NODESCRIBE` fails to load, `DEEPHEADER` answers a header nested too deep to parse;
+`NODESCRIBE` fails to load, `DEEPHEADER` answers a header nested too deep to parse
+(`DEEPHEADERAFTER`: sends one after its own good answer);
 anything else describes one output and echoes the closes.
 """
 
@@ -80,6 +81,10 @@ DEFINITION_MARKERS = {
         },
     ],
 }
+
+
+_DEEP = b"[" * 100_000 + b"]" * 100_000  # a header nested deeper than JSON parses
+DEEP_FRAME = struct.pack("<I", len(_DEEP)) + _DEEP
 
 
 def with_mode(choices):
@@ -278,12 +283,13 @@ def main():
                     bad = source.split("BAD ", 1)[1].split()[0] if "BAD " in source else ""
                     if bad:
                         head, out = bad_result(bad, head, out, arrays)
-                    if "DEEPHEADER" in source:  # a header nested deeper than JSON parses
-                        body = b"[" * 100_000 + b"]" * 100_000
-                        fout.write(struct.pack("<I", len(body)) + body)
+                    if "DEEPHEADER" in source and "DEEPHEADERAFTER" not in source:
+                        fout.write(DEEP_FRAME)  # instead of its answer
                         fout.flush()
                         continue
         fout.write(encode(head, out))
+        if cmd == "compute" and "DEEPHEADERAFTER" in (sources.get(req.get("hash")) or ""):
+            fout.write(DEEP_FRAME)  # after its own (good) answer: the next job reads it
         fout.flush()
 
 

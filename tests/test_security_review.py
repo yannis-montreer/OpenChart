@@ -1,7 +1,9 @@
-"""Failing test cases for the findings of docs/security-review-custom-indicators.md that
-are not fixed yet. Each is `xfail(strict=True)`: it fails today, and the suite turns red
-as soon as the finding is fixed, so the test must then lose its marker and the review
-its entry. Findings fixed in CI-3's own diff have their tests in test_chart_indicators.py.
+"""The findings of docs/security-review-custom-indicators.md, as tests.
+
+S1, S2, S3 and S5 are fixed (hardening-1) and are plain tests. S6 is documented, not fixed:
+its test is `xfail(strict=True)`, so it fails today and the suite turns red as soon as it is
+fixed, when the marker and the review's "not fixed" note go. Findings fixed in CI-3's own
+diff have their tests in test_chart_indicators.py.
 """
 
 import hashlib
@@ -23,13 +25,11 @@ DEEP = b"[" * 100_000 + b"]" * 100_000
 BARS = {k: np.arange(5, dtype="f8") for k in ("ts", "o", "h", "l", "c", "v")}
 
 
-@pytest.mark.xfail(strict=True, reason="S2: a deeply nested header raises RecursionError")
 def test_s2_a_deeply_nested_header_is_a_protocol_error():
     with pytest.raises(ProtocolError):
         parse_header(DEEP)
 
 
-@pytest.mark.xfail(strict=True, reason="S2: the reader thread dies; the job waits its deadline")
 async def test_s2_a_worker_sending_a_deep_header_fails_the_job_at_once():
     runner = IndicatorRunner(FakeLauncher(), Limits(timeout_s=3))
     await runner.start()
@@ -47,7 +47,6 @@ async def test_s2_a_worker_sending_a_deep_header_fails_the_job_at_once():
         await runner.stop()
 
 
-@pytest.mark.xfail(strict=True, reason="S3: Infinity in params is an OverflowError (500)")
 def test_s3_infinity_in_the_values_params_is_a_400(client):
     r = client.get(
         "/api/indicators/ema",
@@ -56,7 +55,6 @@ def test_s3_infinity_in_the_values_params_is_a_400(client):
     assert r.status_code == 400
 
 
-@pytest.mark.xfail(strict=True, reason="S3: a huge integer for a Float input overflows")
 def test_s3_a_huge_number_for_a_float_input_is_refused_with_a_message():
     with pytest.raises(ValueError):
         Param("x", "float", 1.0).check(10**400)
@@ -103,12 +101,10 @@ async def test_s6_a_script_cannot_answer_for_the_next_request(tmp_path):
         await runner.stop()
 
 
-@pytest.mark.xfail(strict=True, reason="S5: `$` matches before a trailing newline")
 def test_s5_a_custom_id_with_a_trailing_newline_is_not_an_id():
     assert not ID.match("mine\n")
 
 
-@pytest.mark.xfail(strict=True, reason="S1: auto trusts any loopback peer without proxy headers")
 @pytest.mark.parametrize("host", ["myhost.tail1234.ts.net", "203.0.113.7:8000", "evil.test"])
 def test_s1_auto_refuses_a_loopback_peer_that_names_another_host(host):
     """A local forwarder that adds no header (an SSH tunnel, socat, a tunnel agent; to
