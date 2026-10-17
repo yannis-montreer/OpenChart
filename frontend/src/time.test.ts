@@ -73,4 +73,10 @@ describe("formatting", () => {
     expect(formatCountdown(-5)).toBe("00:00");
     expect(formatCountdown(84 * 3600 + 31 * 60)).toBe("3d 12h");
   });
+
+  it("never shows NaN: a missing or infinite remainder reads as no time left", () => {
+    expect(formatCountdown(Number.NaN)).toBe("00:00");
+    expect(formatCountdown(Number.POSITIVE_INFINITY)).toBe("00:00");
+    expect(formatCountdown(Number.NEGATIVE_INFINITY)).toBe("00:00");
+  });
 });
