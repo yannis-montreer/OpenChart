@@ -99,13 +99,18 @@ class Param:
                 raise ValueError(f"must be at most {self.max_length} characters")
             return value
         if t in ("int", "width"):
-            if isinstance(value, bool) or not isinstance(value, int | float) or value != int(value):
+            if isinstance(value, bool) or not isinstance(value, int | float):
                 raise ValueError("must be a whole number")
+            if isinstance(value, float) and (not math.isfinite(value) or value != int(value)):
+                raise ValueError("must be a whole number")  # also NaN and infinities (S3)
             value = int(value)
         elif t == "float":
             if isinstance(value, bool) or not isinstance(value, int | float):
                 raise ValueError("must be a number")
-            value = float(value)
+            try:
+                value = float(value)
+            except OverflowError:  # an integer of hundreds of digits (S3)
+                raise ValueError("must be a finite number") from None
             if not math.isfinite(value):
                 raise ValueError("must be a finite number")
         elif t in ("choice", "source"):

@@ -3,12 +3,12 @@
 Editing needs every one of:
 
 - **the minimum isolation** (`worker/isolation.py`); below it, no setting turns it on;
-- **the setting** (`openchart settings set indicator-editing ...`): `on`, or `auto` with a
-  request from this machine: the TCP peer is loopback (127.0.0.0/8, ::1), the request
-  carries none of the headers a proxy adds, and `behind-proxy` is off. So on the owner's
-  service, which listens on 0.0.0.0 for Tailscale, editing works in the browser on the PC
-  (http://127.0.0.1:8000, the viewer) and not from the phone; in Docker, requests come
-  from the bridge, so `auto` is off;
+- **the setting** `on` (`openchart settings set indicator-editing on`, run on the server's
+  machine). `auto`, the default, never allows it (owner's decision after the security
+  review, S1): it used to mean "from this machine" (a loopback TCP peer and no proxy
+  header), but a local forwarder such as an SSH tunnel makes a remote browser's request
+  arrive from 127.0.0.1 with nothing to tell it apart. `off` never allows it either. With
+  `on`, any logged-in browser may edit, the phone included;
 - **the usual login and same-origin check** (the middleware in `app.py`).
 
 CI-1 shows the result in the catalog; CI-4's write endpoints call `require_editing`.
@@ -16,17 +16,14 @@ CI-1 shows the result in the catalog; CI-4's write endpoints call `require_editi
 
 from __future__ import annotations
 
-import ipaddress
 from dataclasses import dataclass
 
 from fastapi import HTTPException, Request
 
 from openchart.indicators.worker.isolation import Isolation
-from openchart.settings import BEHIND_PROXY, INDICATOR_EDITING, SettingsStore
+from openchart.settings import INDICATOR_EDITING, SettingsStore
 
-# Any of these means a proxy forwarded the request, so its peer says nothing about the
-# browser (`tailscale serve` adds Tailscale-User-Login).
-FORWARDING_HEADERS = ("forwarded", "x-forwarded-for", "x-real-ip", "tailscale-user-login")
+TURN_ON = "openchart settings set indicator-editing on"
 
 
 @dataclass(frozen=True)
@@ -39,47 +36,33 @@ class Editing:
         return {"allowed": self.allowed, "setting": self.setting, "reason": self.reason}
 
 
-def is_loopback(host: str | None) -> bool:
-    if not host:
-        return False
-    try:
-        return ipaddress.ip_address(host.split("%", 1)[0]).is_loopback
-    except ValueError:
-        return False
-
-
 def decide(
     *,
     setting: str,
-    behind_proxy: bool,
     isolation: Isolation | None,
-    peer: str | None,
-    headers: dict[str, str] | object,
+    behind_proxy: bool = False,
+    peer: str | None = None,
+    headers: object = None,
 ) -> Editing:
-    how = "openchart settings set indicator-editing on|auto|off"
+    """The gate. Where the request comes from (`peer`, `headers`, `behind_proxy`) no longer
+    plays a part (S1); the arguments stay so the tests can show that."""
     if isolation is None:
         return Editing(False, setting, "the indicator worker is still starting")
     if not isolation.minimum_met:
         return Editing(
             False, setting, f"this install does not isolate custom code ({isolation.reason})"
         )
-    if setting == "off":
-        return Editing(False, setting, f"turned off on the server ({how})")
     if setting == "on":
         return Editing(True, setting, "turned on on the server")
-    forwarded = [h for h in FORWARDING_HEADERS if headers.get(h) is not None]  # type: ignore[union-attr]
-    if behind_proxy:
-        return Editing(False, setting, "the server is set as behind a proxy (behind-proxy on)")
-    if forwarded:
-        return Editing(False, setting, f"the request came through a proxy ({forwarded[0]})")
-    if not is_loopback(peer):
+    if setting == "off":
         return Editing(
-            False,
-            setting,
-            "only from the browser on the server's own machine (http://127.0.0.1); "
-            f"to allow it from elsewhere: {how}",
+            False, setting, f"turned off on the server; to allow it, run on it: {TURN_ON}"
         )
-    return Editing(True, setting, "from the server's own machine")
+    return Editing(
+        False,
+        setting,
+        f"off by default ({setting}); to allow it, run on the server's machine: {TURN_ON}",
+    )
 
 
 async def editing_for(
@@ -88,13 +71,7 @@ async def editing_for(
     setting = await settings.get(INDICATOR_EDITING, "auto")
     if setting not in ("auto", "on", "off"):
         setting = "off"  # an unreadable value never opens anything
-    return decide(
-        setting=setting,
-        behind_proxy=bool(await settings.get(BEHIND_PROXY, False)),
-        isolation=isolation,
-        peer=request.client.host if request.client else None,
-        headers=request.headers,
-    )
+    return decide(setting=setting, isolation=isolation)
 
 
 async def require_editing(

@@ -48,7 +48,7 @@ from openchart.indicators.worker.runner import IndicatorRunner, ScriptFailed, Wo
 
 log = logging.getLogger(__name__)
 
-ID = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
+ID = re.compile(r"^[a-z][a-z0-9_]{0,39}\Z")  # \Z, not $: `$` also matches before a newline
 QUARANTINE_AFTER = 3
 WORKER_WAIT = 90.0  # seconds a request waits for the worker's first start
 ERROR_CACHE_SIZE = 256  # a script's own errors kept, by script, parameters and bars
@@ -119,7 +119,12 @@ class CustomDefinition:
     line: int | None = None
     indicator: Indicator | None = None
     failures: int = 0  # crashes, timeouts and memory limits in a row
+    error: dict[str, Any] | None = None  # the last problem: {type, message, line, traceback}
     checks: dict[str, dict[str, Any]] = field(default_factory=dict)  # by settings, this version
+    # Settings whose check had too few bars for a check run: a request with at least twice
+    # as many bars checks them again (Session A's review: the first request after an edit
+    # is often the browser's two-bar refresh).
+    short: set[str] = field(default_factory=set)
 
     @property
     def file(self) -> str:
@@ -148,6 +153,7 @@ class CustomIndicators:
         self.isolation: Isolation | None = None  # None while the worker starts
         self._ready = asyncio.Event()
         self._defs: dict[str, CustomDefinition] = {}
+        self._file_locks: dict[str, asyncio.Lock] = {}
         self._scan = asyncio.Lock()
         # A script's own errors, by (hash, params, bars), and slow ones by (hash, params).
         self._errors: OrderedDict[tuple[str, str, str], ScriptFailed] = OrderedDict()
@@ -185,6 +191,16 @@ class CustomIndicators:
             for stem, path in files.items():
                 await self._update(stem, path)
             return [self._defs[s] for s in sorted(self._defs)]
+
+    def file_lock(self, indicator_id: str) -> asyncio.Lock:
+        """The lock every write of `<id>.py` holds (the editor's endpoints, delete), so a
+        delete never runs in the middle of a save of the same file."""
+        return self._file_locks.setdefault(indicator_id, asyncio.Lock())
+
+    def forget(self, indicator_id: str) -> None:
+        """Drop what is known of a file, so the next read describes it again: after a
+        write through the API, whatever its modification time and size say."""
+        self._defs.pop(indicator_id, None)
 
     async def get(self, indicator_id: str) -> CustomDefinition | None:
         """One definition, read again if its file changed."""
@@ -238,7 +254,7 @@ class CustomIndicators:
         try:
             schema = await self.runner.describe(d.digest, d.file, d.source)
             d.indicator = indicator_from_json(d.id, schema, d.file)
-            d.status, d.reason, d.line = "ok", None, None
+            d.status, d.reason, d.line, d.error = "ok", None, None, None
         except ScriptFailed as exc:
             self._failed(d, exc)
         except WorkerUnavailable as exc:
@@ -248,6 +264,12 @@ class CustomIndicators:
 
     def _failed(self, d: CustomDefinition, exc: ScriptFailed) -> None:
         d.line = exc.info.get("line")
+        d.error = {
+            "type": exc.info.get("type") or exc.kind,
+            "message": exc.info.get("message") or exc.summary,
+            "line": exc.info.get("line"),
+            "traceback": exc.info.get("traceback") or "",
+        }
         if exc.counts_for_quarantine:
             d.failures += 1
             if d.failures >= QUARANTINE_AFTER:
@@ -357,9 +379,17 @@ class CustomIndicators:
 
     def _want_check(self, d, params, info, bars, series, warmup, run_s) -> None:
         key = _settings_key(params)
-        if key in d.checks or len(d.checks) >= CHECK_SETTINGS or len(self._pending) >= CHECK_QUEUE:
-            return
         n = len(bars["ts"])
+        if len(self._pending) >= CHECK_QUEUE:
+            return
+        if key in d.checks:
+            old = d.checks[key]
+            settled = "pending" not in (old["lookahead"], old["warmup"])
+            if not (key in d.short and settled and n >= 2 * old["bars"]):
+                return
+            d.short.discard(key)  # checked again on these bars, in place of the short one
+        elif len(d.checks) >= CHECK_SETTINGS:
+            return
         result = {
             "version": d.digest[:12],
             "params": params,
@@ -444,6 +474,8 @@ class CustomIndicators:
             )
             return False
 
+        if plan.cut is None or plan.start is None:  # too few bars for one of the runs
+            d.short.add(_settings_key(job.params))
         if plan.cut is None:
             result["lookahead"] = "skipped"
             findings.append(_checks.note("lookahead", plan.lookahead_skip or ""))

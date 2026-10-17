@@ -152,7 +152,7 @@ A chart is a source and an instrument (the source is `provider` in `GET /api/sta
 |---|---|
 | `GET /api/charts/{source}/{instrument}/indicators` | `{source, instrument, revision, indicators}` |
 | `PUT /api/charts/{source}/{instrument}/indicators` | `{indicators, revision?}`: the whole list, in legend order → the chart as `GET` answers it |
-| `POST /api/charts/{source}/{instrument}/indicators/import` | `{indicators}`: a browser's list from before (its `localStorage`) → the chart plus `skipped` |
+| `POST /api/charts/{source}/{instrument}/indicators/import` | `{indicators}`: a browser's list from before (its `localStorage`) → the chart plus `skipped` and `imported` |
 
 - **An instance:** `{uid, kind, id, params, visible, price_labels, legend_values}`.
   - `uid`: the instance's stable id (letters, digits, `_` and `-`, at most 40); a new one is given when it is left out.
@@ -163,7 +163,7 @@ A chart is a source and an instrument (the source is `provider` in `GET /api/sta
 - **A refused body is a `422`** with FastAPI's usual `detail` list; a `NaN` or an infinity in the input it echoes is sent as text (`"nan"`), since JSON cannot carry it (that was a 500 before, for every route).
 - **Validation:** `PUT` stores the values complete (every input, defaults for those not given). An unknown definition, a `uid` used twice or a value its input does not accept is a `400`; values outside the bounds above, NaN or infinities are a `422`. A value for an input the definition does not have (removed, or never there) is dropped and listed in `reset`. An instance of a file of yours that does not load at the moment keeps its values as given; they are checked once it loads again.
 - **"Settings reset":** when the definition was edited after the values were stored (an input removed, a choice renamed, a range narrowed), `GET` answers those inputs with their defaults and lists them in `reset`, without changing what is stored (editing the file back brings the values back). The next write stores the list as it now fits; its answer and broadcast carry the note once.
-- **Import:** accepted only for a chart whose list was never set (`revision` 0), also not after it was set to an empty list: `409` `{detail: {message, chart}}` otherwise. The list is read entry by entry (at most 200): entries that are not an instance, hold a value that cannot be kept, have no definition any more, or come after the first 30 are left out and listed in `skipped` (`[{id, kind, reason}]`), the rest is imported; values that no longer fit fall back to their defaults with the note.
+- **Import:** accepted only for a chart whose list was never set (`revision` 0), also not after it was set to an empty list: `409` `{detail: {message, chart}}` otherwise. **A list that brings nothing** (empty, or nothing usable in it) changes nothing: `200` with `imported: false` and `revision` still 0, so another browser's real list can still come. The list is read entry by entry (at most 200): entries that are not an instance, hold a value that cannot be kept, have no definition any more, or come after the first 30 are left out and listed in `skipped` (`[{id, kind, reason}]`), the rest is imported; values that no longer fit fall back to their defaults with the note.
 - Every change is sent to all connected browsers as a websocket `chart_indicators_changed` message.
 
 ## Your indicator definitions
@@ -230,7 +230,9 @@ Everything under `/api/custom-indicators` answers **`403`** `{detail: "Editing c
 - `404` for an id that is not one of your files.
 - **In use:** `DELETE` answers `409` `{detail: {message, usage}}`, the message as the confirmation shows it (`"SMA cross" is on 2 charts (EUR_USD, XAU_USD) and in 1 saved layout ("Gold H1"). Deleting it removes it from all of them.`). `?confirm=true` removes its instances from every chart and saved layout first (`chart_indicators_changed` for each chart, `layouts_changed`), then moves the files. Only custom instances count and go: a built-in indicator with the same id is untouched, and a layout entry saved without a `kind` counts only when no built-in has that id.
 - `409` without any change when `.deleted` or `.history/<id>` is not a plain folder inside yours (a file, or a link elsewhere).
-- After a delete, every page gets `indicators_changed` (fetch the catalog again).
+- After a delete, every page gets `indicators_changed` `{id, op: "delete"}` (fetch the catalog again).
+
+**Errors, all routes:** `400` a malformed body or id; `403` editing not allowed (the reason in `detail`); `404` no such file, version or template; `409` the id exists (`suggested`), the file changed since `base_version` (`version`), a name that is not a plain file, a `TITLE` line Rename cannot edit, a definition in use (`usage`); `413` a source over 256 KB; `422` a preview that fails, or a refused body (FastAPI's `detail` list); `503` the worker is not running (preview only: saves never need the worker to store the file).
 
 **Errors, all routes:** `400` a malformed body or id; `403` editing not allowed (the reason in `detail`); `404` no such file, version or template; `409` the id exists (`suggested`), the file changed since `base_version` (`version`), a name that is not a plain file, a `TITLE` line Rename cannot edit, a definition in use (`usage`); `413` a source over 256 KB; `422` a preview that fails, or a refused body (FastAPI's `detail` list); `503` the worker is not running (preview only: saves never need the worker to store the file).
 

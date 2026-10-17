@@ -41,7 +41,7 @@ SECRET_NAMES = ("oanda_token", "telegram_token")
 # Set on the server's own machine only, with `openchart settings set` (decision D2): no
 # HTTP endpoint can change them. Read on every request, so no restart is needed.
 INDICATOR_EDITING = "indicator_editing"  # auto | on | off: editing custom code in a browser
-BEHIND_PROXY = "behind_proxy"  # a reverse proxy in front: "auto" then means off
+BEHIND_PROXY = "behind_proxy"  # kept, but no effect since S1: "auto" is always off now
 EDITING_VALUES = ("auto", "on", "off")
 _TRUE, _FALSE = ("on", "true", "yes", "1"), ("off", "false", "no", "0")
 

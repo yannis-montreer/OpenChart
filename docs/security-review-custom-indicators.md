@@ -21,15 +21,15 @@ the next step (CI-4) must not make worse.
 
 | | Severity | Finding | Proof |
 |---|---|---|---|
-| S1 | medium | `auto` editing trusts any loopback peer without proxy headers | test |
-| S2 | low | a deeply nested header from the worker kills the server's reader thread | 2 tests |
-| S3 | low | non-finite or huge numbers in `params` are a 500 | 2 tests |
-| S4 | low | the server reads up to 256 MB of arrays per answer before checking them | code |
-| S5 | info | `$` in the id patterns accepts a trailing newline | test |
-| S6 | low | a script can write frames to the protocol stream; the next request gets them | test (real worker) |
-| S7 | info | definition files are read through links; a syntax error echoes a line | code |
-| S8 | info | no probe that the worker cannot write into the indicators folder | code |
-| S9 | info | Windows: `mine` finds `Mine.py` | code |
+| S1 | medium | `auto` editing trusts any loopback peer without proxy headers | **fixed** (hardening-1) |
+| S2 | low | a deeply nested header from the worker kills the server's reader thread | **fixed** (hardening-1) |
+| S3 | low | non-finite or huge numbers in `params` are a 500 | **fixed** (hardening-1) |
+| S4 | low | the server reads up to 256 MB of arrays per answer before checking them | documented (for CI-5) |
+| S5 | info | `$` in the id patterns accepts a trailing newline | **fixed** (hardening-1) |
+| S6 | low | a script can write frames to the protocol stream; the next request gets them | **fixed** in CI-4 (request ids); still not isolated from each other |
+| S7 | info | definition files are read through links; a syntax error echoes a line | CI-4's endpoints refuse links; the catalog's listing still follows them |
+| S8 | info | no probe that the worker cannot write into the indicators folder | documented |
+| S9 | info | Windows: `mine` finds `Mine.py` | CI-4 creates lowercase names only; reading by hand-made names unchanged |
 | C1 to C5 | fixed | found in CI-3's own diff (races, lax types, the import, the NaN 500) | tests |
 
 ## Findings
@@ -232,3 +232,68 @@ this change"), shown failing on `43ead31` first; details in `docs/decisions.md`.
   (the listing is not recursive).
 - **The browser:** no `innerHTML` in `frontend/src`, so a script's error text is shown
   as text.
+
+## After the review: what was fixed, what is documented only (2026-10-17)
+
+The owner's decisions on the plan. **Fixed** in branch `hardening-1`, each with a test that
+failed first (`tests/test_hardening.py`, `tests/test_editing.py`, and the plain tests above
+that were `xfail` before):
+
+- **S1:** `auto` never allows browser editing; `on`, set on the server's machine with
+  `openchart settings set indicator-editing on`, is required, and still needs the minimum
+  isolation. Where a request comes from no longer plays a part. The catalog's `editing`
+  says so, with the command. `behind-proxy` is kept but changes nothing.
+- **S2:** a header nested too deeply is a protocol error; the reader kills the worker at
+  once and the job fails at once as `protocol` (no wait for the deadline). It counts toward
+  the quarantine only when no other script had run in that worker, so a script that breaks
+  the stream after its own answer, during another script's job, cannot get that other
+  definition quarantined; one that breaks it in its own job is quarantined after three, as
+  before (each bad frame replaces the worker, so its next try runs alone).
+- **S3:** NaN, infinities and integers too large for a float are refused by the input with
+  its message (400), not a 500. With Session A's finding: `from`, `to` (at most 2**53 either
+  way) and `limit` (at most 2**31) out of range are a 422 on `/api/candles` and the values
+  route, not a 500.
+- **S5:** the id patterns end in `\Z`, so a trailing newline is not part of an id.
+
+**Documented only**, with the reason:
+
+- **S4 (memory per answer):** the fix belongs with CI-5's runner work: refuse a header whose
+  arrays are not exactly the request's bars times its outputs, before reading any of them.
+- **S6 (frames written by a script), in plain words: your custom indicators are not
+  isolated from each other.** They run in one worker process; one of them can change what
+  another shows, slow it down or make it fail. The isolation is between them and your data,
+  tokens and network. Request ids on the protocol (CI-4) will at least make a forged answer
+  fail loudly; separate workers per indicator would cost a worker each and are not planned.
+- **S7 (links), S9 (case):** constraints for CI-4's write endpoints, listed under CI-4 in
+  `docs/roadmap.md`: plain files only, created from the id in lowercase, compared exactly.
+- **S8 (no write probe on the indicators folder):** the AppContainer has no grant there and
+  the sidecar does not mount it; a probe needs the AppContainer and sidecar CI runs to
+  prove it, so it goes with CI-4, when the folder becomes the editor's store.
+- **Session A's finding 4, the change stamp `(mtime_ns, size)`:** two edits of the same
+  size within the file system's timestamp resolution are not seen until the next change.
+  NTFS (100 ns) and ext4 (1 ns) make that practically impossible; FAT and exFAT (2 s) do
+  not. **A Docker bind mount of a Windows folder** (Docker Desktop, WSL 2) is expected to
+  pass NTFS's times through, but this is **not verified** (it needs an image pull, which
+  the owner declined). Saves from the browser editor (CI-4) go through the server, which can
+  drop its cached copy directly, so the gap is only for edits made in a text editor on the
+  Windows side; a content hash on every catalog read would close it at the cost of reading
+  each file every time.
+- **Session A's review of #33, the non-atomic delete,** and **the empty-import rule** were
+  fixed in `hardening-1` too: the delete moves the files first and puts everything back if
+  a move or the database step fails; an import that brings nothing does not use up the
+  chart's one import.
+
+## CI-4 (2026-10-17)
+
+- **S6:** every request to the worker carries an id (`rid`) its answer must echo
+  (`worker/child.py`, `Worker.handle`); the runner refuses any other answer as a protocol
+  error and replaces the worker. A frame a script writes on the stream now fails that
+  script's own job loudly instead of answering the next request
+  (`test_s6_a_script_cannot_answer_for_the_next_request`, a plain test now). **The
+  scripts are still not isolated from each other:** a script can find the current id in
+  its own process (the worker's frames are on its stack) and forge an answer with it, or
+  change shared modules; the id makes the honest-mistake and the simple attack fail
+  loudly, nothing more.
+- **S7, S9:** the editor's endpoints read and write `<id>.py` only as a plain file (no
+  link, junction or hard link) and create lowercase names from ids; the catalog's listing
+  of files placed by hand is unchanged (it still reads through a link a person made).

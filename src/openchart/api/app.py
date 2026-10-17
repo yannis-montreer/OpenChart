@@ -31,6 +31,7 @@ from openchart.api.routes_account import account_routes, client_host
 from openchart.api.routes_alerts import alert_routes
 from openchart.api.routes_charts import chart_routes
 from openchart.api.routes_custom_indicators import custom_routes
+from openchart.api.routes_definitions import definition_routes
 from openchart.api.routes_drawings import drawing_routes
 from openchart.api.routes_indicators import indicator_routes
 from openchart.api.routes_layouts import layout_routes
@@ -134,6 +135,7 @@ def create_app(server: Server) -> FastAPI:
     app.include_router(indicator_routes(server))
     app.include_router(chart_routes(server, charts))
     app.include_router(custom_routes(server, charts))
+    app.include_router(definition_routes(server, charts))
     app.include_router(layout_routes(server, charts))
 
     @app.get("/api/health")
@@ -190,9 +192,11 @@ def create_app(server: Server) -> FastAPI:
         instrument: str,
         timeframe: str = "1m",
         price: str = "mid",
-        from_: int | None = Query(None, alias="from"),
-        to: int | None = None,
-        limit: int | None = Query(None, ge=1),
+        # Times as UTC epoch seconds, bounded so SQLite can take them (beyond 64 bits it
+        # cannot: a 500 before); 2**53 is the largest a browser holds exactly.
+        from_: int | None = Query(None, alias="from", ge=-(2**53), le=2**53),
+        to: int | None = Query(None, ge=-(2**53), le=2**53),
+        limit: int | None = Query(None, ge=1, le=2**31),
         forming: bool = True,
     ) -> dict[str, Any]:
         tf = _timeframe(timeframe)

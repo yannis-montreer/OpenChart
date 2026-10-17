@@ -22,7 +22,7 @@ from openchart.indicators._base import Indicator, SchemaError, validate_schema
 
 log = logging.getLogger(__name__)
 
-_ID = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
+_ID = re.compile(r"^[a-z][a-z0-9_]{0,39}\Z")  # \Z, not $: `$` also matches before a newline
 BUILTIN_DIR = Path(package.__file__).resolve().parent
 
 
