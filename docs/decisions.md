@@ -820,18 +820,6 @@ the old key goes once every enabled chart has a list, and a toast says the old l
   cannot be drawn; the picker keeps saying so. A toast appears for every change another browser makes
   (4 seconds); it is cheap to remove if it is too much.
 
-## CI-4: the API contract, before the code (2026-10-17)
-
-`docs/api.md`, "Your indicator definitions": the write endpoints of design section 4, written first so the editor (Session A) can be built against them. Choices made here, for review:
-
-- **Templates:** `blank` plus the four tested examples of docs/custom-indicators.md, shipped in the package; New takes a template id and an optional title.
-- **Import never overwrites:** an existing id is a `409` with a `suggested` free id; without an id it is made from the file name.
-- **Save never creates** (`404`; New and Import create), keeps the last 10 versions in `.history/<id>/`, and takes an optional `base_version` so two tabs (or the editor and a text editor) cannot overwrite each other silently: `409` with the stored version.
-- **Restore is a save** (undoable); Rename edits the single `TITLE = "..."` line or answers `409` "edit TITLE in the code" (design 1.1).
-- **Preview stores and counts nothing:** no file, no history, no quarantine count, no save-time checks; same query and bars as the values route.
-- **Sources:** 256 KB as UTF-8, NUL and lone surrogates refused, a leading BOM dropped, line endings kept; writes atomic (temporary file and rename) and serialized per id; plain files only, never through a link.
-- **`indicators_changed`** gains `{id, op}` (compatible: pages that ignore the fields still refetch).
-
 ## Hardening after the security review (2026-10-17)
 
 The owner approved the plan in `docs/security-review-custom-indicators.md` ("After the review"): S1, S2, S3, S5, Session A's findings 1 to 3 of CI-2 (b)-(d), the non-atomic delete and the empty import are fixed; S4, S6, S7, S8, S9 and the change stamp are documented. Tests first: 27 failed against main before the code (each on its own assertion); three passed already and the mutation check shows they bite (the database-failure delete, which today's order happened to survive, and two guards: no rerun for a few more bars, times in range still accepted).
@@ -873,3 +861,19 @@ The contract of #37, implemented (`api/routes_definitions.py`, `indicators/_file
 - **Not done here:** an `API_VERSION` bump (it is 2 since #38, Session A's server-side lists; the frontend session decides when its editor needs another), the Settings display of the gate (frontend).
 - **Review of this change (finding 1, test first):** a delete did not wait for a save of the same file, so a save paused between keeping its history version and writing the file wrote it again after the delete had moved it (the test held the save there and showed the file back). Every write of `<id>.py`, the delete included, now holds the file's own lock (`CustomIndicators.file_lock`); the delete takes the charts' lock first, the editor's endpoints only the file lock, so no two locks are ever taken in the other order.
 - **Mutation check** (`tools/mutate_definitions.py`, 36 mutants: ids and device names, the import's id, BOM, NUL, size in bytes, links, junctions, hard links, plain files, the history folder, New never overwriting, `base_version`, the history kept, ten versions, the atomic write, a failed save's version, version order, the TITLE rules, `(copy)`, the gate on four kinds of routes, serialized saves, Preview's check of the answer, request ids three ways): **34 killed, 2 equivalent** (the history-inside check, which a link check before it already covers; and reading the file again after a write, which NTFS's changed time already forces). Two mutants needed repair first: "BOM kept" left an indentation error (it was "killed by an error", which proves nothing) and "New overwrites" no longer matched the reformatted code; both then killed by their tests.
+
+## CI-4 frontend: the editor (2026-10-17, draft, depends on #37)
+
+Plan: `docs/ci4-frontend-plan.md` (#39). Built against the contract's text with a mock server (`frontend/src/editor/mockServer.ts`, written from `docs/api.md`, not from the client); **not yet run against Session B's backend**, which was not on GitHub.
+
+- **CodeMirror 6** (Python mode) is in as exact-pinned MIT dependencies, its own chunk (368 KB, 124 KB gzip), fetched on the first Edit, New or Import and never at page start. If the chunk does not load, a plain `<textarea>` with the same Save and Run is used and the status line says so. `packaging/third_party_licenses.py` lists its packages, and a test fails when a runtime package of the page is missing from that list.
+- **The server's file is the truth.** The editor opens on it; a draft in `localStorage` (per id, with the version it started from) is offered only while the stored version is that one, then "Restore draft" or "Discard". Closing or leaving with unsaved text asks first.
+- **Saves carry `base_version`.** A file changed elsewhere is a conflict the user settles ("Reload it" or "Keep mine and save", which sends no `base_version`; the replaced text goes into the history). A deleted file keeps the buffer and offers "Save as <id>.py" through Import, which never overwrites.
+- **Run** draws a dashed "Preview:" instance that is never on the chart's list, never saved to a layout, not refreshed live; it is fetched again with the text that was run when the chart's bars change. Only the newest Run counts; an older answer or error that arrives late is dropped. The first Run asks twice (the first answer gives the schema).
+- **Everything the server or the code says** (titles, messages, tracebacks) is set as text only. The only links are "line N" buttons that move the cursor, and only for lines that exist.
+- **Limits checked before any request:** ids `[a-z][a-z0-9_]{0,39}`, 256 KB as UTF-8 bytes, NUL and lone surrogates, titles of 1 to 60 characters on one line, imports only `.py` files.
+- **Editing off:** the picker and panel show the server's reason once; New, Import, Edit, Rename, Duplicate and Export are locked (focusable, with the reason as tooltip); the panel is read-only. A 403 after the page thought editing was on turns it off the same way.
+- **Docking:** on a desktop the panel takes the watchlist's column while open; on a phone it fills the screen, with a button that folds it to a bar so the preview can be seen.
+- **After a save**, `indicators_changed {id, op}` re-reads the catalog, tells the open editor, and `ChartSync.refreshStatuses` re-reads the chart's list: a file that now fails (or loads again) shows at the same revision (the follow-up noted in #38).
+- **Checked:** unit tests (rules, errors, drafts, forms, the session against the mock, picker actions, API client against the mock, `refreshStatuses`); a mutation check of those modules (67 mutants of the rules, errors, drafts, forms, session, picker model, preview plan, API paths and `refreshStatuses`: 64 killed at first, the 3 that survived got tests and are killed); a browser pass on a scratch server with the fake broker, both themes (31 of 31 checks each), a phone width and the text-box fallback. Not done: a run against Session B's real backend, and the unit-less parts of the panel's DOM (covered by the browser pass only).
+- **For Session B:** (1) a chart save that still holds an instance whose definition is gone is a 400 in CI-3; saving should tolerate it (keep it with status `missing`) or drop it and say which; (2) every page of a preview sends the whole source again; a source id in the request would avoid that; (3) CI-3's delete broadcasts `indicators_changed` without `id`, which the editor handles by re-reading its file.

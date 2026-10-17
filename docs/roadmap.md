@@ -57,6 +57,7 @@ In the owner's order. Each item is one branch from main and stops for review.
        - **plain files only** (S7): create with an exclusive open, never through or onto a link, junction or folder; the listing skips links;
        - **lowercase ids that match the whole pattern** (S5, S9): file names are created from the id, so `Mine.py` cannot be made, and a lookup compares the listed name exactly (Windows is case-insensitive);
        - **writes atomic** (temporary file in the folder, then a rename), 256 KB cap, nothing outside the indicators folder, `.history/` and `.deleted/`.
+     - Frontend: plan #39, editor #42 (draft, built against a mock of the contract; Session B's backend is still to be built and tried with it).
    - **CI-5** (1 to 1.5 days): the cache and forming-bar updates, measured against the design's targets.
 2. **Storage steps 2 and later**, as decided:
    - **tick retention:** 30 days by default (7/30/90 days, 1 year, forever, off);

@@ -35,7 +35,33 @@ const STATE_LABELS: Partial<Record<RowState, string>> = {
   shadowed: "id taken",
 };
 
-function pickerRow(row: PickerRow, onPick: (def: IndicatorDef) => void, close: () => void, onDelete: (row: PickerRow) => void): HTMLElement {
+/** What the list can do with your own files (CI-4); left out, the list only adds and deletes. */
+export interface DefinitionHandlers {
+  edit: (id: string) => void;
+  create: () => void;
+  import: () => void;
+  rename: (id: string, title: string) => void;
+  duplicate: (id: string, title: string) => void;
+  export: (id: string) => void;
+}
+
+/** A button that stays focusable when it cannot be used, so its tooltip can say why. */
+function gated(label: string, gate: { allowed: boolean; reason: string | null }, ic: Parameters<typeof button>[0]["icon"], run: () => void, cls = ""): HTMLButtonElement {
+  const b = button({ icon: ic, title: gate.allowed ? label : `${label} is not available: ${gate.reason}`, class: `${cls}${gate.allowed ? "" : " ind-locked"}` });
+  if (!gate.allowed) b.setAttribute("aria-disabled", "true");
+  b.addEventListener("click", () => {
+    if (gate.allowed) run();
+  });
+  return b;
+}
+
+function pickerRow(
+  row: PickerRow,
+  onPick: (def: IndicatorDef) => void,
+  close: () => void,
+  onDelete: (row: PickerRow) => void,
+  defs?: DefinitionHandlers,
+): HTMLElement {
   const lead = icon(row.addable ? "indicators" : "warn", 16);
   const head = h(
     "span",
@@ -59,6 +85,39 @@ function pickerRow(row: PickerRow, onPick: (def: IndicatorDef) => void, close: (
     main = h("div", { class: "ind-item ind-disabled", role: "option", "aria-disabled": "true" }, lead, text, where);
   }
   const wrap = h("div", { class: "ind-row" }, main);
+  if (defs && row.actions) {
+    const a = row.actions;
+    const more = button({ icon: "more", title: `More for ${row.title}`, class: "ind-more" });
+    more.addEventListener("click", () =>
+      showMenu(
+        more,
+        h(
+          "div",
+          { style: "min-width:190px" },
+          ...[
+            ["Rename…", "pencil", a.rename, () => defs.rename(row.id, row.title)],
+            ["Duplicate…", "copy", a.duplicate, () => defs.duplicate(row.id, row.title)],
+            ["Export (.py)", "save", a.export, () => defs.export(row.id)],
+          ].map(([label, ic, gate, run]) => {
+            const g = gate as { allowed: boolean; reason: string | null };
+            const item = menuItem({ label: label as string, icon: ic as "pencil", onClick: g.allowed ? (run as () => void) : undefined });
+            if (!g.allowed) {
+              item.setAttribute("aria-disabled", "true");
+              item.setAttribute("data-tip", `Not available: ${g.reason}`);
+            }
+            return item;
+          }),
+        ),
+      ),
+    );
+    wrap.append(
+      gated(`Edit ${row.title}`, a.edit, "pencil", () => {
+        close();
+        defs.edit(row.id);
+      }, "ind-edit"),
+      more,
+    );
+  }
   if (row.canDelete) {
     const gate = row.canDelete;
     const del = button({
@@ -83,6 +142,8 @@ export function openIndicatorPicker(opts: {
   reload?: () => Promise<IndicatorCatalog>;
   /** A definition of yours was deleted: charts that still show it should drop it. */
   onDeleted?: (id: string) => void;
+  /** Edit, New, Import, Rename, Duplicate and Export (CI-4). */
+  definitions?: DefinitionHandlers;
 }): void {
   const { box, close } = modal("ind-picker", "Indicators", () => {});
   let catalog = opts.catalog;
@@ -109,18 +170,41 @@ export function openIndicatorPicker(opts: {
     for (const s of model.sections) {
       nodes.push(h("div", { class: "ind-section-head" }, s.heading));
       for (const n of s.notices) nodes.push(h("div", { class: "ind-error ind-notice" }, icon("warn", 14), h("span", {}, n)));
-      for (const r of s.rows) nodes.push(pickerRow(r, opts.onPick, close, onDelete));
+      if (opts.definitions && s.editNote) nodes.push(h("div", { class: "ind-error ind-notice" }, icon("warn", 14), h("span", {}, s.editNote)));
+      for (const r of s.rows) nodes.push(pickerRow(r, opts.onPick, close, onDelete, opts.definitions));
       if (s.hint) nodes.push(h("div", { class: "panel-empty" }, s.hint));
     }
     if (model.empty) nodes.push(h("div", { class: "panel-empty" }, model.empty));
     list.replaceChildren(...nodes);
   };
+  const defs = opts.definitions;
+  const tools = defs
+    ? h(
+        "div",
+        { class: "ind-tools" },
+        h("span", { class: "ind-tools-label" }, "Your files"),
+        ...[
+          ["New", "plus", () => defs.create()],
+          ["Import", "save", () => defs.import()],
+        ].map(([label, ic, run]) => {
+          const g = pickerModel(catalog, "").create;
+          const b = gated(`${label as string} indicator`, g, ic as "plus", () => {
+            close();
+            (run as () => void)();
+          }, "ind-tool");
+          b.append(h("span", {}, label as string));
+          b.classList.remove("icon-only");
+          return b;
+        }),
+      )
+    : null;
   search.addEventListener("input", render);
   search.addEventListener("keydown", (ev) => {
     if (ev.key === "Enter") (list.querySelector("button.ind-item") as HTMLButtonElement | null)?.click();
   });
   box.append(
     h("div", { class: "ind-search" }, icon("search", 16), search),
+    ...(tools ? [tools] : []),
     list,
     h(
       "div",

@@ -1,0 +1,399 @@
+/* The indicator editor (CI-4): the panel docked on the right, its notices and error panel, the
+   list's New / Import / Edit controls, and the dashed preview in the legend. Colours are the
+   page's tokens, so both themes use the same rules. */
+
+/* Docked: the editor takes the watchlist's column while it is open. */
+
+#app.editing-code .side-panel {
+  display: none;
+}
+.editor-panel {
+  grid-column: 3;
+  grid-row: 2 / 4;
+  width: clamp(380px, 42vw, 680px);
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  color: var(--text);
+  outline: none;
+}
+
+.ed-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+}
+.ed-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 140px;
+}
+.ed-title {
+  color: var(--text-strong);
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ed-file {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.ed-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.ed-actions .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 10px;
+}
+.ed-actions .btn.icon-only {
+  padding: 0;
+  width: 28px;
+  justify-content: center;
+}
+.ed-actions [aria-disabled="true"],
+.ed-notice-btn[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.ed-run.busy svg,
+.ed-save.busy svg {
+  animation: ed-pulse 0.9s ease-in-out infinite;
+}
+@keyframes ed-pulse {
+  50% {
+    opacity: 0.3;
+  }
+}
+.ed-peek {
+  display: none !important;
+}
+
+/* Notices: editing off, a draft, a change elsewhere, a deleted file */
+
+.ed-notices:empty {
+  display: none;
+}
+.ed-notice {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  padding: 7px 10px;
+  font-size: 12px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--warn) 12%, var(--panel));
+  border-bottom: 1px solid var(--line);
+}
+.ed-notice svg {
+  color: var(--warn);
+  flex: none;
+}
+.ed-notice-text {
+  flex: 1 1 200px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.ed-notice-btn {
+  height: 24px;
+  padding: 0 9px;
+  font-size: 12px;
+}
+
+/* The text and the versions beside it */
+
+.ed-body {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+}
+.ed-host {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 120px;
+  display: flex;
+  flex-direction: column;
+  background: var(--chart);
+}
+.ed-host .cm-editor {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.ed-loading {
+  padding: 16px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.ed-textarea {
+  flex: 1 1 auto;
+  width: 100%;
+  resize: none;
+  border: 0;
+  padding: 8px 10px;
+  background: var(--chart);
+  color: var(--text);
+  font: 13px/1.5 ui-monospace, "Cascadia Mono", Consolas, "SF Mono", Menlo, monospace;
+  tab-size: 4;
+  white-space: pre;
+  overflow: auto;
+}
+.ed-textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.ed-versions {
+  flex: 0 0 min(250px, 46%);
+  overflow-y: auto;
+  border-left: 1px solid var(--line);
+  background: var(--panel);
+  font-size: 12px;
+}
+.ed-versions[hidden] {
+  display: none;
+}
+.ed-versions .al-note {
+  padding: 10px;
+}
+.ed-versions-head {
+  padding: 8px 10px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 11px;
+}
+.ed-version {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border-top: 1px solid var(--line);
+}
+.ed-version.current {
+  background: var(--accent-soft);
+}
+.ed-version-when {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.ed-version-size {
+  color: var(--muted);
+}
+.ed-version .btn {
+  height: 22px;
+  padding: 0 8px;
+  font-size: 11px;
+}
+.ed-viewbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  padding: 6px 10px;
+  font-size: 12px;
+  background: var(--accent-soft);
+  border-bottom: 1px solid var(--line);
+}
+.ed-viewbar[hidden] {
+  display: none;
+}
+.ed-viewbar span {
+  flex: 1 1 180px;
+}
+.ed-viewbar .btn {
+  height: 24px;
+  padding: 0 9px;
+  font-size: 12px;
+}
+.ed-viewbar [aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* The error panel: the type and message, "line N" buttons, the traceback */
+
+.ed-problems {
+  flex: 0 1 auto;
+  max-height: 34%;
+  overflow: auto;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+}
+.ed-problems[hidden] {
+  display: none;
+}
+.ed-error,
+.ed-finding {
+  display: flex;
+  gap: 8px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--line);
+}
+.ed-error {
+  background: color-mix(in srgb, var(--down) 10%, var(--panel));
+}
+.ed-error svg {
+  color: var(--down);
+  flex: none;
+  margin-top: 2px;
+}
+.ed-finding svg {
+  flex: none;
+  margin-top: 2px;
+  color: var(--faint);
+}
+.ed-finding.warning svg {
+  color: var(--warn);
+}
+.ed-error-body {
+  min-width: 0;
+}
+.ed-error-head {
+  overflow-wrap: anywhere;
+}
+.ed-trace {
+  margin: 4px 0 0;
+  font: 12px/1.45 ui-monospace, "Cascadia Mono", Consolas, "SF Mono", Menlo, monospace;
+  color: var(--muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ed-line {
+  border: 0;
+  padding: 0;
+  background: none;
+  font: inherit;
+  color: var(--accent);
+  text-decoration: underline;
+  cursor: pointer;
+}
+.ed-line:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: 2px;
+}
+
+.ed-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 5px 10px;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--muted);
+}
+.ed-status {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.ed-status.warn {
+  color: var(--warn);
+}
+.ed-size.near {
+  color: var(--warn);
+}
+.ed-size.over {
+  color: var(--down);
+  font-weight: 600;
+}
+
+/* The list: New, Import, Edit, More */
+
+.ind-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 16px 2px;
+}
+.ind-tools-label {
+  flex: 1 1 auto;
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.ind-tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 9px;
+  font-size: 12px;
+}
+.ind-tool.ind-locked,
+.ind-edit.ind-locked {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.ind-more,
+.ind-edit {
+  flex: none;
+}
+
+.ind-form-body {
+  padding: 4px 16px 14px;
+}
+.ind-form-body .al-row {
+  align-items: flex-start;
+}
+
+/* The preview of a Run in the legend */
+
+.legend-row.preview .legend-row-name {
+  font-style: italic;
+  border-bottom: 1px dashed var(--faint);
+}
+
+/* A phone: the editor fills the screen; the chart button folds it to a bar so the preview can be seen. */
+
+@media (max-width: 760px) {
+  .editor-panel {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    width: auto;
+  }
+  .ed-peek {
+    display: inline-flex !important;
+  }
+  .ed-versions {
+    position: absolute;
+    inset: 0 0 0 auto;
+    width: min(280px, 86%);
+    flex: none;
+    box-shadow: var(--shadow);
+  }
+  #app.peek .editor-panel {
+    inset: auto 0 0 0;
+    height: auto;
+  }
+  #app.peek .ed-notices,
+  #app.peek .ed-body,
+  #app.peek .ed-problems,
+  #app.peek .ed-viewbar,
+  #app.peek .ed-foot {
+    display: none;
+  }
+  .ed-actions .btn span {
+    display: none;
+  }
+  .ed-actions .btn {
+    padding: 0 8px;
+  }
+}
