@@ -379,6 +379,7 @@ describe("run", () => {
     expect(mock.calls).toEqual([]);
     const t = make();
     await t.open();
+    mock.calls.length = 0;
     t.edit("a".repeat(MAX_SOURCE_BYTES + 1));
     await t.run(QUERY);
     expect(mock.calls).toEqual([]);
