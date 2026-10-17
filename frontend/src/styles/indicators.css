@@ -57,6 +57,16 @@
   gap: 4px;
   color: var(--warn);
 }
+.legend-row-reset {
+  color: var(--warn);
+  font-size: 11px;
+  border: 1px solid currentColor;
+  border-radius: 8px;
+  padding: 0 6px;
+}
+.legend-row.ghost .legend-row-name {
+  opacity: 0.8;
+}
 .legend-row-actions {
   display: none;
   gap: 1px;

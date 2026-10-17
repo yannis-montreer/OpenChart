@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { ApiError, apiErrorFrom, chartPath, definitionPath } from "./api";
+import { ApiError, CLIENT_API_VERSION, apiErrorFrom, chartPath, definitionPath } from "./api";
+import serverInit from "../../src/openchart/__init__.py?raw";
+
+describe("the API version", () => {
+  it("is the one the server reports (src/openchart/__init__.py), so a page never warns about its own server", () => {
+    expect(Number(/^API_VERSION = (\d+)$/m.exec(serverInit)?.[1])).toBe(CLIENT_API_VERSION);
+  });
+});
 
 describe("paths of the CI-3 routes", () => {
   it("name the chart by source and instrument, each encoded as one segment", () => {
