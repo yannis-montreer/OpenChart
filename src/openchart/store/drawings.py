@@ -14,7 +14,8 @@ from typing import Any
 
 import aiosqlite
 
-TYPES = {"hline": 1, "trendline": 2, "ray": 2, "extended": 2}  # type -> number of points
+from openchart.drawing_rules import TYPES  # noqa: F401  (re-exported: type -> number of points)
+
 DASHES = ("solid", "dashed", "dotted")
 DEFAULT_STYLE = {"color": "#4d8dff", "width": 2, "dash": "solid"}
 

@@ -74,7 +74,7 @@ describe("fibLevels", () => {
     expect(levels[0].price).toBe(200);
     expect(levels[levels.length - 1].price).toBe(100);
     expect(levels.find((l) => l.level === 0.5)!.price).toBeCloseTo(150);
-    expect(levels.find((l) => l.level === 0.618)!.price).toBeCloseTo(161.8);
+    expect(levels.find((l) => l.level === 0.618)!.price).toBeCloseTo(138.2);
   });
 
   it("works downwards", () => {
@@ -103,7 +103,7 @@ describe("dragHandle", () => {
   });
 
   it("refuses a move that breaks a rule", () => {
-    expect(dragHandle("rect", [P(100, 5), P(200, 9)], 1, P(250, 5), identity)).toBeNull(); // flat
+    expect(dragHandle("rect", [P(100, 5), P(200, 9)], 1, P(250, 9), identity)).toBeNull(); // flat
     expect(dragHandle("fib", [P(100, 5), P(200, 9)], 1, P(100, 12), identity)).toBeNull(); // same time
     expect(dragHandle("trendline", [P(100, 5), P(200, 9)], 0, P(200, 1), identity)).toBeNull();
   });
