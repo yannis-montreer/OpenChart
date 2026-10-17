@@ -414,7 +414,8 @@ def test_the_catalog_has_builtin_and_custom_sections_with_kinds(cc):
     assert body["errors"] and all(e["kind"] in ("builtin", "custom") for e in body["errors"])
     assert {(e["kind"], e["file"]) for e in body["errors"]} == {("custom", "broken.py")}
     flat = [(e["kind"], e["id"]) for e in body["indicators"]]
-    assert sorted(flat) == [("builtin", "ema"), ("custom", "mine")]
+    builtin = {"ema", "sma", "rsi", "macd", "bollinger", "atr", "stochastic", "volume"}
+    assert sorted(flat) == sorted([("builtin", i) for i in builtin] + [("custom", "mine")])
 
 
 # Where a custom definition is used, and deleting it -------------------------------------

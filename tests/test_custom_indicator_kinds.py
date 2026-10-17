@@ -255,7 +255,7 @@ def test_the_builtin_ema_over_the_api_has_the_same_values_and_the_new_fields(wc)
     got = values(wc, "ema", **{"from": 0, "limit": 30}).json()
     assert list(got["values"]) == ["ema"]
     assert got["hits"] == {} and got["levels"] == {}
-    ema = wc.get("/api/indicators").json()["builtin"][0]
+    ema = next(i for i in wc.get("/api/indicators").json()["builtin"] if i["id"] == "ema")
     assert ema["outputs"] == [
         {
             "kind": "line",

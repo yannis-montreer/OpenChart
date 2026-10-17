@@ -104,7 +104,8 @@ def test_an_m7_file_describes_and_computes_as_before(wc):
     in_server = from_module("mid", type("M", (), namespace), builtin=False).to_json()
     assert mid["definition"] == {**in_server, "kind": "custom"}
     # The M7 menu's flat list has it, after "Middle line" < "Moving Average Exponential".
-    assert [(i["id"], i["builtin"]) for i in body["indicators"]] == [("mid", False), ("ema", True)]
+    flat = [(i["id"], i["builtin"]) for i in body["indicators"]]
+    assert flat.index(("mid", False)) < flat.index(("ema", True))
 
     got = values(wc, "mid", params={"length": 3}, **{"from": 0, "limit": 10}).json()
     closes = [b["c"] for b in candles(wc, **{"from": 0, "limit": 10})]
@@ -116,7 +117,7 @@ def test_an_m7_file_describes_and_computes_as_before(wc):
 def test_the_builtin_ema_file_runs_the_same_in_the_worker(wc):
     write(wc.folder, "my_ema.py", (BUILTIN_DIR / "ema.py").read_text(encoding="utf-8"))
     _, custom = catalog(wc)
-    builtin = wc.get("/api/indicators").json()["builtin"][0]
+    builtin = next(i for i in wc.get("/api/indicators").json()["builtin"] if i["id"] == "ema")
     assert {
         k: v
         for k, v in custom["my_ema"]["definition"].items()
@@ -160,7 +161,7 @@ def test_a_file_named_like_a_builtin_no_longer_replaces_it(wc):
     body, custom = catalog(wc)
     assert custom["ema"]["status"] == "ok"
     assert custom["ema"]["definition"]["title"] == "Middle line"
-    assert [i["title"] for i in body["builtin"]] == ["Moving Average Exponential"]
+    assert "Moving Average Exponential" in [i["title"] for i in body["builtin"]]
     flat = [i for i in body["indicators"] if i["id"] == "ema"]
     assert [i["builtin"] for i in flat] == [True]  # the M7 menu keeps the built-in (CI-3: both)
     assert values(wc, "ema").json()["kind"] == "builtin"
