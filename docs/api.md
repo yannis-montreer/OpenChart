@@ -168,17 +168,71 @@ A chart is a source and an instrument (the source is `provider` in `GET /api/sta
 
 ## Your indicator definitions
 
-These answer `403` unless editing custom indicators is allowed for this request (the minimum isolation, then the `indicator-editing` setting; `editing` in the catalog says why not).
+Everything under `/api/custom-indicators` answers **`403`** `{detail: "Editing custom indicators is off: <reason>."}` unless editing is allowed for this request: the minimum isolation (AppContainer or sidecar) **and** the server's `indicator-editing` setting. `editing` in the catalog (`{allowed, setting, reason}`) says which, so the browser can show the menu items disabled with the reason instead of trying. Files placed in the folder by hand run either way.
+
+**Status:** `usage` and `DELETE` exist (CI-3). The rest of this section is the **CI-4 contract**, written before the code so the editor can be built against it; until CI-4 lands those routes answer 404.
 
 | Route | |
 |---|---|
+| `GET /api/custom-indicators/templates` | `[{id, title, description}]`: what New can start from |
+| `POST /api/custom-indicators` | New `{id, template, title?}` or Import `{source, id?, filename?}` → `201` the definition |
+| `GET /api/custom-indicators/{id}/source` | `{id, file, version, source, bytes, updated_at}`; `?download=true`: the file itself (Export) |
+| `PUT /api/custom-indicators/{id}/source` | Save `{source, base_version?}` → the definition |
+| `PATCH /api/custom-indicators/{id}` | Rename `{title}` → the definition |
+| `POST /api/custom-indicators/{id}/duplicate` | `{id?, title?}` → `201` the new definition |
+| `GET /api/custom-indicators/{id}/versions` | `[{version, saved_at, bytes, digest}]`, newest first, at most 10 |
+| `GET /api/custom-indicators/{id}/versions/{version}` | `{id, version, source, saved_at}` |
+| `POST /api/custom-indicators/{id}/versions/{version}/restore` | puts that version back (a save) → the definition |
+| `POST /api/custom-indicators/preview` | Run: unsaved `source` on a chart query → values, nothing stored |
 | `GET /api/custom-indicators/{id}/usage` | `{id, in_use, charts: [{source, instrument, instances}], layouts: [{id, name, instances}]}` |
 | `DELETE /api/custom-indicators/{id}` | moves `<id>.py` and `.history/<id>/` to `.deleted/<id>-<UTC time>/` (as `<id>.py` and `history/`) → `{id, moved_to, removed}` |
 
-- `404` for an id that is not one of your files (`id` is the file name: lowercase letters, digits and `_`, at most 40).
+**Ids, files and sources (every route):**
+
+- **`id`** is the file name without `.py`: `[a-z][a-z0-9_]{0,39}`, the whole string (no trailing newline, no capitals, no `.`, `/` or `\`). Anything else is a `404` in a path and a `400` in a body. It is fixed when the file is created; Rename changes the title only. A custom id may equal a built-in's (`ema`): the two are separate namespaces.
+- **Only `<id>.py` directly in the indicators folder** is read or written. A name that is a link, a junction, a folder or anything but a plain file is a `409` and is never followed or replaced. Nothing is written outside the folder, `.history/` and `.deleted/`.
+- **`source`** is text, at most **256 KB** as UTF-8 (`413` above that). A leading byte-order mark is dropped; line endings are kept as sent. A NUL character, or text that is not valid Unicode (a lone surrogate such as `"\ud800"`), is a `400`.
+- **Writes are atomic:** the new text goes to a temporary file in the folder, then replaces `<id>.py` in one rename, so a reader (or a crash) sees the old file or the new one, never half of one. Writes to one id are serialized.
+- **Saved even with errors.** A file that does not load (a syntax error, a schema error) is still stored, so no work is lost; its problem is in the answer.
+- **`version`**: the first 12 hex digits of the source's SHA-256 (as `checks[].version`). **A history version** is the UTC time it was saved, `YYYYMMDDTHHMMSSZ`, with `-2`, `-3` ... when two land in the same second.
+
+**The definition** (the answer of New, Import, Save, Rename, Duplicate and Restore) is the definition's entry in the catalog's `custom` list, plus:
+
+```json
+{"id": "sma_cross", "kind": "custom", "file": "sma_cross.py", "status": "error",
+ "reason": "SyntaxError: invalid syntax", "line": 23, "definition": null, "checks": [],
+ "version": "3f2a9c1d4e5b", "saved": true, "unchanged": false,
+ "error": {"type": "SyntaxError", "message": "invalid syntax", "line": 23, "traceback": "  line 23\n    up = ta.crossover(fast, slow) /"}}
+```
+
+- `status`, `reason`, `line` and `definition` as in the catalog (`definition` is `null` while the file does not load). `error` is `null` when it loads. `checks` starts empty: the lookahead and warmup checks run on the first chart requests for this version, as for any file.
+- `unchanged`: `true` when the source sent is the one already stored (no new history version, no broadcast).
+- **Every write is broadcast** as `indicators_changed` `{id, op}` (`op`: `create`, `save`, `rename`, `duplicate`, `restore`, `delete`); pages fetch the catalog again, and charts using the id fetch their values again (the new version is a new script).
+
+**Each route:**
+
+- **Templates** ship with OpenChart: `blank` (one line, the smallest file that loads) and the four examples of docs/custom-indicators.md (`sma_cross`, `rsi_bands`, `bollinger_fill`, `engulfing`). Each writes `TITLE = "..."` on one line.
+- **New** `{id, template, title?}`: copies the template under `id`, with `title` (1 to 60 characters, default the template's) on its `TITLE` line. `409` `{detail: {message, suggested}}` if `<id>.py` exists, `suggested` being the first free `<id>_2`, `<id>_3` ...; `400` for an unknown template.
+- **Import** `{source, id?, filename?}`: stores `source` as is. Without `id`, it is made from `filename` (`My RSI.py` → `my_rsi`: lowercased, other characters to `_`, a leading digit or `_` gets an `x`, cut to 40) or is `imported`. `409` with `suggested` if it exists: nothing is ever overwritten by an import.
+- **Source / Export:** `?download=true` answers the file as `text/x-python; charset=utf-8` with `Content-Disposition: attachment; filename="<id>.py"`.
+- **Save** `{source, base_version?}`: `404` if the file does not exist (Save never creates; use New or Import). The file as it was goes into `.history/<id>/<version>.py` first; only the last 10 are kept, the oldest dropped. **`base_version`** is the `version` the editor started from: if the stored file has changed since (another tab, a text editor), the save is refused with `409` `{detail: {message, version}}` and nothing changes. Without it, the save always applies.
+- **Rename** `{title}`: rewrites the one `TITLE = "..."` line (a save, with its history version). `409` `{detail: {message: "edit TITLE in the code"}}` if the file has no such line, or more than one, or it spans lines. `title`: 1 to 60 characters, no line break.
+- **Duplicate** `{id?, title?}`: copies the current file (not its history) to `id`, default the first free `<id>_2` ...; `title` default `"<title> (copy)"`, written on the copy's `TITLE` line when it has one (else the copy keeps its code as it is). `409` with `suggested` if `id` exists.
+- **Versions:** the list is read from `.history/<id>/`; `404` for a version that is not there. **Restore** is a save of that version's text (so the current file goes into the history first, and a restore can itself be undone); `base_version` may be given as for Save.
+- **Preview (Run)** `{source, id?, instrument, timeframe, price?, params?, from?, to?, limit?}`: the query is that of `GET /api/indicators/{id}` (same bars, same warmup, the forming bar included). Runs `source` in the worker without storing anything (no file, no history, no catalog change, no quarantine count, no save-time checks). `id`, if given, names the file in tracebacks (`<id>.py`), else `preview.py`.
+  - The answer is the values answer (`t, values, hits, levels, params`) plus `definition` (the schema the source declares) and `preview: true`.
+  - `422` `{detail: {type, message, line, traceback}}` when the source does not load, its `params` do not fit, it raises, times out (`type: "timeout"`) or returns something that cannot be drawn; `503` when the worker is not running; `400` and `404` as for values.
+  - One preview at a time per browser tab is enough for the editor; the server runs previews like chart requests, under the job deadline.
+- **Usage, Delete:** as below.
+
+**Usage and delete (CI-3):**
+
+- `404` for an id that is not one of your files.
 - **In use:** `DELETE` answers `409` `{detail: {message, usage}}`, the message as the confirmation shows it (`"SMA cross" is on 2 charts (EUR_USD, XAU_USD) and in 1 saved layout ("Gold H1"). Deleting it removes it from all of them.`). `?confirm=true` removes its instances from every chart and saved layout first (`chart_indicators_changed` for each chart, `layouts_changed`), then moves the files. Only custom instances count and go: a built-in indicator with the same id is untouched, and a layout entry saved without a `kind` counts only when no built-in has that id.
 - `409` without any change when `.deleted` or `.history/<id>` is not a plain folder inside yours (a file, or a link elsewhere).
 - After a delete, every page gets `indicators_changed` (fetch the catalog again).
+
+**Errors, all routes:** `400` a malformed body or id; `403` editing not allowed (the reason in `detail`); `404` no such file, version or template; `409` the id exists (`suggested`), the file changed since `base_version` (`version`), a name that is not a plain file, a `TITLE` line Rename cannot edit, a definition in use (`usage`); `413` a source over 256 KB; `422` a preview that fails, or a refused body (FastAPI's `detail` list); `503` the worker is not running (preview only: saves never need the worker to store the file).
 
 ## Layouts
 
@@ -238,7 +292,7 @@ On connect the server sends `hello` `{api_version, server_time}` and then `statu
 | `alert_event` `{event}` | the delivery state of an event changed |
 | `layouts_changed` `{layouts}` | a layout was saved, renamed, deleted or made the default, or lost a deleted indicator: the list, as `GET /api/layouts` |
 | `chart_indicators_changed` `{source, instrument, revision, indicators}` | a chart's indicators changed (a `PUT`, an import, a layout applied, a definition deleted): the chart as `GET /api/charts/.../indicators` answers it, with this write's `reset` notes |
-| `indicators_changed` | the catalog changed (a definition of yours was deleted): fetch `GET /api/indicators` again |
+| `indicators_changed` `{id, op}` | the catalog changed: a definition of yours was created, saved, renamed, duplicated, restored or deleted (`op`; CI-3's delete sends `{type}` only until CI-4). Fetch `GET /api/indicators` again |
 | `closures` `{instrument, closures}` | learned market closures changed (a holiday passed): `[[start, end], ...]` in UTC epoch seconds |
 | `error` `{error}` | invalid message |
 

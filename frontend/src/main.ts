@@ -2,6 +2,7 @@ import "./styles/main.css";
 import "./styles/forms.css";
 import "./styles/alerts.css";
 import "./styles/indicators.css";
+import "./styles/editor.css";
 import { account, UNAUTHORIZED_EVENT } from "./api";
 import { App } from "./app";
 import { showLogin, showSetup } from "./ui/auth";
