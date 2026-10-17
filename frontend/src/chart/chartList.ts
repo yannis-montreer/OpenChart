@@ -56,7 +56,7 @@ export function newUid(): string {
 export function legendState(state: GhostState): { label: string; tip: string } {
   switch (state) {
     case "missing":
-      return { label: "Not found", tip: "There is no indicator with this id on the server (its file may have been moved or deleted). It stays in the list with its settings; remove it if you do not need it." };
+      return { label: "Not found", tip: "There is no indicator with this id on the server (its file may have been moved or deleted)." };
     case "error":
       return { label: "File error", tip: "The file does not load. Fix it and the indicator comes back with its settings." };
     case "quarantined":

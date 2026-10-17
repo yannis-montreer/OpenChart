@@ -103,6 +103,8 @@ describe("new uids", () => {
 describe("the placeholder states", () => {
   it("each says what is wrong and what to do", () => {
     expect(legendState("missing")).toEqual({ label: "Not found", tip: expect.stringContaining("no indicator") });
+    // CI-3 steps 4 to 6: such an instance is left out of the next save, so the tip must not say it stays.
+    expect(legendState("missing").tip).not.toMatch(/stays in the list/);
     expect(legendState("error").label).toBe("File error");
     expect(legendState("quarantined").label).toBe("Switched off");
     expect(legendState("quarantined").tip).toContain("Edit the file");
