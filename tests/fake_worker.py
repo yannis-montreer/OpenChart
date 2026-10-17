@@ -10,7 +10,8 @@ colour #00ff00 on XAU_USD 5m, `WARMUP <n>` declares n bars of warmup, `FILL <fol
 `FILLIDLE <folder>` fill a folder (during the job, or from a thread after it), `MODE` and
 `MODE2` describe other inputs (a choice instead of the width; MODE2 renames a choice),
 `NODESCRIBE` fails to load, `DEEPHEADER` answers a header nested too deep to parse
-(`DEEPHEADERAFTER`: sends one after its own good answer);
+(`DEEPHEADERAFTER`: sends one after its own good answer), `WRONGRID` answers with another
+request id;
 anything else describes one output and echoes the closes.
 """
 
@@ -287,6 +288,9 @@ def main():
                         fout.write(DEEP_FRAME)  # instead of its answer
                         fout.flush()
                         continue
+        if "rid" in req:  # the request id, echoed as the real worker does
+            wrong = "WRONGRID" in (sources.get(req.get("hash")) or "")
+            head = {**head, "rid": -1 if wrong else req["rid"]}
         fout.write(encode(head, out))
         if cmd == "compute" and "DEEPHEADERAFTER" in (sources.get(req.get("hash")) or ""):
             fout.write(DEEP_FRAME)  # after its own (good) answer: the next job reads it
