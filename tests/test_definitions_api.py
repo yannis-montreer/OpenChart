@@ -638,3 +638,44 @@ def test_json_is_valid_in_every_answer(ec):
     """A NaN in a source or a title must not reach a JSON answer as a number."""
     ok(create(ec, "PLAIN\nTITLE = 'nan'\nX = float('nan')\n", id="mine"), 201)
     assert json.loads(ec.get(f"{BASE}/mine/source").text)["source"].endswith("('nan')\n")
+
+
+# Found in the review of this change ----------------------------------------------------------
+
+
+def test_a_delete_during_a_save_does_not_bring_the_file_back(ec, monkeypatch):
+    """Review finding 1: the delete did not wait for a save of the same file, so a save
+    paused between keeping the history and writing wrote the file again after the delete
+    had moved it: a definition the delete answered as gone came back."""
+    ok(create(ec, id="mine"), 201)
+    from openchart.indicators import _files
+
+    inside, release = threading.Event(), threading.Event()
+    real = _files.Files._temporary
+
+    def paused(self, data):
+        inside.set()
+        release.wait(10)
+        return real(self, data)
+
+    monkeypatch.setattr(_files.Files, "_temporary", paused)
+    out = {}
+    saving = threading.Thread(
+        target=lambda: out.setdefault(
+            "save", ec.put(f"{BASE}/mine/source", json={"source": PLAIN + "# 2\n"})
+        )
+    )
+    saving.start()
+    assert inside.wait(10)
+    deleting = threading.Thread(
+        target=lambda: out.setdefault("delete", ec.delete(f"{BASE}/mine?confirm=true"))
+    )
+    deleting.start()
+    deleting.join(0.5)  # the delete waits for the save (or, before the fix, is done already)
+    release.set()
+    saving.join(20)
+    deleting.join(20)
+    assert out["save"].status_code == 200 and out["delete"].status_code == 200
+    assert not (ec.folder / "mine.py").exists()  # gone, as the delete said
+    moved = ec.folder / out["delete"].json()["moved_to"]
+    assert (moved / "mine.py").read_text(encoding="utf-8") == PLAIN + "# 2\n"  # the saved text
