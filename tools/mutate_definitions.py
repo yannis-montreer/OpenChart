@@ -49,7 +49,12 @@ MUTANTS = [
         "return name",
     ),
     # Sources
-    one("BOM kept", F, 'if text.startswith("\\ufeff"):\n        text = text[1:]\n', ""),
+    one(
+        "BOM kept",
+        F,
+        '    if text.startswith("\\ufeff"):\n        text = text[1:]\n',
+        "    pass  # BOM kept\n",
+    ),
     one("NUL allowed", F, 'if "\\x00" in text:', "if False:"),
     one("no size limit", F, "if size > MAX_FILE_BYTES:", "if False:"),
     one("size in characters", F, 'size = len(text.encode("utf-8"))', "size = len(text)"),
@@ -86,8 +91,8 @@ MUTANTS = [
         F,
         [
             (
-                "        if os.path.lexists(path):\n            raise FileProblem(409, {",
-                "        if False:\n            raise FileProblem(409, {",
+                "        if os.path.lexists(path):\n            raise FileProblem(\n",
+                "        if False:\n            raise FileProblem(\n",
             ),
             (
                 "                move(tmp, path, overwrite=False)  # fails if",
