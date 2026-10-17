@@ -5,6 +5,7 @@ import {
   api,
   CLIENT_API_VERSION,
   chartsApi,
+  customApi,
   drawingsApi,
   indicatorsApi,
   layoutsApi,
@@ -18,6 +19,7 @@ import {
   type LayoutState,
   type Meta,
   type Price,
+  type PreviewValues,
   type Status,
   type TimeframeMeta,
 } from "./api";
@@ -34,7 +36,17 @@ import { AlertsPanel } from "./ui/alertsPanel";
 import { DownloadPanel, isDownloading, lineText } from "./ui/download";
 import { showLogin } from "./ui/auth";
 import { button, closeMenu, h, icon, installTooltips, menuItem, showMenu, showMenuAt, type IconName } from "./ui/dom";
+import {
+  exportDefinition,
+  openDuplicateDefinition,
+  openImportDefinition,
+  openNewDefinition,
+  openRenameDefinition,
+  type Created,
+} from "./ui/definitionActions";
+import { openEditorPanel, type PanelController } from "./ui/editorPanel";
 import { openIndicatorPicker, openIndicatorSettings } from "./ui/indicatorDialogs";
+import { gate as editingGate } from "./ui/pickerModel";
 import { LayoutMenu } from "./ui/layoutMenu";
 import { SettingsDialog, type Section } from "./ui/settings";
 import { toast } from "./ui/toast";
@@ -97,6 +109,7 @@ export class App {
   drawings!: DrawingController;
   indicators!: IndicatorLayer;
   private sync!: ChartSync;
+  private editor?: PanelController;
   private catalog: IndicatorCatalog = { indicators: [], errors: [], folder: "" };
   private layoutMenu = new LayoutMenu({
     state: () => this.layoutState(),
@@ -613,14 +626,9 @@ export class App {
         this.sync.receive(m);
         break;
       case "indicators_changed":
-        // A definition of yours was deleted (here or in another browser): the catalog has changed.
-        void indicatorsApi
-          .catalog()
-          .then((c) => {
-            this.catalog = c;
-            this.indicators.setCatalog(c.indicators);
-          })
-          .catch(() => undefined);
+        // A definition of yours was created, saved, renamed, duplicated, restored or deleted (here or in
+        // another browser): the catalog has changed, and so may the state of the instances that use it.
+        void this.catalogChanged(m.id, m.op);
         break;
       case "closures": {
         const inst = this.instruments.find((i) => i.instrument === m.instrument);
@@ -808,13 +816,86 @@ export class App {
     openIndicatorPicker({
       catalog: this.catalog,
       onPick: (def) => void this.indicators.add(def),
-      reload: async () => {
-        this.catalog = await indicatorsApi.catalog();
-        this.indicators.setCatalog(this.catalog.indicators);
-        return this.catalog;
+      reload: () => this.readCatalog(),
+      onDeleted: (id) => {
+        this.indicators.removeDefinition(id, false);
+        if (this.editor?.id === id) void this.editor.requestClose();
       },
-      onDeleted: (id) => this.indicators.removeDefinition(id, false),
+      definitions: {
+        edit: (id) => void this.openEditor(id),
+        create: () => void openNewDefinition({ taken: this.customIds(), onDone: (r) => this.created(r) }),
+        import: () => openImportDefinition({ taken: this.customIds(), onDone: (r) => this.created(r) }),
+        rename: (id, title) => openRenameDefinition({ id, title, onDone: () => void this.readCatalog().catch(() => undefined) }),
+        duplicate: (id, title) => openDuplicateDefinition({ id, title, taken: this.customIds(), onDone: (r) => this.created(r) }),
+        export: (id) => exportDefinition(id),
+      },
     });
+  }
+
+  private async readCatalog(): Promise<IndicatorCatalog> {
+    this.catalog = await indicatorsApi.catalog();
+    this.indicators.setCatalog(this.catalog.indicators);
+    this.editor?.setEditing(editingGate(this.catalog));
+    return this.catalog;
+  }
+
+  /** The ids of your files, whether or not they load (a name is taken either way). */
+  private customIds(): string[] {
+    return [...(this.catalog.custom ?? []).map((e) => e.id), ...this.catalog.errors.map((e) => e.file.replace(/\.py$/i, ""))];
+  }
+
+  private created(r: Created): void {
+    toast({ title: "Saved", body: `${r.def.file} is in your indicators folder.`, icon: "save", timeout: 3000 });
+    void this.readCatalog().catch(() => undefined);
+    if (r.edit) void this.openEditor(r.def.id);
+  }
+
+  /** `indicators_changed`: read the catalog, then the editor's file and the instances that use it. */
+  private async catalogChanged(id: string | undefined, op: string | undefined): Promise<void> {
+    try {
+      await this.readCatalog();
+    } catch {
+      return; // unreachable: the next change reads it again
+    }
+    if (this.editor && (id === undefined || id === this.editor.id)) {
+      this.editor.changed(op ?? "save");
+      this.editor.setTitle((this.catalog.custom ?? []).find((e) => e.id === this.editor?.id)?.definition?.title ?? this.editor.id);
+    }
+    void this.sync.refreshStatuses();
+  }
+
+  private async openEditor(id: string): Promise<void> {
+    if (this.editor) {
+      if (this.editor.id === id) {
+        this.editor.focus();
+        return;
+      }
+      if (!(await this.editor.requestClose())) return;
+    }
+    const title = (this.catalog.custom ?? []).find((e) => e.id === id)?.definition?.title ?? id;
+    this.editor = openEditorPanel({
+      id,
+      title,
+      editing: editingGate(this.catalog),
+      query: () => {
+        const c = this.chart.ctx;
+        return c ? { instrument: c.instrument.instrument, timeframe: c.timeframe.name, price: c.price } : null;
+      },
+      onPreview: (values, source) => this.showPreview(id, values, source),
+      onClosed: () => {
+        this.editor = undefined;
+        this.indicators.clearPreview();
+      },
+    });
+  }
+
+  /** The dashed preview of a Run: the chart asks the server for its values with the text that was run. */
+  private showPreview(id: string, values: PreviewValues | null, source: string | undefined): void {
+    if (!values || source === undefined) {
+      this.indicators.clearPreview();
+      return;
+    }
+    this.indicators.setPreview(values.definition, (q) => customApi.preview({ source, id, ...q }));
   }
 
   private indicatorSettings(uid: number): void {

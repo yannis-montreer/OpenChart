@@ -45,7 +45,30 @@ EXCEPTIONS = {
     "pyinstaller-hooks-contrib": "GPL-2.0 / Apache-2.0 (build tool, hooks run at build time only)",
 }
 SKIP = {"pip", "setuptools", "wheel", "pip-licenses", "packaging", "openchart"}
-FRONTEND_RUNTIME = ["lightweight-charts", "fancy-canvas", "lucide"]
+FRONTEND_RUNTIME = [
+    "lightweight-charts",
+    "fancy-canvas",
+    "lucide",
+    # The code editor (CodeMirror 6 with its Python mode), loaded when the editor first opens.
+    "codemirror",
+    "@codemirror/autocomplete",
+    "@codemirror/commands",
+    "@codemirror/lang-python",
+    "@codemirror/language",
+    "@codemirror/lint",
+    "@codemirror/search",
+    "@codemirror/state",
+    "@codemirror/streamparser",
+    "@codemirror/view",
+    "@lezer/common",
+    "@lezer/highlight",
+    "@lezer/lr",
+    "@lezer/python",
+    "@marijn/find-cluster-break",
+    "crelt",
+    "style-mod",
+    "w3c-keyname",
+]
 LICENSE_NAMES = re.compile(r"^(LICEN[CS]E|COPYING|NOTICE|AUTHORS)", re.I)
 
 

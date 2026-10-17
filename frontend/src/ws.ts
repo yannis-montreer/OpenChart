@@ -36,7 +36,7 @@ export type ServerMessage =
   | { type: "alert_event"; event: AlertEvent }
   | { type: "layouts_changed"; layouts: LayoutSummary[] }
   | ({ type: "chart_indicators_changed" } & ChartIndicators)
-  | { type: "indicators_changed" }
+  | { type: "indicators_changed"; id?: string; op?: string }
   | { type: "error"; error: string };
 
 export type SocketState = "connecting" | "open" | "reconnecting";
