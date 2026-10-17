@@ -12,6 +12,8 @@ export interface LayoutHooks {
   state: () => LayoutState;
   /** Load a layout onto the chart. */
   apply: (layout: Layout) => void;
+  /** Called before the chart is saved: its indicator list must have reached the server (the server copies it). */
+  beforeSave?: () => Promise<void>;
 }
 
 export class LayoutMenu {
@@ -63,6 +65,7 @@ export class LayoutMenu {
     const cur = this.current();
     if (!cur) return this.open("save-as");
     try {
+      await this.hooks.beforeSave?.();
       const saved = await layoutsApi.update(cur.id, { layout: this.hooks.state() });
       toast({ title: "Layout saved", body: saved.name, icon: "save", timeout: 2500 });
     } catch (err) {
@@ -176,6 +179,7 @@ export class LayoutMenu {
         if (mode === "rename" && cur) {
           await layoutsApi.update(cur.id, { name });
         } else {
+          await this.hooks.beforeSave?.();
           const made = await layoutsApi.create({ name, layout: this.hooks.state() });
           this.currentId = made.id;
           this.onCurrentChange(made.id);

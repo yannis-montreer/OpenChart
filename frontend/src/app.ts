@@ -4,6 +4,7 @@ import {
   account,
   api,
   CLIENT_API_VERSION,
+  chartsApi,
   drawingsApi,
   indicatorsApi,
   layoutsApi,
@@ -20,11 +21,14 @@ import {
   type Status,
   type TimeframeMeta,
 } from "./api";
+import { fromServer, syncToast } from "./chart/chartList";
+import { ChartSync } from "./chart/chartSync";
 import { IndicatorLayer } from "./chart/indicators";
 import { CHART_TYPES, ChartView, type ChartContext } from "./chart/view";
 import { DrawingController, type AlertPlace, type Tool } from "./drawings/controller";
-import { loadPrefs, resolveTimezone, savePrefs, type Prefs } from "./prefs";
+import { dropLegacyIndicators, loadPrefs, readLegacyIndicators, resolveTimezone, savePrefs, type Prefs } from "./prefs";
 import { formatClock, offsetLabel } from "./time";
+import { versionNotice } from "./version";
 import { openAlertDialog } from "./ui/alertDialog";
 import { AlertsPanel } from "./ui/alertsPanel";
 import { DownloadPanel, isDownloading, lineText } from "./ui/download";
@@ -92,8 +96,13 @@ export class App {
   chart!: ChartView;
   drawings!: DrawingController;
   indicators!: IndicatorLayer;
+  private sync!: ChartSync;
   private catalog: IndicatorCatalog = { indicators: [], errors: [], folder: "" };
-  private layoutMenu = new LayoutMenu({ state: () => this.layoutState(), apply: (l) => this.applyLayout(l) });
+  private layoutMenu = new LayoutMenu({
+    state: () => this.layoutState(),
+    apply: (l) => this.applyLayout(l),
+    beforeSave: () => this.sync.settled(),
+  });
   private toolButtons = new Map<Tool, HTMLButtonElement>();
   private watchlist!: Watchlist;
   private alertsPanel = new AlertsPanel();
@@ -138,7 +147,6 @@ export class App {
     this.chart.setChartType(this.prefs.chartType);
     this.renderChartType();
     this.showPanel();
-    this.indicators.setEntries(this.prefs.indicators, false);
     this.instrument =
       this.instruments.find((i) => i.instrument === this.prefs.instrument) ??
       this.instruments.find((i) => i.enabled) ??
@@ -162,6 +170,7 @@ export class App {
       void this.drawings.reload(); // changes made while we were away
       void this.alertsPanel.load();
       void this.layoutMenu.load().catch(() => undefined);
+      void this.sync.resync();
     };
     // Once a minute, re-check the last bars against the server. This picks up bars that
     // were forming while we (or the server) were disconnected, which the server stores
@@ -239,10 +248,28 @@ export class App {
       this.prefs.drawingsHidden,
     );
     this.indicators = new IndicatorLayer(this.chart);
-    this.indicators.onChange = () => {
-      this.prefs.indicators = this.indicators.entries();
-      savePrefs(this.prefs);
-    };
+    this.sync = new ChartSync(
+      {
+        get: chartsApi.get,
+        put: chartsApi.put,
+        import: chartsApi.import,
+        apply: layoutsApi.apply,
+      },
+      {
+        show: (chart) => this.indicators.setInstances(chart.indicators.map(fromServer)),
+        entries: () => this.indicators.entriesToSave(),
+        missing: () => this.indicators.missingIds(),
+        notify: (e) => {
+          if (e.type === "saved") this.indicators.clearResets();
+          else toast({ ...syncToast(e), icon: e.type === "failed" || e.type === "unloaded" ? "warn" : "indicators", timeout: e.type === "remote" ? 4000 : undefined });
+        },
+        legacy: () => readLegacyIndicators(),
+        dropLegacy: () => dropLegacyIndicators(),
+        titleOf: (id) => this.indicators.definitions().find((d) => d.id === id)?.name ?? id,
+        enabled: () => this.instruments.filter((i) => i.enabled).map((i) => ({ source: i.source, instrument: i.instrument })),
+      },
+    );
+    this.indicators.onChange = () => this.sync.changed();
     this.indicators.onSettings = (uid) => this.indicatorSettings(uid);
     this.drawings.onToolChange = (tool) => {
       for (const [t, b] of this.toolButtons) b.classList.toggle("active", t === tool);
@@ -360,6 +387,11 @@ export class App {
       timeframe: this.prefs.timeframe,
       price: this.prefs.price,
     };
+    // Each chart has its own indicator list on the server: another chart, another list.
+    if (!this.sync.isCurrent(this.instrument.source, this.instrument.instrument)) {
+      this.indicators.setEntries([], false);
+      void this.sync.open(this.instrument.source, this.instrument.instrument);
+    }
     if (this.chartKey) this.socket.unsubscribe(this.chartKey);
     this.chartKey = key;
     this.socket.subscribe(key);
@@ -577,6 +609,19 @@ export class App {
       case "layouts_changed":
         this.layoutMenu.setList(m.layouts);
         break;
+      case "chart_indicators_changed":
+        this.sync.receive(m);
+        break;
+      case "indicators_changed":
+        // A definition of yours was deleted (here or in another browser): the catalog has changed.
+        void indicatorsApi
+          .catalog()
+          .then((c) => {
+            this.catalog = c;
+            this.indicators.setCatalog(c.indicators);
+          })
+          .catch(() => undefined);
+        break;
       case "closures": {
         const inst = this.instruments.find((i) => i.instrument === m.instrument);
         if (inst) inst.closures = m.closures;
@@ -640,9 +685,8 @@ export class App {
   }
 
   private checkVersion(serverVersion: number): void {
-    if (serverVersion > CLIENT_API_VERSION) {
-      this.showBanner(`This page is older than the server (API ${CLIENT_API_VERSION} vs ${serverVersion}). Reload to update.`, "warn");
-    }
+    const notice = versionNotice(CLIENT_API_VERSION, serverVersion);
+    if (notice) this.showBanner(notice, "warn");
   }
 
   private showBanner(text: string, kind: "warn" | "bad"): void {
@@ -769,7 +813,7 @@ export class App {
         this.indicators.setCatalog(this.catalog.indicators);
         return this.catalog;
       },
-      onDeleted: (id) => this.indicators.removeDefinition(id),
+      onDeleted: (id) => this.indicators.removeDefinition(id, false),
     });
   }
 
@@ -797,11 +841,11 @@ export class App {
       theme: p.theme,
       panel_open: p.panelOpen,
       panel_view: p.panelView,
-      indicators: this.indicators.entries(),
+      // No `indicators`: the server copies this chart's own list into the layout.
     };
   }
 
-  /** Copy a layout into the preferences (instrument, timeframe, type, price, theme, panel, indicators). */
+  /** Copy a layout into the preferences (instrument, timeframe, type, price, theme, panel). Its indicators go to the chart through the server (`applyLayout`). */
   private takeLayout(layout: Layout): void {
     const s = layout.layout;
     const p = this.prefs;
@@ -816,7 +860,6 @@ export class App {
     p.theme = s.theme;
     p.panelOpen = s.panel_open;
     p.panelView = s.panel_view;
-    p.indicators = s.indicators;
     p.layoutId = layout.id;
     savePrefs(p);
   }
@@ -832,7 +875,10 @@ export class App {
     this.showPanel();
     this.chart.setChartType(this.prefs.chartType);
     this.renderChartType();
-    this.indicators.setEntries(this.prefs.indicators, false);
+    if (this.instrument) {
+      this.indicators.setEntries([], false);
+      void this.sync.applyLayout(layout.id, layout.name, this.instrument.source, this.instrument.instrument);
+    }
     void this.loadChart();
   }
 
