@@ -19,7 +19,7 @@ import type { Logical } from "lightweight-charts";
 import { ApiError, drawingsApi, type Alert, type Drawing, type DrawingPatch, type DrawingStyle } from "../api";
 import { lineAlertState, pointAlong, type LineAlertState } from "../ui/alertState";
 import type { ChartView } from "../chart/view";
-import { h, menuItem, showMenuAt } from "../ui/dom";
+import { closeMenu, h, menuItem, showMenuAt } from "../ui/dom";
 import {
   POINTS_NEEDED,
   linePath,
@@ -27,23 +27,49 @@ import {
   nearestOhlc,
   segmentDistance,
   type DrawingType,
+  type LineType,
   type Point,
 } from "./geometry";
+import {
+  channelLines,
+  contrastColor,
+  dragHandle,
+  fibLevels,
+  fillOf,
+  formatDuration,
+  isLineType,
+  measureStats,
+  moveShape,
+  rectCorners,
+  shapeError,
+  textSize,
+  withAlpha,
+} from "./shapes";
 import { DrawingLayer, type MediaTarget } from "./layer";
 import { tradingClock, type Clock, type Closure, type TradingHoursJson } from "./tradingTime";
 import { StyleToolbar } from "./toolbar";
 
 export type Tool = "cursor" | DrawingType;
-type Part = "body" | 0 | 1;
+/** A handle number (the anchors; a rectangle's four corners) or the whole drawing. */
+type Part = "body" | number;
 
 interface Hit {
   id: string;
   part: Part;
 }
 
+interface Box {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
 interface Shape {
-  path: [number, number][]; // screen polyline (hline: two points across the pane)
-  handles: [number, number][];
+  path: [number, number][]; // main screen polyline (hline: two points across the pane); the bell sits on it
+  segments: [number, number][][]; // everything a click can hit (path included)
+  areas: Box[]; // boxes a click inside hits (text, filled rectangle, measure's info box)
+  handles: ([number, number] | null)[]; // by handle number; null where the chart cannot place it
   bell?: [number, number]; // centre of the alert marker, when the line has alerts
 }
 
@@ -70,7 +96,18 @@ export const TYPE_NAMES: Record<DrawingType, string> = {
   trendline: "trendline",
   ray: "ray",
   extended: "extended line",
+  vline: "vertical line",
+  rect: "rectangle",
+  channel: "parallel channel",
+  fib: "Fibonacci retracement",
+  text: "text",
+  measure: "measure",
 };
+
+function dashPattern(style: DrawingStyle): number[] {
+  if (style.dash === "dashed") return [style.width * 4, style.width * 3];
+  return style.dash === "dotted" ? [0.1, style.width * 2.5] : [];
+}
 
 export class DrawingController {
   tool: Tool = "cursor";
@@ -303,7 +340,11 @@ export class DrawingController {
     this.drawings.set(id, optimistic);
     if (this.selectedId === id) this.toolbar.show(optimistic);
     this.redraw();
-    if (patch.style) this.onStyleUsed(optimistic.style);
+    // Only a line's colour, width and dash are remembered for the next drawing (not a text's size, a fill or an extension).
+    if (patch.style && before.type !== "text") {
+      const { color, width, dash } = optimistic.style;
+      this.onStyleUsed({ color, width, dash });
+    }
     try {
       const d = await drawingsApi.update(id, patch);
       this.drawings.set(id, d);
@@ -406,14 +447,17 @@ export class DrawingController {
     for (const id of ids) {
       const shape = this.shapes.get(id);
       if (!shape) continue;
-      const handle = shape.handles.findIndex(([hx, hy]) => Math.hypot(hx - x, hy - y) <= HIT_HANDLE);
-      if (handle >= 0 && (id === this.selectedId || id === this.hover?.id)) return { id, part: handle as 0 | 1 };
-      for (let i = 1; i < shape.path.length; i++) {
-        const [ax, ay] = shape.path[i - 1];
-        const [bx, by] = shape.path[i];
-        if (Math.max(ax, bx) < x - HIT_LINE || Math.min(ax, bx) > x + HIT_LINE) continue;
-        if (segmentDistance(x, y, ax, ay, bx, by) <= HIT_LINE) return { id, part: "body" };
+      const handle = shape.handles.findIndex((hd) => hd !== null && Math.hypot(hd[0] - x, hd[1] - y) <= HIT_HANDLE);
+      if (handle >= 0 && (id === this.selectedId || id === this.hover?.id)) return { id, part: handle };
+      for (const path of shape.segments) {
+        for (let i = 1; i < path.length; i++) {
+          const [ax, ay] = path[i - 1];
+          const [bx, by] = path[i];
+          if (Math.max(ax, bx) < x - HIT_LINE || Math.min(ax, bx) > x + HIT_LINE) continue;
+          if (segmentDistance(x, y, ax, ay, bx, by) <= HIT_LINE) return { id, part: "body" };
+        }
       }
+      if (shape.areas.some((a) => x >= a.x0 && x <= a.x1 && y >= a.y0 && y <= a.y1)) return { id, part: "body" };
     }
     return undefined;
   }
@@ -443,6 +487,10 @@ export class DrawingController {
       const point = this.pointAt(pos.x, pos.y);
       if (!point) return;
       const type = this.tool;
+      if (type === "text") {
+        this.askText(point, e);
+        return;
+      }
       if (POINTS_NEEDED[type] === 1) {
         void this.finish(type, [point]);
         return;
@@ -450,7 +498,7 @@ export class DrawingController {
       if (!this.placing) {
         this.placing = { type, points: [point], cursor: point, down: pos };
       } else {
-        this.addSecondPoint(point);
+        this.addPoint(point);
       }
       this.redraw();
       return;
@@ -519,7 +567,7 @@ export class DrawingController {
       const pos = this.local(e);
       if (Math.hypot(pos.x - this.placing.down.x, pos.y - this.placing.down.y) > DRAG_THRESHOLD * 2) {
         const point = this.pointAt(pos.x, pos.y);
-        if (point) this.addSecondPoint(point);
+        if (point) this.addPoint(point);
       } else {
         this.placing.down = undefined;
       }
@@ -531,18 +579,46 @@ export class DrawingController {
     if (moved && d) void this.update(id, { points: d.points });
   }
 
-  private addSecondPoint(point: Point): void {
+  /**
+   * The next anchor of the drawing being placed. A point that would break the shape's
+   * rules (no trading time between two points, a channel's third point on its base line)
+   * is ignored, so the drawing is always one the server accepts.
+   */
+  private addPoint(point: Point): void {
     const placing = this.placing!;
-    // The two points need trading time between them (not the same bar, not a closure).
-    if (this.clock(point.t) === this.clock(placing.points[0].t)) return;
-    void this.finish(placing.type, [placing.points[0], point]);
+    const points = [...placing.points, point];
+    const need = POINTS_NEEDED[placing.type];
+    if (points.length === need ? shapeError(placing.type, points, this.clock, "x") : points.length === 2 && this.clock(points[0].t) === this.clock(points[1].t)) return;
+    placing.points = points;
+    placing.down = undefined;
+    if (points.length === need) void this.finish(placing.type, points);
   }
 
-  private async finish(type: DrawingType, points: Point[]): Promise<void> {
+  private async finish(type: DrawingType, points: Point[], label: string | null = null): Promise<void> {
     this.placing = undefined;
     this.snap = undefined;
     this.setTool("cursor");
-    await this.create(type, points);
+    await this.create(type, points, this.style(), label);
+  }
+
+  /** A text is placed with one click, then its words are asked for next to the click. */
+  private askText(point: Point, e: PointerEvent): void {
+    this.cancelPlacing();
+    const input = h("input", { class: "input", maxlength: "100", placeholder: "Text" });
+    const save = () => {
+      const text = input.value.trim();
+      if (!text) return;
+      closeMenu();
+      void this.finish("text", [point], text);
+    };
+    input.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") save();
+      if (ev.key === "Escape") closeMenu();
+    });
+    const ok = h("button", { class: "btn btn-primary", type: "button" }, "Add");
+    ok.addEventListener("click", save);
+    showMenuAt(e.clientX, e.clientY, h("div", { class: "label-editor" }, input, ok));
+    input.focus();
   }
 
   private dragTo(x: number, y: number): void {
@@ -555,20 +631,16 @@ export class DrawingController {
     const logical = this.view.chart.timeScale().coordinateToLogical(x);
     const price = this.view.priceSeries.coordinateToPrice(y);
     if (logical === null || price === null) return;
-    let points: Point[];
+    let points: Point[] | null;
     if (drag.part === "body") {
       const dl = Math.round(logical - drag.startLogical);
       const dp = (price as number) - drag.startPrice;
-      points = drag.original.map((p) => ({
-        t: d.type === "hline" ? p.t : index.toTime(Math.round(index.toLogical(p.t)) + dl),
-        p: this.round(p.p + dp),
-      }));
+      points = moveShape(d.type, drag.original, dl, dp, index, (p) => this.round(p));
     } else {
-      const moved = { t: index.toTime(Math.round(logical)), p: this.round(price as number) };
-      points = d.points.map((p, i) => (i === drag.part ? moved : p));
-      if (d.type === "hline") points = [{ t: d.points[0].t, p: moved.p }];
-      if (points.length === 2 && this.clock(points[0].t) === this.clock(points[1].t)) return;
+      const to = { t: index.toTime(Math.round(logical)), p: this.round(price as number) };
+      points = dragHandle(d.type, drag.original, drag.part, to, this.clock);
     }
+    if (!points) return;
     this.drawings.set(d.id, { ...d, points });
     this.redraw();
   }
@@ -589,7 +661,10 @@ export class DrawingController {
     const name = TYPE_NAMES[d.type];
     const alerts = this.alertsOf(d.id);
     const at = { x: e.clientX, y: e.clientY };
-    const alertItems = alerts.length
+    const labelled = d.type !== "fib" && d.type !== "measure";
+    const alertItems = !isLineType(d.type)
+      ? []
+      : alerts.length
       ? [
           menuItem({
             label: alerts.length === 1 ? "Edit alert…" : `Edit alert… (${alerts.length})`,
@@ -606,9 +681,17 @@ export class DrawingController {
         "div",
         { style: "min-width:230px" },
         ...alertItems,
-        h("hr"),
+        ...(alertItems.length ? [h("hr")] : []),
         menuItem({ label: "Edit style…", icon: "palette", onClick: () => this.toolbar.openColor() }),
-        menuItem({ label: d.label ? "Edit label…" : "Add label…", icon: "text", onClick: () => this.toolbar.openLabel() }),
+        ...(labelled
+          ? [
+              menuItem({
+                label: d.type === "text" ? "Edit text…" : d.label ? "Edit label…" : "Add label…",
+                icon: "text",
+                onClick: () => this.toolbar.openLabel(),
+              }),
+            ]
+          : []),
         menuItem({ label: "Clone", icon: "copy", onClick: () => void this.clone(d.id) }),
         h("hr"),
         menuItem({ label: "Delete", icon: "trash", hint: "Del", onClick: () => void this.remove(d.id) }),
@@ -635,7 +718,19 @@ export class DrawingController {
       return;
     }
     if (e.altKey && !e.ctrlKey && !e.metaKey) {
-      const tool = ({ t: "trendline", h: "hline", y: "ray", e: "extended" } as Record<string, Tool>)[e.key.toLowerCase()];
+      const keys: Record<string, Tool> = {
+        t: "trendline",
+        h: "hline",
+        y: "ray",
+        e: "extended",
+        v: "vline",
+        b: "rect",
+        c: "channel",
+        f: "fib",
+        x: "text",
+        m: "measure",
+      };
+      const tool = keys[e.key.toLowerCase()];
       if (tool) {
         e.preventDefault();
         this.setTool(this.tool === tool ? "cursor" : tool);
@@ -655,9 +750,9 @@ export class DrawingController {
       if (!this.hidden) {
         for (const d of this.drawings.values()) {
           const emphasis = d.id === this.selectedId || d.id === this.hover?.id || d.id === this.drag?.id;
-          const shape = this.paint(ctx, mediaSize.width, d.type, d.points, d.style, emphasis, from, to, d.label);
+          const shape = this.paint(ctx, mediaSize, d.type, d.points, d.style, emphasis, from, to, d.label);
           if (!shape) continue;
-          const state = this.alertState(d.id);
+          const state = isLineType(d.type) ? this.alertState(d.id) : null;
           if (state && shape.path.length > 1) {
             const at = pointAlong(shape.path, d.type === "hline" ? 0.75 : 0.5);
             if (at && at[0] > 0 && at[0] < mediaSize.width) {
@@ -670,11 +765,16 @@ export class DrawingController {
       }
       const p = this.placing;
       if (p?.cursor) {
-        const pts = p.points.length === 1 && POINTS_NEEDED[p.type] === 2 ? [p.points[0], p.cursor] : p.points;
-        if (pts.length === 2 && this.clock(pts[0].t) === this.clock(pts[1].t)) {
-          this.paintHandle(ctx, pts[0], this.style().color);
+        const pts = [...p.points, p.cursor];
+        const style = this.style();
+        const full = pts.length === POINTS_NEEDED[p.type];
+        if (p.type === "channel" && pts.length === 2) {
+          this.paintPreview(ctx, mediaSize, "trendline", pts, style, from, to);
+        } else if (p.type === "channel" && full && shapeError("channel", pts, this.clock)) {
+          // The pointer is on the base line: show the base alone.
+          this.paintPreview(ctx, mediaSize, "trendline", pts.slice(0, 2), style, from, to);
         } else {
-          this.paint(ctx, mediaSize.width, p.type, pts, this.style(), true, from, to, null);
+          this.paintPreview(ctx, mediaSize, p.type, pts, style, from, to);
         }
       }
       if (this.snap) {
@@ -695,9 +795,31 @@ export class DrawingController {
     });
   }
 
+  private applyStroke(ctx: CanvasRenderingContext2D, style: DrawingStyle): void {
+    ctx.strokeStyle = style.color;
+    ctx.lineWidth = style.width;
+    ctx.lineCap = style.dash === "dotted" ? "round" : "butt";
+    ctx.setLineDash(dashPattern(style));
+  }
+
+  private strokePath(ctx: CanvasRenderingContext2D, path: [number, number][]): void {
+    if (path.length < 2) return;
+    ctx.beginPath();
+    ctx.moveTo(path[0][0], path[0][1]);
+    for (const [x, y] of path.slice(1)) ctx.lineTo(x, y);
+    ctx.stroke();
+  }
+
+  /** Screen position of an anchor, or null where the chart cannot place it. */
+  private anchorXY(p: Point): [number, number] | null {
+    const x = this.xOf(this.index().toLogical(p.t));
+    const y = this.yOf(p.p);
+    return x !== null && y !== null && Number.isFinite(x) && Number.isFinite(y) ? [x, y] : null;
+  }
+
   private paint(
     ctx: CanvasRenderingContext2D,
-    width: number,
+    size: { width: number; height: number },
     type: DrawingType,
     pts: Point[],
     style: DrawingStyle,
@@ -706,7 +828,30 @@ export class DrawingController {
     to: number,
     label: string | null,
   ): Shape | undefined {
-    const index = this.index();
+    ctx.save();
+    let shape: Shape | undefined;
+    if (isLineType(type)) shape = this.paintLine(ctx, size.width, type, pts, style, from, to, label);
+    else if (type === "vline") shape = this.paintVline(ctx, size.height, pts, style, label);
+    else if (type === "rect") shape = this.paintRect(ctx, pts, style, label);
+    else if (type === "channel") shape = this.paintChannel(ctx, size.width, pts, style, from, to, label);
+    else if (type === "fib") shape = this.paintFib(ctx, size.width, pts, style);
+    else if (type === "text") shape = this.paintText(ctx, pts, style, label ?? "", emphasis);
+    else if (type === "measure") shape = this.paintMeasure(ctx, size, pts, style);
+    ctx.restore();
+    if (shape && emphasis) for (const hd of shape.handles) if (hd) this.drawHandle(ctx, hd[0], hd[1], style.color);
+    return shape;
+  }
+
+  private paintLine(
+    ctx: CanvasRenderingContext2D,
+    width: number,
+    type: LineType,
+    pts: Point[],
+    style: DrawingStyle,
+    from: number,
+    to: number,
+    label: string | null,
+  ): Shape | undefined {
     let path: [number, number][] = [];
     if (type === "hline") {
       const y = this.yOf(pts[0].p);
@@ -716,44 +861,234 @@ export class DrawingController {
         [width, y],
       ];
     } else {
-      path = linePath(type, pts, index, from, to, this.clock, (l) => this.xOf(l), (p) => this.yOf(p));
+      path = linePath(type, pts, this.index(), from, to, this.clock, (l) => this.xOf(l), (p) => this.yOf(p));
     }
-    ctx.save();
-    ctx.strokeStyle = style.color;
-    ctx.lineWidth = style.width;
-    ctx.lineCap = style.dash === "dotted" ? "round" : "butt";
-    ctx.setLineDash(style.dash === "dashed" ? [style.width * 4, style.width * 3] : style.dash === "dotted" ? [0.1, style.width * 2.5] : []);
-    if (path.length > 1) {
-      ctx.beginPath();
-      ctx.moveTo(path[0][0], path[0][1]);
-      for (const [x, y] of path.slice(1)) ctx.lineTo(x, y);
-      ctx.stroke();
-    }
-    ctx.restore();
+    this.applyStroke(ctx, style);
+    this.strokePath(ctx, path);
+    this.paintLineLabel(ctx, path, type === "hline", width, style, label);
+    // One handle in the middle of a horizontal line's visible part, to drag it up or down.
+    const handles = type === "hline" ? [[width / 2, path[0][1]] as [number, number]] : pts.map((p) => this.anchorXY(p));
+    return { path, segments: [path], areas: [], handles };
+  }
 
-    if (label && path.length > 1) {
-      const [x, y] = type === "hline" ? [width - 8, path[0][1]] : path[path.length - 1];
-      ctx.save();
+  private paintLineLabel(
+    ctx: CanvasRenderingContext2D,
+    path: [number, number][],
+    flat: boolean,
+    width: number,
+    style: DrawingStyle,
+    label: string | null,
+  ): void {
+    if (!label || path.length < 2) return;
+    const [x, y] = flat ? [width - 8, path[0][1]] : path[path.length - 1];
+    ctx.save();
+    ctx.font = "12px system-ui, sans-serif";
+    ctx.fillStyle = style.color;
+    ctx.textAlign = "right";
+    ctx.textBaseline = "bottom";
+    ctx.fillText(label, Math.min(x, width - 8), y - 5);
+    ctx.restore();
+  }
+
+  private paintVline(ctx: CanvasRenderingContext2D, height: number, pts: Point[], style: DrawingStyle, label: string | null): Shape | undefined {
+    const x = this.timeX(pts[0].t);
+    if (x === null || !Number.isFinite(x)) return undefined;
+    const path: [number, number][] = [
+      [x, 0],
+      [x, height],
+    ];
+    this.applyStroke(ctx, style);
+    this.strokePath(ctx, path);
+    if (label) {
       ctx.font = "12px system-ui, sans-serif";
       ctx.fillStyle = style.color;
-      ctx.textAlign = "right";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+      ctx.fillText(label, x + 5, 4);
+    }
+    return { path, segments: [path], areas: [], handles: [[x, height / 2]] };
+  }
+
+  private paintRect(ctx: CanvasRenderingContext2D, pts: Point[], style: DrawingStyle, label: string | null): Shape | undefined {
+    const corners = rectCorners(pts).map((p) => this.anchorXY(p));
+    if (corners.some((c) => c === null)) return undefined;
+    const xs = corners.map((c) => c![0]);
+    const ys = corners.map((c) => c![1]);
+    const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+    const fill = fillOf("rect", style.fill);
+    if (fill > 0) {
+      ctx.fillStyle = withAlpha(style.color, fill);
+      ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+    }
+    this.applyStroke(ctx, style);
+    ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+    if (label) {
+      ctx.font = "12px system-ui, sans-serif";
+      ctx.fillStyle = style.color;
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+      ctx.fillText(label, x0 + 6, y0 + 5);
+    }
+    const path: [number, number][] = [
+      [x0, y0],
+      [x1, y0],
+      [x1, y1],
+      [x0, y1],
+      [x0, y0],
+    ];
+    return { path, segments: [path], areas: fill > 0 ? [{ x0, y0, x1, y1 }] : [], handles: corners };
+  }
+
+  private paintChannel(
+    ctx: CanvasRenderingContext2D,
+    width: number,
+    pts: Point[],
+    style: DrawingStyle,
+    from: number,
+    to: number,
+    label: string | null,
+  ): Shape | undefined {
+    const index = this.index();
+    const paths = channelLines(pts, this.clock, Boolean(style.extend)).map((l) =>
+      linePath(l.type as Exclude<LineType, "hline">, l.pts, index, from, to, this.clock, (g) => this.xOf(g), (p) => this.yOf(p)),
+    );
+    const fill = fillOf("channel", style.fill);
+    if (fill > 0 && paths[0].length > 1 && paths[1].length > 1) {
+      ctx.beginPath();
+      ctx.moveTo(paths[0][0][0], paths[0][0][1]);
+      for (const [x, y] of paths[0].slice(1)) ctx.lineTo(x, y);
+      for (const [x, y] of [...paths[1]].reverse()) ctx.lineTo(x, y);
+      ctx.closePath();
+      ctx.fillStyle = withAlpha(style.color, fill);
+      ctx.fill();
+    }
+    this.applyStroke(ctx, style);
+    for (const path of paths) this.strokePath(ctx, path);
+    this.paintLineLabel(ctx, paths[0], false, width, style, label);
+    return { path: paths[0], segments: paths, areas: [], handles: pts.map((p) => this.anchorXY(p)) };
+  }
+
+  private paintFib(ctx: CanvasRenderingContext2D, width: number, pts: Point[], style: DrawingStyle): Shape | undefined {
+    const ends = pts.map((p) => this.anchorXY(p));
+    const left = this.timeX(Math.min(pts[0].t, pts[1].t));
+    const right = style.extend ? width : this.timeX(Math.max(pts[0].t, pts[1].t));
+    if (left === null || right === null || !ends[0] || !ends[1]) return undefined;
+    const segments: [number, number][][] = [];
+    this.applyStroke(ctx, style);
+    ctx.font = "11px system-ui, sans-serif";
+    for (const { level, price } of fibLevels(pts)) {
+      const y = this.yOf(price);
+      if (y === null) continue;
+      const seg: [number, number][] = [
+        [left, y],
+        [right, y],
+      ];
+      this.strokePath(ctx, seg);
+      segments.push(seg);
+      ctx.save();
+      ctx.fillStyle = style.color;
+      ctx.textAlign = "left";
       ctx.textBaseline = "bottom";
-      ctx.fillText(label, Math.min(x, width - 8), y - 5);
+      ctx.fillText(`${level} (${this.formatPrice(price)})`, Math.max(left, 0) + 4, y - 3);
       ctx.restore();
     }
+    const diagonal: [number, number][] = [ends[0], ends[1]];
+    ctx.save();
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    this.strokePath(ctx, diagonal);
+    ctx.restore();
+    segments.push(diagonal);
+    return { path: diagonal, segments, areas: [], handles: ends };
+  }
 
-    const handles: [number, number][] = [];
-    for (const p of type === "hline" ? [] : pts) {
-      const x = this.xOf(index.toLogical(p.t));
-      const y = this.yOf(p.p);
-      if (x !== null && y !== null) handles.push([x, y]);
+  private paintText(ctx: CanvasRenderingContext2D, pts: Point[], style: DrawingStyle, text: string, emphasis: boolean): Shape | undefined {
+    const at = this.anchorXY(pts[0]);
+    if (!at || !text) return undefined;
+    const size = textSize(style.width);
+    ctx.font = `${size}px system-ui, sans-serif`;
+    const w = ctx.measureText(text).width;
+    ctx.fillStyle = style.color;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "bottom";
+    ctx.fillText(text, at[0], at[1]);
+    const box = { x0: at[0] - 3, y0: at[1] - size - 3, x1: at[0] + w + 3, y1: at[1] + 3 };
+    if (emphasis) {
+      ctx.strokeStyle = style.color;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 3]);
+      ctx.strokeRect(box.x0, box.y0, box.x1 - box.x0, box.y1 - box.y0);
     }
-    if (type === "hline" && path.length) {
-      // One handle in the middle of the visible line, to drag it up or down.
-      handles.push([width / 2, path[0][1]]);
+    return { path: [], segments: [], areas: [box], handles: [at] };
+  }
+
+  private paintMeasure(ctx: CanvasRenderingContext2D, size: { width: number; height: number }, pts: Point[], style: DrawingStyle): Shape | undefined {
+    const a = this.anchorXY(pts[0]);
+    const b = this.anchorXY(pts[1]);
+    if (!a || !b) return undefined;
+    const inst = this.view.ctx?.instrument;
+    const stats = measureStats(pts, this.index(), inst?.pip_size);
+    const [x0, x1] = [Math.min(a[0], b[0]), Math.max(a[0], b[0])];
+    const [y0, y1] = [Math.min(a[1], b[1]), Math.max(a[1], b[1])];
+    ctx.fillStyle = withAlpha(style.color, 12);
+    ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+    this.applyStroke(ctx, style);
+    const line: [number, number][] = [a, b];
+    this.strokePath(ctx, line);
+    // Arrow head at the second anchor.
+    const angle = Math.atan2(b[1] - a[1], b[0] - a[0]);
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    for (const turn of [-0.45, 0.45]) {
+      ctx.moveTo(b[0], b[1]);
+      ctx.lineTo(b[0] - 10 * Math.cos(angle + turn), b[1] - 10 * Math.sin(angle + turn));
     }
-    if (emphasis) for (const [x, y] of handles) this.drawHandle(ctx, x, y, style.color);
-    return { path, handles };
+    ctx.stroke();
+
+    const sign = stats.change >= 0 ? "+" : "−";
+    const decimals = inst?.decimals ?? 5;
+    const pips = stats.pips === null ? "" : `  ${Math.abs(stats.pips).toFixed(1)} pips`;
+    const lines = [
+      `${sign}${Math.abs(stats.change).toFixed(decimals)} (${sign}${Math.abs(stats.percent).toFixed(2)}%)${pips}`,
+      `${Math.abs(stats.bars)} ${Math.abs(stats.bars) === 1 ? "bar" : "bars"}, ${formatDuration(stats.seconds)}`,
+    ];
+    ctx.font = "12px system-ui, sans-serif";
+    const w = Math.max(...lines.map((l) => ctx.measureText(l).width)) + 14;
+    const hgt = lines.length * 16 + 8;
+    const bx = Math.min(Math.max((x0 + x1) / 2 - w / 2, 4), Math.max(4, size.width - w - 4));
+    const by = Math.min(Math.max(stats.change >= 0 ? y0 - hgt - 8 : y1 + 8, 4), Math.max(4, size.height - hgt - 4));
+    ctx.fillStyle = style.color;
+    ctx.beginPath();
+    ctx.roundRect(bx, by, w, hgt, 4);
+    ctx.fill();
+    ctx.fillStyle = contrastColor(style.color);
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    lines.forEach((l, i) => ctx.fillText(l, bx + 7, by + 4 + 8 + i * 16));
+    const outline: [number, number][] = [
+      [x0, y0],
+      [x1, y0],
+      [x1, y1],
+      [x0, y1],
+      [x0, y0],
+    ];
+    return { path: line, segments: [line, outline], areas: [{ x0: bx, y0: by, x1: bx + w, y1: by + hgt }], handles: [a, b] };
+  }
+
+  /** The drawing being placed, followed by the pointer; just the first anchor while it would be degenerate. */
+  private paintPreview(
+    ctx: CanvasRenderingContext2D,
+    size: { width: number; height: number },
+    type: DrawingType,
+    pts: Point[],
+    style: DrawingStyle,
+    from: number,
+    to: number,
+  ): void {
+    const full = pts.length === POINTS_NEEDED[type];
+    const bad = full ? shapeError(type, pts, this.clock, "x") : pts.length === 2 && this.clock(pts[0].t) === this.clock(pts[1].t);
+    if (bad) this.paintHandle(ctx, pts[0], style.color);
+    else this.paint(ctx, size, type, pts, style, true, from, to, type === "text" ? "x" : null);
   }
 
   /** The alert marker above a line: a bell in the line's colour, struck through when no alert is active. */
@@ -803,13 +1138,14 @@ export class DrawingController {
   }
 
   /** Points whose prices and times are labelled on the axes (selected or being drawn). */
-  axisPoints(): { points: Point[]; color: string } | undefined {
+  axisPoints(): { points: Point[]; color: string; price: boolean; time: boolean } | undefined {
     if (this.placing?.cursor) {
-      const pts = POINTS_NEEDED[this.placing.type] === 2 ? [this.placing.points[0], this.placing.cursor] : [this.placing.cursor];
-      return { points: pts, color: this.style().color };
+      const points = [...this.placing.points, this.placing.cursor];
+      return { points, color: this.style().color, price: true, time: points.length >= 2 };
     }
     const d = this.selectedId ? this.drawings.get(this.selectedId) : undefined;
-    return d && !this.hidden ? { points: d.points, color: d.style.color } : undefined;
+    if (!d || this.hidden || d.type === "text") return undefined;
+    return { points: d.points, color: d.style.color, price: d.type !== "vline", time: d.type !== "hline" };
   }
 
   priceY(p: number): number | null {

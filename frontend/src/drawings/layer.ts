@@ -79,14 +79,14 @@ export class DrawingLayer implements ISeriesPrimitive<Time> {
 
   priceAxisViews(): ISeriesPrimitiveAxisView[] {
     const a = this.ctl.axisPoints();
-    if (!a) return [];
+    if (!a?.price) return [];
     const prices = [...new Set(a.points.map((p) => p.p))];
     return prices.map((p) => new AxisLabel(this.ctl.priceY(p), this.ctl.formatPrice(p), a.color));
   }
 
   timeAxisViews(): ISeriesPrimitiveAxisView[] {
     const a = this.ctl.axisPoints();
-    if (!a || a.points.length < 2) return [];
+    if (!a?.time) return [];
     return a.points.map((p) => new AxisLabel(this.ctl.timeX(p.t), this.ctl.formatTime(p.t), a.color));
   }
 

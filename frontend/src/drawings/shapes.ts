@@ -204,3 +204,42 @@ export function withAlpha(hex: string, percent: number): string {
 export function textSize(width: number): number {
   return [12, 14, 18, 24][Math.min(4, Math.max(1, Math.round(width))) - 1];
 }
+
+// Per-type options
+
+const LINE_TYPE_LIST: readonly DrawingType[] = ["hline", "trendline", "ray", "extended"];
+
+/** A line an alert can follow (the new tools have no alerts yet). */
+export function isLineType(type: DrawingType): type is LineType {
+  return LINE_TYPE_LIST.includes(type);
+}
+
+/** Which style controls apply to a type. `fill` and `extend` are the optional style keys. */
+export interface StyleOptions {
+  dash: boolean;
+  fill: boolean;
+  extend: boolean;
+  label: boolean;
+}
+
+export function styleOptions(type: DrawingType): StyleOptions {
+  return {
+    dash: type !== "text",
+    fill: type === "rect" || type === "channel",
+    extend: type === "channel" || type === "fib",
+    label: type !== "fib" && type !== "measure",
+  };
+}
+
+/** The area opacity in percent: the stored `fill`, else the tool's default. */
+export function fillOf(type: DrawingType, fill: number | undefined): number {
+  if (fill !== undefined) return fill;
+  return type === "rect" ? 15 : type === "channel" ? 10 : 0;
+}
+
+/** Black or white, whichever reads better on the colour `hex` ("#rrggbb"). */
+export function contrastColor(hex: string): string {
+  const n = parseInt(hex.slice(1), 16);
+  const lum = (0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)) / 255;
+  return lum > 0.6 ? "#111111" : "#ffffff";
+}

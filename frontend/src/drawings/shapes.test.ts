@@ -3,6 +3,10 @@ import { TimeIndex } from "./geometry";
 import {
   FIB_LEVELS,
   channelLines,
+  contrastColor,
+  fillOf,
+  isLineType,
+  styleOptions,
   channelOffset,
   dragHandle,
   fibLevels,
@@ -192,5 +196,36 @@ describe("formatting", () => {
     expect([1, 2, 3, 4].map(textSize)).toEqual([12, 14, 18, 24]);
     expect(textSize(0)).toBe(12);
     expect(textSize(9)).toBe(24);
+  });
+});
+
+describe("per-type options", () => {
+  it("knows which tools an alert can follow", () => {
+    expect((["hline", "trendline", "ray", "extended"] as const).every(isLineType)).toBe(true);
+    expect((["vline", "rect", "channel", "fib", "text", "measure"] as const).some(isLineType)).toBe(false);
+  });
+
+  it("offers each tool only the style controls that apply", () => {
+    expect(styleOptions("rect")).toEqual({ dash: true, fill: true, extend: false, label: true });
+    expect(styleOptions("channel")).toEqual({ dash: true, fill: true, extend: true, label: true });
+    expect(styleOptions("fib")).toEqual({ dash: true, fill: false, extend: true, label: false });
+    expect(styleOptions("text")).toEqual({ dash: false, fill: false, extend: false, label: true });
+    expect(styleOptions("measure")).toEqual({ dash: true, fill: false, extend: false, label: false });
+    expect(styleOptions("vline")).toEqual({ dash: true, fill: false, extend: false, label: true });
+  });
+
+  it("uses the stored fill, else the tool's default", () => {
+    expect(fillOf("rect", undefined)).toBe(15);
+    expect(fillOf("channel", undefined)).toBe(10);
+    expect(fillOf("fib", undefined)).toBe(0);
+    expect(fillOf("rect", 0)).toBe(0);
+    expect(fillOf("rect", 40)).toBe(40);
+  });
+
+  it("picks a readable text colour", () => {
+    expect(contrastColor("#ffffff")).toBe("#111111");
+    expect(contrastColor("#000000")).toBe("#ffffff");
+    expect(contrastColor("#4d8dff")).toBe("#ffffff");
+    expect(contrastColor("#eab308")).toBe("#111111");
   });
 });
