@@ -217,27 +217,43 @@ compares each with a reference written as plain loops.
 | Id | Pane | Inputs (defaults) | Draws |
 |---|---|---|---|
 | `ema` | price | length 9, source close | line |
-| `sma` | price | length 9, source close | line |
-| `rsi` | own | length 14, source close, overbought 70, oversold 30 | line, a level at each of the two |
-| `macd` | own | fast 12, slow 26, signal 9, source close | histogram, MACD line, signal line |
-| `bollinger` | price | length 20, source close, StdDev 2.0 | basis, upper and lower lines, a fill between the bands |
-| `atr` | own | length 14, smoothing RMA (or SMA, EMA, WMA) | line |
-| `stochastic` | own | %K length 14, %K smoothing 1, %D smoothing 3, overbought 80, oversold 20 | %K and %D lines, a level at each of the two |
-| `volume` | own | none | histogram labelled **Tick volume** |
+| `sma` | price | length 9 (1 to 5000), source close | line |
+| `rsi` | own | length 14 (1 to 900), source close, overbought 70, oversold 30, middle 50 | line, a dashed level at each of the three |
+| `macd` | own | fast 12, slow 26, signal 9 (each 1 to 900), source close, oscillator MA type EMA, signal MA type EMA (EMA or SMA) | histogram, MACD line, signal line |
+| `bollinger` | price | length 20 (1 to 900), source close, StdDev 2.0, basis MA type SMA (SMA, EMA, RMA, WMA or VWMA) | basis, upper and lower lines, a fill between the bands |
+| `atr` | own | length 14 (1 to 900), smoothing RMA (or SMA, EMA, WMA) | line |
+| `stochastic` | own | %K length 14, %K smoothing 1, %D smoothing 3, overbought 80, oversold 20, middle 50 | %K and %D lines, a dashed level at each of the three |
+| `volume` | own | show moving average off, moving average length 20 | histogram labelled **Tick volume**, and a line "Tick volume MA" |
 
 - **`volume` is tick volume.** OANDA gives no real volume: each bar's value is the number of
   price updates in it, so it shows activity, not traded size, and differs from a volume
   indicator on a venue with real volume. The label says so.
-- **What is not there (yet):** TradingView's choice of moving-average type for the MACD
-  (always EMA here) and for the Bollinger basis (always SMA), the Bollinger `offset`, a
-  histogram that changes colour with its sign (an output has one colour; the style tab sets
-  it), and the volume's own moving average.
+- **Moving-average types** are the `ta` helpers that exist: the Bollinger basis offers SMA,
+  EMA, RMA, WMA and VWMA (the weighted-by-volume one uses the tick volume; a window with no
+  volume is a gap); the MACD's oscillator and signal offer EMA and SMA. The bands are always
+  `StdDev` population deviations about the window's simple mean, whatever the basis, as in
+  TradingView. The defaults give the values the indicators gave before the options existed
+  (`tests/test_builtin_defaults.py` holds them).
+- **The middle level** (50 on RSI and Stochastic) is a third dashed level, an input like the
+  other two.
+- **The volume average** is a simple average of the tick volume, off by default. The
+  "Tick volume MA" line is always declared (outputs are fixed), so while it is off it is a
+  line with no values.
+- **Lengths stop at 900** for RSI, MACD, Bollinger and ATR (5000 for SMA, whose window is
+  its whole warmup): the settled warmup of the recursive averages is about 21 lengths, and the
+  values route fetches at most 20,000 bars before the first one shown; a longer one would start
+  unsettled without saying so. Stochastic and volume stay within it at their maximums.
+- **What is not there (yet):** the Bollinger `offset`, and a histogram that changes colour
+  with its sign (an output has one colour; the style tab sets it). Prices are assumed to have
+  `high >= low`; bars that break that (never from OANDA) can put %K outside 0 to 100.
 - **Level inputs** are ordinary `Float` inputs (0 to 100): change them in the Inputs tab and
   the lines move.
-- **Warmups** (bars before the first one shown): `sma`, `bollinger`, `stochastic` and ATR with
-  SMA or WMA need only their window (the sum of the lengths for `stochastic`); the recursive
-  ones fade: `rsi` and ATR with RMA about `21 * length`, ATR with EMA `11 * length`, `macd`
-  about `11 * (slow + signal)`.
+- **Warmups** (bars before the first one shown): `sma`, `stochastic`, `volume`'s average, ATR
+  with SMA or WMA and Bollinger with SMA, WMA or VWMA need only their window (the sum of the
+  lengths for `stochastic`); the recursive ones fade: `rsi` and ATR with RMA about
+  `21 * length`, ATR with EMA and Bollinger with EMA `11 * length`, Bollinger with RMA
+  `21 * length`, `macd` `11 * slow` for an EMA oscillator and `11 * signal` for an EMA signal
+  (their window for SMA).
 
 ## Not yet
 

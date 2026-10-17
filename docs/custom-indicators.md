@@ -332,10 +332,12 @@ or the list below it says so.
 **Pine's built-in indicators** (the ones you add from TradingView's menu) are built in here too,
 as files you can copy and change (`src/openchart/indicators/`, table in
 [indicators.md](indicators.md#built-in-indicators)): Moving Average Exponential (`ema`), Moving
-Average Simple (`sma`), Relative Strength Index (`rsi`, with its 70 and 30 levels), MACD (`macd`),
+Average Simple (`sma`), Relative Strength Index (`rsi`, with its 70, 50 and 30 levels), MACD (`macd`),
 Bollinger Bands (`bollinger`, with the fill), Average True Range (`atr`), Stochastic (`stochastic`,
-%K and %D with 80 and 20) and Volume (`volume`, **tick volume**: OANDA gives no real volume).
-Their inputs and defaults are TradingView's.
+%K and %D with 80, 50 and 20) and Volume (`volume`, **tick volume**: OANDA gives no real volume,
+with an optional moving average). Their inputs and defaults are TradingView's, including the
+MACD's oscillator and signal MA type (EMA or SMA), the Bollinger basis MA type (SMA, EMA, RMA, WMA
+or VWMA) and the middle level (50) of RSI and Stochastic.
 
 **No equivalent** (say so rather than guess):
 
