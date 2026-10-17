@@ -211,13 +211,13 @@ def _serve(conn: socket.socket, worker: Any) -> None:
             return
         if cmd == "arm":  # each child arms itself; remember the budget
             budget_mb = int(req.get("memory_mb") or budget_mb)
-            f.write(encode({"armed": True}))
+            _answer(f, req, {"armed": True})
             continue
         if cmd in ("describe", "warmup", "compute") and req.get("source") is not None:
             try:
                 worker.learn(req)
             except (KeyError, ValueError) as exc:
-                f.write(encode({"error": _error("ValueError", str(exc))}))
+                _answer(f, req, {"error": _error("ValueError", str(exc))})
                 continue
         _run_in_child(f, worker, req, arrays, budget_mb)
 
@@ -248,7 +248,7 @@ def _run_in_child(f, worker: Any, req: dict, arrays: dict, budget_mb: int) -> No
         if time.perf_counter() - start > deadline:
             os.kill(pid, signal.SIGKILL)
             os.waitpid(pid, 0)
-            f.write(encode({"error": _error("Timeout", f"timed out after {deadline:g} s")}))
+            _answer(f, req, {"error": _error("Timeout", f"timed out after {deadline:g} s")})
             return
         time.sleep(0.002)
     if os.WIFSIGNALED(status) or os.WEXITSTATUS(status):
@@ -258,11 +258,16 @@ def _run_in_child(f, worker: Any, req: dict, arrays: dict, budget_mb: int) -> No
             else f"exit code {os.WEXITSTATUS(status)}"
         )
         memory = os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL
-        f.write(
-            encode(
-                {"error": {**_error("WorkerCrash", f"the worker ended ({how})"), "memory": memory}}
-            )
-        )
+        error = {**_error("WorkerCrash", f"the worker ended ({how})"), "memory": memory}
+        _answer(f, req, {"error": error})
+
+
+def _answer(f, req: dict, head: dict[str, Any]) -> None:
+    """An answer the sidecar writes itself (not `Worker.handle`'s), with the request's id
+    (S6): the runner refuses any answer that does not echo it."""
+    if "rid" in req:
+        head = {**head, "rid": req["rid"]}
+    f.write(encode(head))
 
 
 def _error(kind: str, message: str) -> dict[str, Any]:

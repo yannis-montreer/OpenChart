@@ -18,6 +18,8 @@ datas = []
 datas += collect_data_files("openchart")
 # Indicator files are loaded by path (see openchart/indicators/_registry.py): ship them as files.
 datas += [(os.path.join(SRC, "openchart", "indicators", "*.py"), os.path.join("openchart", "indicators"))]
+# The editor's templates (CI-4): text for new files, read by path too.
+datas += [(os.path.join(SRC, "openchart", "indicators", "templates", "*.py"), os.path.join("openchart", "indicators", "templates"))]
 datas += collect_data_files("tzdata")
 datas += copy_metadata("keyring")  # keyring finds its backends through entry points
 for name in ("LICENSE", "NOTICE"):

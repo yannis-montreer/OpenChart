@@ -82,7 +82,6 @@ DOUBLES = WRITES_A_FRAME.replace('NAME = "A"', 'NAME = "B"').split("def compute"
 )
 
 
-@pytest.mark.xfail(strict=True, reason="S6: a script can write frames; the next job gets them")
 async def test_s6_a_script_cannot_answer_for_the_next_request(tmp_path):
     from openchart.indicators.worker.isolation import start_worker
     from tests.worker_helpers import real_launchers
@@ -94,7 +93,10 @@ async def test_s6_a_script_cannot_answer_for_the_next_request(tmp_path):
     try:
         a = (hashlib.sha256(WRITES_A_FRAME.encode()).hexdigest(), "a.py", WRITES_A_FRAME)
         b = (hashlib.sha256(DOUBLES.encode()).hexdigest(), "b.py", DOUBLES)
-        await runner.compute(*a, {}, bars)
+        # A's forged frame has no request id: A's own job fails loudly, the worker goes.
+        with pytest.raises(ScriptFailed) as failed:
+            await runner.compute(*a, {}, bars)
+        assert failed.value.kind == "protocol" and "another request" in str(failed.value)
         got = await runner.compute(*b, {}, bars)
         assert got["out"].tolist() == [2, 4, 6, 8, 10]  # B's own answer
     finally:
