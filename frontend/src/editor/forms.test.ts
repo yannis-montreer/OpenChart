@@ -47,6 +47,10 @@ describe("checkNew", () => {
     expect(checkNew({ ...ok, id: "MY_CROSS" }, TEMPLATES, ["my_cross"]).id).toMatch(/already a file/);
   });
 
+  it("a file whose name has capitals still takes the name (a Windows folder does not tell them apart)", () => {
+    expect(checkNew(ok, TEMPLATES, ["My_Cross"]).id).toMatch(/already a file named my_cross/);
+  });
+
   it("wants a template that exists, and a good title when one is given", () => {
     expect(checkNew({ ...ok, template: "nope" }, TEMPLATES, []).template).toBe("Pick a template.");
     expect(checkNew({ ...ok, template: "" }, TEMPLATES, []).template).toBe("Pick a template.");

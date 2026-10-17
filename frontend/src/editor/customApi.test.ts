@@ -287,6 +287,13 @@ describe("paths", () => {
     }
   });
 
+  it("encode a version as one segment when it is restored too", async () => {
+    mock.place("mine", "x");
+    mock.calls.length = 0;
+    await failure(customApi.restore("mine", "../../x"));
+    expect(mock.calls[0].path).toBe("/api/custom-indicators/mine/versions/..%2F..%2Fx/restore");
+  });
+
   it("encode a version as one segment", async () => {
     mock.place("mine", "x");
     mock.calls.length = 0;

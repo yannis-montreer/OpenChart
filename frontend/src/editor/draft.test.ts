@@ -87,6 +87,18 @@ describe("readDraft", () => {
     }
   });
 
+  it("does not offer a draft of the right version with a wrong shape", () => {
+    const store = new MemoryStore();
+    for (const bad of [
+      { base: STORED.version, source: "x" }, // no time
+      { base: STORED.version, source: 5, at: 1 },
+      { base: STORED.version, source: "x", at: "1" },
+    ]) {
+      store.setItem("openchart.draft.v1:mine", JSON.stringify(bad));
+      expect(readDraft(store, "mine", STORED), JSON.stringify(bad)).toBeNull();
+    }
+  });
+
   it("does not offer a draft the server would refuse", () => {
     const store = new MemoryStore();
     store.setItem("openchart.draft.v1:mine", JSON.stringify({ base: STORED.version, source: "a\u0000b", at: 1 }));
