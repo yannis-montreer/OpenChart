@@ -778,3 +778,16 @@ The owner approved the plan in `docs/security-review-custom-indicators.md` ("Aft
 - **Preview stores and counts nothing:** no file, no history, no quarantine count, no save-time checks; same query and bars as the values route.
 - **Sources:** 256 KB as UTF-8, NUL and lone surrogates refused, a leading BOM dropped, line endings kept; writes atomic (temporary file and rename) and serialized per id; plain files only, never through a link.
 - **`indicators_changed`** gains `{id, op}` (compatible: pages that ignore the fields still refetch).
+
+## CI-4 backend: the editor's endpoints (2026-10-17)
+
+The contract of #37, implemented (`api/routes_definitions.py`, `indicators/_files.py`, `indicators/templates/`). Built on the hardening branch (#40), not on main: request ids need its `protocol` failure kind, and the two would otherwise have duplicated and conflicted in `runner.py`; the PR says "depends on #40" and also carries #37's docs. Tests first (`tests/test_definitions_api.py`, `tests/test_request_ids.py`): 102 failed before the code.
+
+- **Hostile-input pass**, each a test: ids with `..`, `/`, `\`, capitals, a trailing newline or space, a leading digit or `_`, `.py`, 41 characters, empty, and **Windows device names** (`con`, `nul`, `com1` ...: refused everywhere, since on Windows `con.py` is the console; found by this pass, not in the contract); versions with `..`; 256 KB exactly (taken) and one byte more, also 256 K characters that are more bytes as UTF-8 (413); NUL, a lone surrogate (400); a BOM (dropped) and CRLF (kept); a folder named `x.py`, a symbolic link (Linux CI; this PC needs a privilege), **a hard link** (no privilege needed on NTFS: refused, found by this pass), a `.history` junction and a `.history` file (409, nothing written); a hand-written Latin-1 file (409, not rewritten); a failed rename (the old file stays, no temporary file, no history version); 8 concurrent saves (whole files, 8 distinct versions), 4 concurrent saves from one base (one through), 4 concurrent News of one id (one created); nothing written outside the folder.
+- **New never overwrites,** also against a writer outside the server: the file is published with a rename that fails when the name exists (`os.rename` on Windows, `os.link` then unlink on POSIX), not `os.replace`.
+- **A failed save leaves no version:** the current file is kept in the history first; if the rename then fails, that version is removed again.
+- **Preview** goes to the runner directly (describe, warmup, compute, the server's own check of the answer), never through `CustomIndicators`: nothing is stored or counted. It shares the values route's bar reading and answer shaping (`read_bars`, `shape`), so its bars are the chart's.
+- **After every write the catalog reads the file again** (`CustomIndicators.forget`), whatever its time and size say: this closes Session A's finding 4 (same-size edits) for saves made in the editor.
+- **Request ids (S6):** see the security review's CI-4 section. Answers carry `rid`; probes and arming too.
+- **The delete's broadcast** carries `{id, op: "delete"}` like the others.
+- **Not done here:** an `API_VERSION` bump (the frontend session decides when its editor needs these routes), the Settings display of the gate (frontend).

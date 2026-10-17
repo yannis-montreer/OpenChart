@@ -189,7 +189,7 @@ def custom_routes(server: Server, charts: ChartIndicators) -> APIRouter:
                 put_back(moved, target)
                 raise
         await server.custom.refresh()
-        server.hub.broadcast({"type": "indicators_changed"})
+        server.hub.broadcast({"type": "indicators_changed", "id": indicator_id, "op": "delete"})
         moved = target.relative_to(server.custom.folder).as_posix()
         return {"id": indicator_id, "moved_to": moved, "removed": found}
 
