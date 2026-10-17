@@ -79,6 +79,7 @@ class InstrumentRow:
     pip_size: float
     enabled: bool
     hours: TradingHours | None
+    m1_depth: str | None = None  # minute history kept ('3m', '1y', '2y'); None: the default
 
 
 class CandleStore:
@@ -492,7 +493,7 @@ class CandleStore:
     ) -> list[InstrumentRow]:
         sql = (
             "SELECT source, instrument, provider_symbol, display_name, decimals, pip_size,"
-            " enabled, hours_json FROM instruments WHERE (? IS NULL OR source=?)"
+            " enabled, hours_json, m1_depth FROM instruments WHERE (? IS NULL OR source=?)"
         )
         if enabled_only:
             sql += " AND enabled=1"
@@ -500,10 +501,24 @@ class CandleStore:
             rows = await cur.fetchall()
         return [
             InstrumentRow(
-                r[0], r[1], r[2], r[3], r[4], r[5], bool(r[6]), TradingHours.from_json(r[7])
+                r[0], r[1], r[2], r[3], r[4], r[5], bool(r[6]), TradingHours.from_json(r[7]), r[8]
             )
             for r in rows
         ]
+
+    async def set_m1_depth(self, source: str, instrument: str, depth: str | None) -> bool:
+        """An instrument's minute history ('3m', '1y', '2y', None for the default). False if
+        the instrument is unknown."""
+        from openchart.retention import M1_DEPTHS
+
+        if depth is not None and depth not in M1_DEPTHS:
+            raise ValueError(f"minute history must be one of {list(M1_DEPTHS)}, got {depth!r}")
+        cur = await self.conn.execute(
+            "UPDATE instruments SET m1_depth=? WHERE source=? AND instrument=?",
+            (depth, source, instrument),
+        )
+        await self.conn.commit()
+        return cur.rowcount > 0
 
     async def set_instrument_enabled(self, source: str, instrument: str, enabled: bool) -> bool:
         """Show or hide an instrument. Its stored history is kept. False if unknown."""
@@ -614,6 +629,52 @@ class CandleStore:
         self._series.pop((source, instrument), None)
         self._epoch[(source, instrument)] += 1
         return counts
+
+    # Minute history depth (storage steps 2): minutes that ended at or before a limit
+
+    async def count_m1_before(
+        self, source: str, instrument: str, cutoff: int
+    ) -> tuple[int, int | None, int | None]:
+        """(count, oldest, newest) of the minutes `purge_m1_before(cutoff)` would delete."""
+        series = await self.series(source, instrument)
+        if series is None:
+            return 0, None, None
+        async with self.conn.execute(
+            "SELECT COUNT(*), MIN(ts), MAX(ts) FROM candles_m1 WHERE series=? AND ts<=?",
+            (series.id, cutoff - STEP_SECONDS["M1"]),
+        ) as cur:
+            row = await cur.fetchone()
+        return (row[0], row[1], row[2]) if row and row[0] else (0, None, None)
+
+    async def purge_m1_before(self, source: str, instrument: str, cutoff: int) -> int:
+        """Delete the minutes that ended at or before `cutoff` (`ts + 60 <= cutoff`): nothing
+        newer is touched. H1 is kept. Returns the minutes deleted.
+
+        The hour where M1 takes over from H1 moves forward, so the cached 4h/D/W bars from
+        the oldest deleted minute to the hour after the new first minute are dropped and
+        recomputed (`_invalidate_cache`). The epoch moves before the delete is queued and
+        after it is committed, so a read under way is not kept by a cache."""
+        series = await self.series(source, instrument)
+        if series is None:
+            return 0
+        first = await self.first_ts(source, instrument)
+        if first is None or first + STEP_SECONDS["M1"] > cutoff:
+            return 0
+        key = (source, instrument)
+        self._epoch[key] += 1
+        try:
+            cur = await self.conn.execute(
+                "DELETE FROM candles_m1 WHERE series=? AND ts<=?",
+                (series.id, cutoff - STEP_SECONDS["M1"]),
+            )
+            deleted = cur.rowcount
+            new_first = await self.first_ts(source, instrument)
+            boundary = cutoff if new_first is None else -(-new_first // 3600) * 3600
+            await self._invalidate_cache(source, instrument, first, max(boundary, cutoff))
+            await self.conn.commit()
+        finally:
+            self._epoch[key] += 1
+        return deleted
 
     async def instrument(self, source: str, instrument: str) -> InstrumentRow | None:
         for row in await self.instruments(source):

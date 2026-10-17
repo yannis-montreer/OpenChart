@@ -25,6 +25,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
+from openchart import retention
 from openchart.market.backfill import (
     CLOSURE_MINUTES,
     DEEP_HISTORY_START,
@@ -90,6 +91,7 @@ class Feed:
         cache: CandleCache | None = None,
         deep_history: bool = True,
         backfill_years: float = 2.0,
+        m1_depth_days: dict[str, int] | None = None,
         flush_interval: float = 60.0,
         status_interval: float = 60.0,
         refresh_interval: float = 60.0,
@@ -101,6 +103,9 @@ class Feed:
         self.hours = hours or {}  # per instrument, to tell holes from market closures
         self.tick_writer = tick_writer
         self.backfill_years = backfill_years
+        # Minute history per instrument (`retention`): the download stops there, and the
+        # daily run deletes what is older, so the two never fight.
+        self.m1_depth_days = m1_depth_days or {}
         self.flush_interval = flush_interval
         self.status_interval = status_interval
         self.refresh_interval = refresh_interval
@@ -148,13 +153,20 @@ class Feed:
             )
             log.info("%s: history up to %s (%d new)", instrument, result.last_ts, result.written)
 
+    def m1_target(self, instrument: str, now: float) -> int:
+        """How far back an instrument's minutes are downloaded: its depth (`retention`)."""
+        days = self.m1_depth_days.get(instrument)
+        if days is None:
+            days = retention.years_to_days(self.backfill_years)
+        return retention.cutoff(now, days)
+
     async def download(self, instrument: str) -> None:
         """An instrument's history, newest first: all of H1 (1h and higher charts are
         complete within seconds), then M1 back to `backfill_years`. Resumes from the
         oldest stored candle; a failure is retried without stopping anything else."""
         info = self.history[instrument]
         now = time.time()
-        target = int(now - 365.25 * 86400 * self.backfill_years)
+        target = self.m1_target(instrument, now)
 
         def progress_for(phase: str, floor: float):
             def progress(written: int, ts: int, direction: str) -> None:

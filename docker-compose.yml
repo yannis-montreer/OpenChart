@@ -33,6 +33,10 @@ services:
       - openchart-data:/data
       - worker-socket:/run/ocw
     depends_on: [indicator-worker]
+    # At most 3 files of 10 MB of output kept (Docker keeps everything by default).
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
 
   indicator-worker:
     image: openchart:local
@@ -50,6 +54,9 @@ services:
     pids_limit: 32
     volumes:
       - worker-socket:/run/ocw  # the socket only, never the data volume
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
 
 volumes:
   openchart-data:

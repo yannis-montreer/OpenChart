@@ -17,7 +17,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from openchart import __version__
+from openchart import __version__, retention
 from openchart.config import Config, ConfigError, load_config
 from openchart.lock import DataFolderInUse, DataFolderLock, exclusive
 from openchart.market.backfill import (
@@ -172,11 +172,19 @@ async def _ensure_instrument(ctx: Context, instrument: str) -> None:
 
 
 async def _cmd_backfill(config: Config, args: argparse.Namespace) -> int:
-    """Newest first, like the server: H1 (with --deep), then M1 back to `--years`."""
-    years = args.years if args.years is not None else config.backfill_years
-    start = datetime.now(UTC) - timedelta(days=365.25 * years)
+    """Newest first, like the server: H1 (with --deep), then M1 back to `--years` (default:
+    the instrument's minute history, `retention`)."""
     async with _context(config, writes=True, what="run openchart backfill") as ctx:
         await _ensure_instrument(ctx, args.instrument)
+        row = await ctx.store.instrument(ctx.provider.name, args.instrument)
+        depth = retention.m1_depth_days(row.m1_depth if row else None, config.backfill_years)
+        days = depth if args.years is None else 365.25 * args.years
+        start = datetime.now(UTC) - timedelta(days=days)
+        if days > depth:
+            print(
+                f"Note: minutes older than {args.instrument}'s minute history ({depth} days)"
+                " are deleted by the server's next daily run."
+            )
         before = await ctx.store.count(ctx.provider.name, args.instrument)
 
         def progress(written: int, ts: int, direction: str) -> None:
@@ -318,6 +326,69 @@ async def _cmd_purge(config: Config, args: argparse.Namespace) -> int:
         if ticks.exists():
             shutil.rmtree(ticks)
         print(f"Deleted. Add {name} again in Settings, Instruments to download it afresh.")
+        if args.no_vacuum:
+            print(
+                "The database file was not compacted (--no-vacuum): SQLite reuses the freed"
+                " space for new rows."
+            )
+            return 0
+        # SQLite keeps freed pages in the file; VACUUM gives them back to the disk. It
+        # needs the database to itself, which `purge` already has (the server is stopped).
+        before = _db_size(config.db_path)
+        print(f"Compacting the database (VACUUM), {before / 1e6:.1f} MB ...", flush=True)
+        started = time.monotonic()
+        await conn.execute("VACUUM")
+        await conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        after = _db_size(config.db_path)
+        print(
+            f"VACUUM: {before / 1e6:.1f} MB to {after / 1e6:.1f} MB"
+            f" in {time.monotonic() - started:.1f} s."
+        )
+    return 0
+
+
+def _db_size(path: Path) -> int:
+    """The database with its write-ahead log, as the disk sees it."""
+    return sum(p.stat().st_size for p in (path, Path(f"{path}-wal")) if p.exists())
+
+
+async def _cmd_retention(config: Config, args: argparse.Namespace) -> int:
+    """What the server's daily run would delete today (tick days, old minutes, old service
+    logs). Read-only: runs beside a server, and deletes nothing."""
+    config = _data_dir(config, args)
+    now = time.time()
+    async with _database(config, writes=False, what="run openchart retention") as db:
+        store = CandleStore(db.conn)
+        app = await load_app_settings(SettingsStore(db.conn), config)
+        rows = []
+        for source in sorted({r.source for r in await store.instruments(enabled_only=True)}):
+            rows.append((source, await store.instruments(source, enabled_only=True)))
+        since = await SettingsStore(db.conn).get(retention.SINCE_KEY)
+        report = retention.Report()
+        days = retention.TICK_RETENTION[app.tick_retention]
+        for source, instruments in rows:
+            if days is not None:
+                report.ticks += retention.expired_tick_days(config.ticks_dir, source, now, days)
+            report.m1 += await retention.plan_m1(
+                store, source, instruments, now, config.backfill_years
+            )
+    print(f"Data folder {config.data_dir}, {retention.fmt_ts(int(now))} UTC.")
+    for line in retention.describe(report, app.tick_retention):
+        print(line)
+    logs = config.data_dir / "logs"
+    rotated = sorted(logs.glob("service-*.log")) if logs.is_dir() else []
+    extra = max(0, len(rotated) - retention.SERVICE_LOGS_KEPT)
+    print(f"Rotated service logs: {len(rotated)}, {extra} would go (the newest 5 are kept).")
+    if since is None:
+        print("The server has not run with these limits yet: it applies them from a day after")
+        print("its first start with this version (and logs what it would delete until then).")
+    elif now < since + retention.GRACE_SECONDS:
+        start = retention.fmt_ts(int(since + retention.GRACE_SECONDS))
+        print(f"The server applies these from {start} UTC (a day after its first start).")
+    print(
+        "Nothing was deleted. The server deletes these at start and just after 00:00 UTC"
+        " each day; change the limits in Settings (Data, Instruments)."
+    )
     return 0
 
 
@@ -398,9 +469,23 @@ def in_container() -> bool:
     return Path("/.dockerenv").exists() or bool(os.environ.get("container"))  # noqa: SIM112 (lowercase by design)
 
 
-async def _cmd_run(config: Config, args: argparse.Namespace) -> int:
+def access_log_enabled() -> bool:
+    """uvicorn's line per HTTP request: off unless OPENCHART_ACCESS_LOG=1 (an open chart with
+    an indicator makes about 50 requests a minute; failed requests are logged anyway)."""
+    value = os.environ.get("OPENCHART_ACCESS_LOG", "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def uvicorn_server(app, host: str, port: int, log_level: str):
     import uvicorn
 
+    config = uvicorn.Config(
+        app, host=host, port=port, log_level=log_level, access_log=access_log_enabled()
+    )
+    return uvicorn.Server(config)
+
+
+async def _cmd_run(config: Config, args: argparse.Namespace) -> int:
     from openchart.api.app import create_app
     from openchart.server import Server
 
@@ -444,10 +529,7 @@ async def _cmd_run(config: Config, args: argparse.Namespace) -> int:
             host,
             port,
         )
-    app = create_app(Server(config))
-    server = uvicorn.Server(
-        uvicorn.Config(app, host=host, port=port, log_level=config.log_level.lower())
-    )
+    server = uvicorn_server(create_app(Server(config)), host, port, config.log_level.lower())
     await server.serve()
     if not server.started:  # uvicorn logged why; a service manager must see a failure
         return EXIT_STARTUP_FAILED
@@ -916,6 +998,7 @@ COMMANDS = {
     "rebuild-cache": _cmd_rebuild_cache,
     "reset-password": _cmd_reset_password,
     "purge": _cmd_purge,
+    "retention": _cmd_retention,
     "run": _cmd_run,
     "backup": _cmd_backup,
     "secrets": _cmd_secrets,
@@ -962,6 +1045,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--drawings-and-alerts",
         action="store_true",
         help="also delete the instrument's drawings, alerts and alert log",
+    )
+    p.add_argument(
+        "--no-vacuum",
+        action="store_true",
+        help="do not compact the database file afterwards (VACUUM, on by default)",
+    )
+    p.add_argument("--data-dir", help="the data folder (default data/, from config)")
+    p = sub.add_parser(
+        "retention",
+        help="show what the daily run would delete (old ticks, minutes, logs); deletes nothing",
     )
     p.add_argument("--data-dir", help="the data folder (default data/, from config)")
     p = sub.add_parser("run", help="start the server: API, websocket and live feed")

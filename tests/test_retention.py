@@ -30,10 +30,11 @@ from openchart.market.instruments import METAL_HOURS
 from openchart.market.series import SeriesReader
 from openchart.market.timeframes import TIMEFRAMES
 from openchart.providers.fake import aggregate_candles, synthetic_m1
+from openchart.settings import SettingsStore
 from openchart.store.candles import CandleStore
 from openchart.store.sqlite import Database
 from openchart.store.ticks import SCHEMA, TickWriter
-from tests.conftest import GOLD
+from tests.conftest import EURO, GOLD
 
 try:
     from openchart import retention as rt
@@ -193,7 +194,7 @@ async def test_the_m1_purge_deletes_only_minutes_that_ended_before_the_limit(sto
 
 
 async def test_the_m1_purge_bumps_the_epoch_before_and_after(store):
-    await store.upsert_m1("fake", I, synthetic_m1(utc(2026, 10, 5), utc(2026, 10, 7)))
+    await store.upsert_m1("fake", I, synthetic_m1(int(utc(2026, 10, 5)), int(utc(2026, 10, 7))))
     key = ("fake", I)
     seen = []
 
@@ -227,7 +228,7 @@ async def test_after_the_purge_the_derived_bars_equal_a_fresh_computation(store)
 
 
 async def test_nothing_older_nothing_to_delete(store):
-    await store.upsert_m1("fake", I, synthetic_m1(utc(2026, 10, 10), utc(2026, 10, 11)))
+    await store.upsert_m1("fake", I, synthetic_m1(int(utc(2026, 10, 10)), int(utc(2026, 10, 11))))
     assert await store.purge_m1_before("fake", I, int(utc(2026, 10, 10))) == 0
     assert await store.count_m1_before("fake", I, int(utc(2026, 10, 10))) == (0, None, None)
     assert await store.purge_m1_before("fake", "NOPE", int(utc(2026, 10, 10))) == 0
@@ -246,9 +247,9 @@ async def test_the_depth_is_stored_per_instrument(store):
 # The server's daily job and the dry run
 
 
-@pytest.fixture
-def seeded(harness):
-    """A data folder with ticks of 40 days and minutes either side of the 2-year limit."""
+def seed_folder(harness, since=lambda now: now - 2 * DAY):
+    """A data folder with ticks of 40 days and minutes either side of the 2-year limit,
+    whose limits apply since `since(now)` (None: never started with them)."""
     now = time.time()
 
     async def seed():
@@ -257,15 +258,50 @@ def seeded(harness):
             await s.upsert_instrument("fake", GOLD, H)
             await s.upsert_m1("fake", I, synthetic_m1(int(now) - 735 * DAY, int(now) - 725 * DAY))
             await s.upsert_m1("fake", I, synthetic_m1(int(now) - 2 * DAY, int(now) - 60))
+            # A removed (disabled) instrument with minutes older than any limit: kept.
+            await s.upsert_instrument("fake", EURO, None, enabled=False)
+            await s.upsert_m1(
+                "fake",
+                "EUR_USD",
+                synthetic_m1(int(now) - 900 * DAY, int(now) - 899 * DAY, base=1.1),
+            )
+            if since is not None:
+                await SettingsStore(db.conn).set("retention_since", since(now))
 
     asyncio.run(seed())
     days = seed_days(harness.config.ticks_dir, now, back=40)
+    logs = harness.config.data_dir / "logs"
+    logs.mkdir()
+    (logs / "service.log").write_text("live")
+    for k in range(7):
+        (logs / f"service-2026100{k}T000000.000.log").write_text("old")
     return harness, now, days
 
 
-async def m1_stamps(config: Config) -> list[int]:
+@pytest.fixture
+def seeded(harness):
+    return seed_folder(harness)
+
+
+def test_the_first_start_deletes_nothing_for_a_day(harness, caplog):
+    harness, _, _ = seed_folder(harness, since=None)
+    before = asyncio.run(m1_stamps(harness.config))
+    files = sorted(p for p in harness.config.ticks_dir.rglob("*") if p.is_file())
+    with caplog.at_level(logging.INFO), run_server(harness) as c:
+        wait_for_log(caplog, "the limits apply from")
+        later = c.portal.call(c.server.run_retention, time.time() + DAY - 60)
+        assert (later.m1, later.ticks) == ([], [])
+        assert set(before) <= set(asyncio.run(m1_stamps(harness.config)))  # the feed adds some
+        assert sorted(p for p in harness.config.ticks_dir.rglob("*") if p.is_file()) == files
+        after = c.portal.call(c.server.run_retention, time.time() + DAY + 60)
+    assert after.m1 and after.ticks
+    line = next(r.getMessage() for r in caplog.records if "the limits apply" in r.getMessage())
+    assert "XAU_USD" in line and "tick day" in line
+
+
+async def m1_stamps(config: Config, instrument: str = I) -> list[int]:
     async with await Database.open(config.db_path) as db:
-        return await CandleStore(db.conn).timestamps("fake", I)
+        return await CandleStore(db.conn).timestamps("fake", instrument)
 
 
 def test_the_dry_run_shows_what_would_go_and_deletes_nothing(seeded, capsys):
@@ -283,46 +319,64 @@ def test_the_dry_run_shows_what_would_go_and_deletes_nothing(seeded, capsys):
     assert sorted(p for p in harness.config.ticks_dir.rglob("*") if p.is_file()) == files
 
 
-def test_the_server_job_purges_and_logs(seeded, caplog):
-    harness, now, days = seeded
+def wait_for_log(caplog, text: str, seconds: float = 20.0) -> None:
+    end = time.monotonic() + seconds
+    while not any(text in r.getMessage() for r in caplog.records):
+        assert time.monotonic() < end, f"no log line with {text!r}"
+        time.sleep(0.05)
+
+
+def run_server(harness):
     from fastapi.testclient import TestClient
 
     from openchart.api.app import create_app
-    from tests.conftest import run_setup
 
-    with caplog.at_level(logging.INFO), TestClient(create_app(harness.server)) as c:
-        c.server = harness.server
-        assert run_setup(c).status_code == 200
-        assert any(t.get_name() == "retention" for t in harness.server._tasks)
-        report = c.portal.call(harness.server.run_retention, now)
+    client = TestClient(create_app(harness.server))
+    client.server = harness.server
+    return client
+
+
+def test_the_server_purges_at_start_and_logs_each_deletion(seeded, caplog):
+    harness, now, days = seeded
+    with caplog.at_level(logging.INFO), run_server(harness) as c:
+        assert any(t.get_name() == "retention" for t in c.server._tasks)
+        wait_for_log(caplog, "retention: XAU_USD minutes")
+        again = c.portal.call(c.server.run_retention, time.time())
     stamps = asyncio.run(m1_stamps(harness.config))
     old = [ts for ts in stamps if ts < now - 3 * DAY]
     assert old and min(old) + 60 > now - 731 * DAY  # older ones went, younger ones stayed
     assert max(old) >= now - 726 * DAY
     left = sorted(p.name for p in (harness.config.ticks_dir / "fake" / I).iterdir())
     assert left == sorted(f"date={d}" for d in days if day_end(d) > now - 30 * DAY)
-    messages = [r.getMessage() for r in caplog.records]
-    assert any("retention" in m and "minutes" in m for m in messages)
-    assert report.m1 and report.ticks
+    messages = [r.getMessage() for r in caplog.records if "retention:" in r.getMessage()]
+    gone = [d for d in days if day_end(d) <= now - 30 * DAY]
+    assert sum("ticks of XAU_USD" in m for m in messages) == len(gone)
+    assert sum("XAU_USD minutes" in m for m in messages) == 1
+    assert (again.m1, again.ticks) == ([], [])  # nothing left to delete the second time
+    euro = asyncio.run(m1_stamps(harness.config, "EUR_USD"))
+    assert len(euro) >= 1440  # removed in Settings: its day of minutes is kept, however old
+    logs = sorted(p.name for p in (harness.config.data_dir / "logs").iterdir())
+    assert len(logs) == 6 and "service.log" in logs
+
+
+async def _choose(config: Config, choice: str) -> None:
+    async with await Database.open(config.db_path) as db:
+        await SettingsStore(db.conn).set("tick_retention", choice)
 
 
 @pytest.mark.parametrize("choice", ["forever", "off"])
-def test_forever_and_off_delete_no_ticks(seeded, choice):
+def test_forever_and_off_delete_no_ticks(seeded, choice, caplog):
     harness, now, _ = seeded
-    from fastapi.testclient import TestClient
-
-    from openchart.api.app import create_app
-    from tests.conftest import run_setup
-
+    asyncio.run(_choose(harness.config, choice))
     files = sorted(p for p in harness.config.ticks_dir.rglob("*") if p.is_file())
-    with TestClient(create_app(harness.server)) as c:
-        c.server = harness.server
+    with caplog.at_level(logging.INFO), run_server(harness) as c:
+        wait_for_log(caplog, "retention: XAU_USD minutes")  # the start's run is over
+        from tests.conftest import run_setup
+
         assert run_setup(c).status_code == 200
-        r = c.put("/api/settings", json={"tick_retention": choice})
-        assert r.status_code == 200, r.text
-        assert r.json()["tick_retention"] == choice
-        assert r.json()["store_ticks"] is (choice != "off")
-        c.portal.call(harness.server.run_retention, now)
+        s = c.get("/api/settings").json()
+        assert (s["tick_retention"], s["store_ticks"]) == (choice, choice != "off")
+        c.portal.call(c.server.run_retention, now + 400 * DAY)
     assert sorted(p for p in harness.config.ticks_dir.rglob("*") if p.is_file()) == files
 
 
@@ -437,8 +491,12 @@ def test_run_passes_the_access_log_switch_to_uvicorn(monkeypatch):
     monkeypatch.setattr(uvicorn, "Config", fake_config)
     monkeypatch.delenv("OPENCHART_ACCESS_LOG", raising=False)
     with pytest.raises(Stop):
-        cli.serve_app(object(), "127.0.0.1", 8000, "info")
+        cli.uvicorn_server(object(), "127.0.0.1", 8000, "info")
     assert seen["access_log"] is False
+    monkeypatch.setenv("OPENCHART_ACCESS_LOG", "1")
+    with pytest.raises(Stop):
+        cli.uvicorn_server(object(), "127.0.0.1", 8000, "info")
+    assert seen["access_log"] is True
 
 
 def test_only_the_newest_five_rotated_service_logs_are_kept(tmp_path):

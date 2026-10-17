@@ -4,6 +4,25 @@ import { account, api, type Settings } from "../api";
 import { isDownloading, lineText } from "./download";
 import { field, primary, resultLine, secondary, secretInput, segmented, textInput, toggleSwitch, withBusy } from "./forms";
 import { button, h, icon, type IconName } from "./dom";
+import {
+  DEFAULT_M1_DEPTH,
+  DEFAULT_TICK_RETENTION,
+  M1_DEPTHS,
+  M1_HELP,
+  TICK_HELP,
+  TICK_RETENTION,
+  depthLabel,
+  depthLine,
+  depthSaved,
+  tickLabel,
+} from "./retention";
+
+/** A select of `choices`, labelled by `label`, with `current` selected. */
+function choiceSelect(choices: readonly string[], current: string, label: (c: string) => string): HTMLSelectElement {
+  const select = h("select", { class: "input" }) as HTMLSelectElement;
+  select.replaceChildren(...choices.map((c) => h("option", { value: c, selected: c === current }, label(c))));
+  return select;
+}
 
 export type Section = "security" | "broker" | "telegram" | "instruments" | "data" | "network";
 
@@ -259,6 +278,7 @@ export class SettingsDialog {
     const results = h("div", { class: "inst-list" });
     const result = resultLine();
     const search = textInput({ placeholder: "Search, e.g. EUR, gold, NAS…" });
+    const newDepth = choiceSelect(M1_DEPTHS, DEFAULT_M1_DEPTH, depthLabel);
 
     let anyDownloading = false;
     const renderMine = async () => {
@@ -285,10 +305,27 @@ export class SettingsDialog {
               }
             }),
           );
+          const depth = choiceSelect(M1_DEPTHS, i.m1_depth ?? DEFAULT_M1_DEPTH, depthLabel);
+          depth.title = M1_HELP;
+          depth.setAttribute("aria-label", `Minute history of ${i.instrument}`);
+          depth.addEventListener("change", async () => {
+            depth.disabled = true;
+            try {
+              const saved = await account.setM1Depth(i.instrument, depth.value);
+              result.ok(depthSaved(i.instrument, saved.m1_depth, saved.downloading));
+              await renderMine();
+            } catch (err) {
+              result.fail(errorText(err));
+            } finally {
+              depth.disabled = false;
+            }
+          });
+          const reach = i.m1_from !== undefined ? h("small", {}, depthLine(i.m1_depth ?? DEFAULT_M1_DEPTH, i.m1_from)) : null;
           return h(
             "div",
             { class: "inst-row" },
-            h("div", { class: "name" }, h("b", {}, i.instrument), h("small", {}, i.display_name), downloading(i.instrument)),
+            h("div", { class: "name" }, h("b", {}, i.instrument), h("small", {}, i.display_name), reach, downloading(i.instrument)),
+            depth,
             rows.length > 1 ? remove : null,
           );
         }),
@@ -312,7 +349,7 @@ export class SettingsDialog {
                   withBusy(add, async () => {
                     result.busy(`Adding ${i.instrument}…`);
                     try {
-                      await account.addInstrument(i.instrument);
+                      await account.addInstrument(i.instrument, newDepth.value);
                       this.instrumentsChanged = true;
                       result.ok(`${i.instrument} added. Its history downloads in the background, newest first: hourly candles within seconds, then minute candles (a few minutes).`);
                       await renderMine();
@@ -347,17 +384,15 @@ export class SettingsDialog {
       h("hr", { class: "section-sep" }),
       h("h3", {}, "Add an instrument"),
       field("Search your OANDA account", search),
+      field("Minute history", newDepth, M1_HELP),
       results,
     ];
   }
 
   private data(): Node[] {
     const s = this.settings!;
-    const ticks = toggleSwitch(
-      "Store raw ticks",
-      s.store_ticks,
-      "Needed for second charts (1s to 30s) of past periods and later for replays. Uses roughly 10 to 30 MB per instrument per day.",
-    );
+    const keep = s.tick_retention ?? (s.store_ticks ? DEFAULT_TICK_RETENTION : "off");
+    const ticks = choiceSelect(s.tick_retention_choices ?? TICK_RETENTION, keep, tickLabel);
     const tz = h("select", { class: "input" }) as HTMLSelectElement;
     const local = Intl.DateTimeFormat().resolvedOptions().timeZone;
     const zones = [...new Set([s.timezone || local, local, ...TIMEZONES])];
@@ -368,7 +403,7 @@ export class SettingsDialog {
       withBusy(save, async () => {
         result.busy();
         try {
-          await this.save({ store_ticks: ticks.input.checked, timezone: tz.value });
+          await this.save({ tick_retention: ticks.value, timezone: tz.value });
           result.ok("Saved.");
         } catch (err) {
           result.fail(errorText(err));
@@ -377,7 +412,7 @@ export class SettingsDialog {
     );
     return [
       h("h3", {}, "Data"),
-      ticks.el,
+      field("Keep raw ticks", ticks, TICK_HELP),
       h("hr", { class: "section-sep" }),
       h("h3", {}, "Time"),
       field("Timezone for alerts", tz, "Used for times in Telegram messages. Each browser picks its own chart timezone at the bottom right."),

@@ -9,10 +9,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from openchart import retention
 from openchart.alerts.service import AlertService
 from openchart.api.auth import Auth
 from openchart.api.hub import Hub
@@ -48,6 +50,7 @@ log = logging.getLogger(__name__)
 DEFAULT_SOURCE = "oanda"
 FEED_RETRY_SECONDS = 30.0
 STATUS_INTERVAL = 5.0
+RETENTION_CHECK_SECONDS = 60.0  # how often the date is checked: the run is just after 00:00 UTC
 
 ProviderFactory = Callable[[OandaConfig], Provider]
 
@@ -174,6 +177,76 @@ class Server:
             )
         await self.reconfigure()
         await self.alerts.announce_start()
+        self._tasks.append(asyncio.create_task(self._retention_loop(), name="retention"))
+
+    async def _retention_loop(self) -> None:
+        """At start and once a UTC day: `run_retention`. A failure is logged and retried
+        the next day; it never stops the server."""
+        last = None
+        while True:
+            now = time.time()
+            if retention.retention_due(last, now):
+                last = retention.utc_day(now)
+                try:
+                    await self.run_retention(now)
+                except Exception:
+                    log.exception("retention")
+            await asyncio.sleep(RETENTION_CHECK_SECONDS)
+
+    async def run_retention(self, now: float | None = None) -> retention.Report:
+        """Delete what is older than the limits (`openchart.retention`): tick days past the
+        tick setting, minutes past each enabled instrument's depth, old rotated service
+        logs. One log line per deletion; nothing newer than a limit is touched.
+
+        The first time an install runs this (no `retention_since` yet), it only logs what
+        would go and deletes nothing for `RETENTION_GRACE_SECONDS`: time to choose other
+        limits in Settings, or to see them with `openchart retention`, before anything goes."""
+        now = time.time() if now is None else now
+        report = retention.Report()
+        since = await self.settings.get(retention.SINCE_KEY)
+        if since is None:
+            since = now
+            await self.settings.set(retention.SINCE_KEY, since)
+        app = await self.app_settings()
+        days = retention.TICK_RETENTION[app.tick_retention]
+        rows = await self.store.instruments(self.source, enabled_only=True)
+        plans = await retention.plan_m1(
+            self.store, self.source, rows, now, self.config.backfill_years
+        )
+        deletes_ticks = days is not None and self.tick_writer is not None
+        if now < since + retention.GRACE_SECONDS:
+            ticks = []
+            if deletes_ticks:
+                ticks = retention.expired_tick_days(self.config.ticks_dir, self.source, now, days)
+            log.warning(
+                "retention: the limits apply from %s UTC (a day after their first start);"
+                " nothing deleted before then. It would delete %d tick day(s) and %s minutes."
+                " See `openchart retention`; change the limits in Settings (Data, Instruments).",
+                retention.fmt_ts(int(since + retention.GRACE_SECONDS)),
+                len(ticks),
+                ", ".join(f"{p.instrument} {p.minutes:,}" for p in plans) or "no",
+            )
+            return report
+        if deletes_ticks:
+            report.ticks = await asyncio.to_thread(self.tick_writer.delete_expired, now, days)
+        for p in plans:
+            if not p.minutes:
+                continue
+            deleted = await self.store.purge_m1_before(self.source, p.instrument, p.cutoff)
+            log.info(
+                "retention: %s minutes before %s UTC deleted: %d (%s to %s; kept %s)",
+                p.instrument,
+                retention.fmt_ts(p.cutoff),
+                deleted,
+                retention.fmt_ts(p.oldest),
+                retention.fmt_ts(p.newest),
+                p.depth,
+            )
+            report.m1.append(p)
+        report.logs = await asyncio.to_thread(
+            retention.prune_service_logs, self.config.data_dir / "logs"
+        )
+        return report
 
     @property
     def isolation(self) -> Isolation | None:
@@ -237,6 +310,10 @@ class Server:
                     cache=self.cache,
                     deep_history=cfg.deep_history,
                     backfill_years=cfg.backfill_years,
+                    m1_depth_days={
+                        r.instrument: retention.m1_depth_days(r.m1_depth, cfg.backfill_years)
+                        for r in rows
+                    },
                 )
                 self.feed.tick_listeners.append(self.hub.on_tick)
                 self.feed.on_closures = self.broadcast_closures
