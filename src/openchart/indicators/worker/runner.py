@@ -171,6 +171,7 @@ class IndicatorRunner:
         self.state = "stopped"  # starting | ready | restarting | failed | stopped
         self.last_error: str | None = None
         self.restarts = 0
+        self._rid = 0  # the last request id (S6): every answer must echo its request's
         self.start_seconds: float | None = None
         self.stderr_tail: collections.deque[str] = collections.deque(maxlen=40)
         self.ready_at = -1e9  # monotonic time the current worker became ready
@@ -583,7 +584,9 @@ class IndicatorRunner:
     async def _ask(
         self, live: _Live, header: dict[str, Any], arrays: Mapping[str, Any], wait: float
     ) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
-        data = encode(header, arrays)
+        self._rid += 1
+        rid = self._rid
+        data = encode(dict(header, rid=rid), arrays)
 
         def write() -> None:
             live.handle.stdin.write(data)
@@ -599,6 +602,9 @@ class IndicatorRunner:
                 raise _Died(sent=True)
             if isinstance(got, _Bad):
                 raise _BadFrame(got.reason)
+            if got[0].get("rid") != rid:  # S6: an answer read for the wrong request
+                live.handle.kill()
+                raise _BadFrame(f"an answer to another request ({got[0].get('rid')!r}, not {rid})")
             return got
 
         return await asyncio.wait_for(exchange(), wait)

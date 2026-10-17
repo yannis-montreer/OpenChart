@@ -31,6 +31,7 @@ from openchart.api.routes_account import account_routes, client_host
 from openchart.api.routes_alerts import alert_routes
 from openchart.api.routes_charts import chart_routes
 from openchart.api.routes_custom_indicators import custom_routes
+from openchart.api.routes_definitions import definition_routes
 from openchart.api.routes_drawings import drawing_routes
 from openchart.api.routes_indicators import indicator_routes
 from openchart.api.routes_layouts import layout_routes
@@ -134,6 +135,7 @@ def create_app(server: Server) -> FastAPI:
     app.include_router(indicator_routes(server))
     app.include_router(chart_routes(server, charts))
     app.include_router(custom_routes(server, charts))
+    app.include_router(definition_routes(server, charts))
     app.include_router(layout_routes(server, charts))
 
     @app.get("/api/health")

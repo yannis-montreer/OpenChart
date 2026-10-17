@@ -141,6 +141,15 @@ class Worker:
         }
 
     def handle(self, req: dict[str, Any], arrays: dict[str, Any]) -> tuple[dict, dict]:
+        """The answer to one request, carrying the request's id (`rid`, S6): the server
+        refuses an answer whose id is not the one it sent, so a frame a script writes on
+        the stream fails loudly instead of being read as another request's answer."""
+        head, out = self._handle(req, arrays)
+        if "rid" in req:
+            head = {**head, "rid": req["rid"]}
+        return head, out
+
+    def _handle(self, req: dict[str, Any], arrays: dict[str, Any]) -> tuple[dict, dict]:
         cmd = req.get("cmd")
         try:
             if cmd == "probe":
