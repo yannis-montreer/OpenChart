@@ -23,6 +23,7 @@ from openchart.indicators._registry import Registry, load_indicators
 from openchart.indicators.worker.isolation import Isolation, start_worker
 from openchart.indicators.worker.runner import IndicatorRunner
 from openchart.lock import DataFolderInUse, DataFolderLock, in_use_message
+from openchart.market.bars import BarCache
 from openchart.market.cache import CandleCache
 from openchart.market.candle_builder import CandleBuilder
 from openchart.market.feed import Feed
@@ -157,6 +158,8 @@ class Server:
             lambda instrument: self.tick_writer.buffered(instrument) if self.tick_writer else [],
             cache=self.cache,
             live=lambda instrument: self.builder.forming_m1(instrument),
+            # The read path only: alerts, repair, downloads and the feed read the store.
+            bars=BarCache(self.store),
         )
         with contextlib.suppress(OSError):
             self.indicators_dir.mkdir(parents=True, exist_ok=True)

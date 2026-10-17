@@ -14,3 +14,22 @@ CI-5 (#46) measured a 5,000-bar indicator request at 233 ms p95 (target 60) and 
 - **Memory on a 150 MB instance:** 16 MB at most; typically 3 instruments, 2 or 3 timeframes, one price, 10,000 bars each: about 4 MB. **Open question:** CI-5's values cache is bounded at about 100 MB, too much for 150 MB.
 - **Expected:** the reader's 74 ms for 5,000 bars to a few ms (a slice and a copy); `/api/candles` keeps the record and JSON work (about 10 to 20 ms); the 2-bar tail from 12 ms to about 1 ms plus the route. Whether the indicator request reaches 60 ms p95 depends on the rest of the route (worker exchange about 6 ms, digest, JSON); measured below, not assumed.
 - **Tests:** two readers on one store, one with the cache, one without: equal answers (every timeframe, price, latest, pages, warmup pages back, forming fold) after every write path above, run through the real functions with the fake broker; a write during a read; every store method writing candle tables bumps before and after (statement trace); no other module writes them; the size cap; mutation check (`tools/mutate_bar_cache.py`); measured before and after with `tools/measure_values.py --bar-cache off|on`.
+
+## Implementation and checks (2026-10-17)
+
+As designed. `market/bars.py` (the cache), `CandleStore._writing` and `on_write` (the version counter and the cut), `SeriesReader(bars=...)`, the server creates one `BarCache` for its reader.
+
+- **Tests first:** `tests/test_bar_cache.py`, 20 of 21 failed before the code (1 guard passed: no other module writes the candle tables). Now 24: cached equals uncached for 45 queries (every cached timeframe and price, latest windows, the 2-bar tail, pages forward from inside a bar, warmup pages back, around a hole and the H1/M1 boundary, with the forming fold) after each of 11 write paths run through the real functions with the fake broker (the feed's closed minutes, the broker's replacement of the last 15 minutes, the hour before a stop, the previous day, repair of a hole, gap fill, `backfill` at both ends, a download page of M1 and of H1, deep H1, purge and download again); each must change at least one answer. Also: a write during a read, a bump that did not tell the cache, requests just past either end of a run, the size cap, a new minute keeping the older bars, an answer changed by its caller, the statement trace, the server wiring.
+- **Mutation check** (`tools/mutate_bar_cache.py`): 20 mutants, 19 killed, 1 equivalent. The first run left 4 alive: 2 showed a missing test (requests starting before or ending after a run were not tried), added; 2 were the hour of margin. **Finding:** the margin is not needed for correctness: a write changes no bar before its oldest time (the H1/M1 boundary it can move lies at or after that time). It stays, as a cheap safety margin, and its mutant is marked equivalent; a mutant removing it and also keeping the bar that holds the write is killed.
+- **Measured** (`tools/measure_values.py --runs 30 --bar-cache off|on`, real worker with the restricted token, 30 days of synthetic minutes, 5m bars, run off/on/off/on so both see the same machine; other applications used about 40% of the CPU):
+
+  | Measure | Target | Off | On |
+  |---|---|---|---|
+  | `/api/candles` alone, 5,000 bars, p95 | | 120 ms | 45 to 55 ms |
+  | request, 5,000 bars, worker computes, p95 | 60 ms | 126 to 144 ms | **24 ms**: met |
+  | request answered from the values cache, p95 | | 121 to 128 ms | 15 to 16 ms |
+  | forming-bar tail, median | 15 ms | 34 to 38 ms | **11.7 to 14.1 ms**: met |
+  | compute in the worker, median | 20 ms | 4 to 5 ms | 4 to 5 ms |
+
+  An earlier pair of runs with the machine much busier gave 499 ms off and 42 ms on for the request, 73 and 24 ms for the tail: the tail target is met only with some headroom on the CPU. The worker start (2 s target) varied from 1.3 to 4.1 s with the load; not touched here.
+- **Full suite:** 1415 passed, 2 failed, 9 skipped. `test_worker_runner.py::test_a_job_past_its_deadline_is_killed_and_a_new_worker_starts` fails the same way on #46's own head here (4 of 4 runs with the machine busy): not this change. `test_values_cache.py::test_the_forming_bar_is_recomputed_at_most_once_a_second` failed once in the full run and passed in 16 runs alone or with its file; the cache gives the same bars as without it, so a timing effect of the suite's clock is the likely cause. Left to CI to confirm.

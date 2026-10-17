@@ -48,7 +48,7 @@ DAY = 86400
 # every write that reaches stored bars changes them.
 M1_FROM, M1_TO = NOW - 6 * DAY, NOW - 2 * 3600
 H1_FROM = NOW - 30 * DAY
-HOLE = (NOW - 3 * DAY, NOW - 3 * DAY + 3 * 3600)
+HOLE = (NOW - DAY - 6 * 3600, NOW - DAY - 3 * 3600)  # NOW is a Wednesday, 15:00 UTC
 STORED_M1 = [c for c in synthetic_m1(M1_FROM, M1_TO, H) if not HOLE[0] <= c.ts < HOLE[1]]
 STORED_H1 = aggregate_candles(synthetic_m1(H1_FROM, M1_FROM, H), 3600)
 BROKER_M1 = synthetic_m1(NOW - 12 * DAY, NOW, H, base=2001.0)
@@ -85,9 +85,11 @@ def queries():
     return out
 
 
-async def answers(reader: SeriesReader) -> list[tuple[tuple, pd.DataFrame]]:
+async def answers(reader: SeriesReader, fixed_only=False) -> list[tuple[tuple, pd.DataFrame]]:
     out = []
     for q in queries():
+        if fixed_only and q[0] == "4h":
+            continue
         tf, price, start, end, limit, forming = q
         frame = await reader.candles(
             "fake", I, T[tf], price=price, start=start, end=end, limit=limit, now=Q_NOW,
@@ -164,9 +166,11 @@ async def gap_fill(store, provider):
     await bf.gap_fill(provider, store, I)
 
 
-async def backfill_forward(store, provider):
-    start = datetime.fromtimestamp(NOW - 4 * DAY, UTC)
-    await bf.backfill(provider, store, I, start, datetime.fromtimestamp(NOW - 3 * DAY, UTC))
+async def backfill_both_ends(store, provider):
+    """`openchart backfill`'s function: the tail after the newest minute, then the head
+    before the oldest, a window per transaction."""
+    start = datetime.fromtimestamp(M1_FROM - DAY, UTC)
+    await bf.backfill(provider, store, I, start, datetime.fromtimestamp(NOW, UTC))
 
 
 async def download_page_m1(store, provider):
@@ -199,7 +203,7 @@ WRITE_PATHS = [
     previous_day,
     repair_hole,
     gap_fill,
-    backfill_forward,
+    backfill_both_ends,
     download_page_m1,
     download_page_h1,
     deep_h1,
@@ -219,12 +223,10 @@ async def test_the_cache_serves_from_memory_once_primed(setup, monkeypatch):
         return await real(*args, **kwargs)
 
     monkeypatch.setattr(store, "read_frame", counting)
-    again = await answers(cached)
-    assert_same(again, first)
-    # The 4h queries read their tail from the store (not this cache); the rest from memory.
-    fixed = [r for r in reads if r[3] - r[2] < 4 * 3600]
-    assert fixed == []
-    assert cache.hits > 0
+    again = await answers(cached, fixed_only=True)
+    assert_same(again, [a for a in first if a[0][0] != "4h"])
+    assert reads == []  # 1m to 1h: all from memory (4h reads its tail from the store)
+    assert cache.hits >= len(again)
 
 
 @pytest.mark.parametrize("write", WRITE_PATHS, ids=lambda f: f.__name__)
@@ -241,8 +243,8 @@ async def test_cached_equals_uncached_after_every_write_path(setup, write):
 
 
 async def test_a_write_during_a_read_is_not_cached(setup, monkeypatch):
-    store, cache, cached, plain, _ = setup
-    await cached.candles("fake", I, T["5m"], limit=500, now=Q_NOW)
+    store, _cache, cached, plain, _ = setup
+    await cached.candles("fake", I, T["5m"], limit=2, now=Q_NOW)  # a run of the last 3 days
     gate, reading = asyncio.Event(), asyncio.Event()
     real = store.read_frame
 
@@ -253,15 +255,17 @@ async def test_a_write_during_a_read_is_not_cached(setup, monkeypatch):
         return frame
 
     monkeypatch.setattr(store, "read_frame", slow)
+    start = M1_FROM + 3600  # before the run: the cache must read
     read = asyncio.create_task(
-        cached.candles("fake", I, T["5m"], start=HOLE[0] - DAY, limit=5000, now=Q_NOW)
+        cached.candles("fake", I, T["5m"], start=start, limit=5000, now=Q_NOW)
     )
-    await reading.wait()
+    await asyncio.wait_for(reading.wait(), 10)
     monkeypatch.setattr(store, "read_frame", real)
-    await store.upsert_m1("fake", I, [candle(HOLE[0] - DAY + 600, 1990.0)])
+    await store.upsert_m1("fake", I, [candle(M1_FROM + 7200, 1990.0)])
     gate.set()
-    await read
-    for q in [dict(start=HOLE[0] - DAY, limit=5000), dict(limit=500)]:
+    got = await asyncio.wait_for(read, 10)
+    assert (got["l"] == 1989.0).any()  # read again whole after the write, as uncached
+    for q in [dict(start=start, limit=5000), dict(limit=500), dict(limit=2)]:
         a = await cached.candles("fake", I, T["5m"], now=Q_NOW, **q)
         b = await plain.candles("fake", I, T["5m"], now=Q_NOW, **q)
         pd.testing.assert_frame_equal(a, b, check_exact=True)
@@ -269,9 +273,64 @@ async def test_a_write_during_a_read_is_not_cached(setup, monkeypatch):
             assert (a["l"] == 1989.0).any()  # the minute written during the read is there
 
 
+async def test_a_new_minute_keeps_the_older_bars_in_memory(setup, monkeypatch):
+    """The feed writes a minute a minute: only bars from an hour before it are dropped."""
+    store, _cache, cached, plain, provider = setup
+    old = dict(start=M1_FROM + 3600, end=M1_TO - 3 * 3600, limit=5000, now=Q_NOW)
+    await cached.candles("fake", I, T["5m"], **old)
+    await feed_closed_minutes(store, provider)
+    reads = []
+    real = store.read_frame
+
+    async def counting(*args, **kwargs):
+        reads.append(args)
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(store, "read_frame", counting)
+    got = await cached.candles("fake", I, T["5m"], **old)
+    assert reads == []
+    monkeypatch.setattr(store, "read_frame", real)
+    pd.testing.assert_frame_equal(got, await plain.candles("fake", I, T["5m"], **old))
+
+
+async def test_requests_just_past_either_end_of_a_run(setup):
+    """A request that starts a few bars before a run, or ends a bar after it, reads the
+    missing bars: they are not taken as cached."""
+    _, _, cached, plain, _ = setup
+    start, end = HOLE[0] - DAY, HOLE[0] - DAY + 6 * 3600  # a Monday, market open
+    for name in ("1m", "5m", "15m"):
+        tf = T[name]
+        await cached.candles("fake", I, tf, start=start, end=end, limit=5000, now=Q_NOW)
+        for s, e in [
+            (start - 20 * 60, end),
+            (start - tf.seconds, end),
+            (start, end + tf.seconds),
+            (start, end + 60),
+            (start - tf.seconds, end + tf.seconds),
+        ]:
+            q = dict(start=s, end=e, limit=5000, now=Q_NOW)
+            a = await cached.candles("fake", I, tf, **q)
+            b = await plain.candles("fake", I, tf, **q)
+            pd.testing.assert_frame_equal(
+                a, b, check_exact=True, obj=f"{name} {s - start} {e - end}"
+            )
+
+
+async def test_changing_an_answer_does_not_change_the_cache(setup):
+    _, _, cached, plain, _ = setup
+    q = dict(limit=300, now=Q_NOW)
+    got = await cached.candles("fake", I, T["15m"], **q)
+    got.loc[0, "h"] = -1.0
+    got["c"] *= 2
+    pd.testing.assert_frame_equal(
+        await cached.candles("fake", I, T["15m"], **q),
+        await plain.candles("fake", I, T["15m"], **q),
+    )
+
+
 async def test_a_bump_that_did_not_tell_the_cache_drops_its_runs(setup):
     """A write path that only bumps the epoch (no oldest time) must not leave old bars."""
-    store, cache, cached, plain, _ = setup
+    store, _cache, cached, plain, _ = setup
     await answers(cached)
     await store.conn.execute(
         "UPDATE candles_m1 SET mid_c = mid_c + 1000 WHERE ts >= ?", (M1_TO - 3600,)
@@ -325,8 +384,7 @@ def test_no_other_module_names_the_candle_tables():
     offenders = [
         str(p.relative_to(SRC))
         for p in SRC.rglob("*.py")
-        if p not in allowed
-        and re.search(r"candles_(m1|h1)\b", p.read_text(encoding="utf-8"))
+        if p not in allowed and re.search(r"candles_(m1|h1)\b", p.read_text(encoding="utf-8"))
     ]
     assert offenders == []
 
