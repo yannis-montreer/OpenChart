@@ -17,6 +17,7 @@ from openchart.alerts.service import AlertService
 from openchart.api.auth import Auth
 from openchart.api.hub import Hub
 from openchart.config import Config, OandaConfig
+from openchart.indicators._cache import ValueCache
 from openchart.indicators._custom import CustomIndicators
 from openchart.indicators._registry import Registry, load_indicators
 from openchart.indicators.worker.isolation import Isolation, start_worker
@@ -88,6 +89,7 @@ class Server:
         self.indicators = Registry()  # built-in: they run here (D5)
         self.custom = CustomIndicators(self.indicators_dir)  # yours: they run in the worker
         self.indicator_runner: IndicatorRunner | None = None
+        self.values_cache = ValueCache()  # computed indicator values (CI-5)
         self._indicator_worker = indicator_worker  # tests that need no worker turn it off
         self._indicator_launchers = indicator_launchers
         self.db: Database | None = None

@@ -377,6 +377,24 @@ class CustomIndicators:
             "message": why,
         }
 
+    def from_cache(
+        self,
+        d: CustomDefinition,
+        frame: pd.DataFrame,
+        params: dict[str, Any],
+        info: Info | None,
+        series: dict[str, pd.Series],
+        *,
+        warmup: int = 0,
+    ) -> None:
+        """Values answered from the values cache (CI-5) still queue the save-time check for
+        these settings, as a computed answer does: a restyle is served from the cache, and
+        its settings would otherwise never be checked (`checks` null for good)."""
+        if d.status != "ok" or self.runner is None:
+            return
+        bars = {c: frame[c].to_numpy(dtype="float64") for c in ("ts", "o", "h", "l", "c", "v")}
+        self._want_check(d, params, info, bars, series, warmup, self.runner.last_job_s)
+
     def _want_check(self, d, params, info, bars, series, warmup, run_s) -> None:
         key = _settings_key(params)
         n = len(bars["ts"])

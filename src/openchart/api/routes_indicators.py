@@ -14,6 +14,7 @@ without it, a built-in wins and a custom file is found when no built-in has its 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
 from typing import Any
@@ -133,13 +134,36 @@ def indicator_routes(server: Server) -> APIRouter:
                 422, f"{indicator.name} failed: {type(exc).__name__}: {exc}"
             ) from None
         warm = min(max(warm, 0), MAX_WARMUP)
-        bars, frame = await read_bars(server, instrument, tf, price, from_, to, limit, warm)
+        bars, frame, forming = await read_bars(
+            server, instrument, tf, price, from_, to, limit, warm
+        )
 
-        try:
+        async def compute() -> dict[str, pd.Series]:
             if custom is not None:
-                series = await server.custom.compute(custom, frame, settings, info, warmup=warm)
+                return await server.custom.compute(custom, frame, settings, info, warmup=warm)
+            return await asyncio.to_thread(indicator.run, frame, settings, info)
+
+        # CI-5: the same values for the same version, inputs (not style) and bars.
+        style = {p.name for p in indicator.params if p.group == "style"}
+        about = (
+            "custom" if custom is not None else "builtin",
+            indicator.id,
+            custom.digest if custom is not None else "builtin",
+            json.dumps({k: v for k, v in settings.items() if k not in style}, sort_keys=True),
+            json.dumps(info.to_json(), sort_keys=True),
+            len(bars),
+        )
+        key = (*about, frame_digest(frame))
+        window = (*about, len(frame), int(frame["ts"].iloc[0]), int(frame["ts"].iloc[-1]))
+        try:
+            if frame.empty:
+                series = await compute()
             else:
-                series = await asyncio.to_thread(indicator.run, frame, settings, info)
+                series = await server.values_cache.get(
+                    key, compute, window=window if forming else None
+                )
+                if custom is not None:  # no-op unless this came from the cache
+                    server.custom.from_cache(custom, frame, settings, info, series, warmup=warm)
         except ScriptFailed as exc:
             raise _failed(indicator.name, exc) from None
         except WorkerUnavailable as exc:
@@ -173,9 +197,10 @@ async def read_bars(
     to: int | None,
     limit: int | None,
     warm: int,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """The bars `/api/candles` returns for this query (the forming bar included), and the
-    frame to compute on: those bars with `warm` earlier ones before them."""
+) -> tuple[pd.DataFrame, pd.DataFrame, bool]:
+    """The bars `/api/candles` returns for this query (the forming bar included), the
+    frame to compute on (those bars with `warm` earlier ones before them), and whether the
+    last bar is the forming one."""
     read = server.reader.candles
     bars = await read(
         server.source,
@@ -187,6 +212,7 @@ async def read_bars(
         limit=limit,
         forming=True,  # the bar that is forming has a value too (it is not stored yet)
     )
+    forming = "forming" in bars.attrs
     bars = bars[COLUMNS]
     before: list[pd.DataFrame] = []
     if warm and not bars.empty:
@@ -205,7 +231,15 @@ async def read_bars(
             before.insert(0, older[COLUMNS])
             first, need = int(older["ts"].iloc[0]), need - len(older)
     frame = pd.concat([*before, bars], ignore_index=True) if before else bars
-    return bars, frame.reset_index(drop=True)
+    return bars, frame.reset_index(drop=True), forming
+
+
+def frame_digest(frame: pd.DataFrame) -> str:
+    """The bars computed on, as a digest: rewritten bars are another key."""
+    h = hashlib.sha1(usedforsecurity=False)
+    for name in COLUMNS:
+        h.update(np.ascontiguousarray(frame[name].to_numpy(), dtype="<f8").tobytes())
+    return h.hexdigest()
 
 
 def shape(
