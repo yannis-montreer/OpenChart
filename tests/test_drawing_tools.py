@@ -163,3 +163,42 @@ def test_new_drawings_reach_every_browser(client):
         message = receive_until(ws, "drawing_changed")
         assert message["op"] == "create" and message["drawing"]["id"] == created["id"]
         assert message["drawing"]["type"] == "fib"
+
+
+def test_lock_and_hide_are_style_fields_stored_only_when_sent(client):
+    body = {"instrument": "XAU_USD", "type": "hline", "points": [pt(0, 2000.0)]}
+    plain = client.post("/api/drawings", json=body).json()
+    assert "locked" not in plain["style"] and "hidden" not in plain["style"]
+    both = client.post(
+        "/api/drawings", json={**body, "style": {"locked": True, "hidden": True}}
+    ).json()
+    assert both["style"]["locked"] is True and both["style"]["hidden"] is True
+    # A change of another key keeps them; they can be turned off again.
+    again = client.put(f"/api/drawings/{both['id']}", json={"style": {"width": 3}}).json()
+    assert again["style"]["locked"] is True and again["style"]["width"] == 3
+    off = client.put(f"/api/drawings/{both['id']}", json={"style": {"locked": False}}).json()
+    assert off["style"]["locked"] is False and off["style"]["hidden"] is True
+    listed = client.get("/api/drawings", params={"instrument": "XAU_USD"}).json()
+    assert {d["id"]: d["style"].get("locked") for d in listed}[both["id"]] is False
+
+
+@pytest.mark.parametrize("bad", [{"locked": "yes"}, {"hidden": 1}, {"locked": None, "hidden": "x"}])
+def test_lock_and_hide_must_be_booleans(client, bad):
+    body = {"instrument": "XAU_USD", "type": "hline", "points": [pt(0, 2000.0)], "style": bad}
+    assert client.post("/api/drawings", json=body).status_code == 422
+
+
+def test_the_server_stores_the_lock_but_does_not_enforce_it(client):
+    """Locking is a protection against a slip of the mouse in the chart: the browser refuses
+    to move or delete a locked drawing, and the list panel unlocks it first. The API stays
+    an API (a script, or an undo, may change or delete it)."""
+    body = {
+        "instrument": "XAU_USD",
+        "type": "hline",
+        "points": [pt(0, 2000.0)],
+        "style": {"locked": True},
+    }
+    drawing = client.post("/api/drawings", json=body).json()
+    moved = client.put(f"/api/drawings/{drawing['id']}", json={"points": [pt(0, 2001.0)]})
+    assert moved.status_code == 200 and moved.json()["points"][0]["p"] == 2001.0
+    assert client.delete(f"/api/drawings/{drawing['id']}").status_code == 200
