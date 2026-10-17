@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import math
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -17,14 +18,19 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from openchart import API_VERSION, __version__
 from openchart.api.auth import SESSION_COOKIE
+from openchart.api.chart_indicators import ChartIndicators
 from openchart.api.hub import Client
 from openchart.api.routes_account import account_routes, client_host
 from openchart.api.routes_alerts import alert_routes
+from openchart.api.routes_charts import chart_routes
+from openchart.api.routes_custom_indicators import custom_routes
 from openchart.api.routes_drawings import drawing_routes
 from openchart.api.routes_indicators import indicator_routes
 from openchart.api.routes_layouts import layout_routes
@@ -56,6 +62,17 @@ class WebFiles(StaticFiles):
         return response
 
 
+def encodable(value: Any) -> Any:
+    """`value` with every float that JSON cannot carry (NaN, infinities) as its text."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, dict):
+        return {k: encodable(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [encodable(v) for v in value]
+    return value
+
+
 def same_origin(origin: str | None, host: str | None) -> bool:
     """No Origin header (curl, scripts) is fine; a browser page from elsewhere is not."""
     return not origin or urlsplit(origin).netloc == host
@@ -78,6 +95,14 @@ def create_app(server: Server) -> FastAPI:
             await server.stop()
 
     app = FastAPI(title="OpenChart", version=__version__, lifespan=lifespan)
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(request: Request, exc: RequestValidationError) -> JSONResponse:
+        """FastAPI's own 422, except that a NaN or an infinity in the echoed input (Python's
+        JSON reader accepts them) is sent as text: as a number it cannot be encoded, and
+        the request became a 500."""
+        return JSONResponse({"detail": encodable(jsonable_encoder(exc.errors()))}, 422)
+
     app.state.server = server
 
     @app.middleware("http")
@@ -105,8 +130,11 @@ def create_app(server: Server) -> FastAPI:
     app.include_router(account_routes(server))
     app.include_router(drawing_routes(server))
     app.include_router(alert_routes(server))
+    charts = ChartIndicators(server)  # one lock for every write to charts' indicators
     app.include_router(indicator_routes(server))
-    app.include_router(layout_routes(server))
+    app.include_router(chart_routes(server, charts))
+    app.include_router(custom_routes(server, charts))
+    app.include_router(layout_routes(server, charts))
 
     @app.get("/api/health")
     async def health() -> dict[str, Any]:

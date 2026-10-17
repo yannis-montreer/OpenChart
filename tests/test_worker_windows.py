@@ -554,7 +554,7 @@ def test_the_catalog_shows_why_a_service_runs_no_custom_code(monkeypatch, tmp_pa
         assert body["isolation"]["level"] == "unavailable"
         assert body["isolation"]["notice"].startswith("custom indicators do not run")
         assert mine["status"] == "not_run" and mine["reason"] == body["isolation"]["notice"]
-        assert {"file": "mine.py", "error": mine["reason"]} in body["errors"]
+        assert {"file": "mine.py", "error": mine["reason"], "kind": "custom"} in body["errors"]
         assert c.get("/api/indicators/mine", params={"instrument": "XAU_USD"}).status_code == 503
         assert body["editing"]["allowed"] is False
     assert set(started) == {"appcontainer"}
