@@ -79,7 +79,8 @@ function stem(file: string): string {
   return file.replace(/\.py$/i, "");
 }
 
-function gate(catalog: IndicatorCatalog): Gate {
+/** May your files be edited from this page, and if not, why (the server's own words). */
+export function gate(catalog: IndicatorCatalog): Gate {
   const editing = catalog.editing;
   if (!editing) return { allowed: false, reason: NO_EDITING };
   return editing.allowed ? { allowed: true, reason: null } : { allowed: false, reason: editing.reason };

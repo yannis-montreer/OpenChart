@@ -235,8 +235,12 @@ export class IndicatorLayer {
    * is not called: a preview is never on the chart's list.
    */
   setPreview(def: IndicatorDef, fetchPage: PreviewFetch): void {
+    // A Run again keeps the inputs you set on the preview's legend row (those the new code still has).
+    const before = this.active.find((x) => x.preview)?.entry.params;
     this.clearPreview();
-    const a = this.create(def, { ...newEntry(def), uid: "preview", kind: "custom" }, { ghost: null, reset: [], gone: false, preview: true });
+    const entry = { ...newEntry(def), uid: "preview", kind: "custom" as const };
+    if (before) entry.params = reconcileParams(def, before);
+    const a = this.create(def, entry, { ghost: null, reset: [], gone: false, preview: true });
     a.fetchPage = fetchPage;
     this.layoutPanes();
     void this.load(a);
