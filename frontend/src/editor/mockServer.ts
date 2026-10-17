@@ -24,6 +24,17 @@ export interface MockOptions {
   clockStep?: number;
 }
 
+export interface CatalogEntry {
+  id: string;
+  kind: "custom";
+  file: string;
+  status: "ok" | "error";
+  reason: string | null;
+  line: number | null;
+  definition: IndicatorDef | null;
+  checks: unknown[];
+}
+
 export interface MockCall {
   method: string;
   path: string;
@@ -207,20 +218,30 @@ export class MockServer {
     this.clock += this.step;
   }
 
-  private definition(id: string, source: string, op: string, unchanged: boolean): Response {
+  /** Every file as the catalog's `custom` list shows it. */
+  catalogEntries(): CatalogEntry[] {
+    return [...this.files].map(([id, source]) => this.entryOf(id, source));
+  }
+
+  private entryOf(id: string, source: string): CatalogEntry {
     const bad = source.includes("SYNTAX");
-    const title = titleOf(source, id);
-    const line = bad ? lineOf(source, "SYNTAX") : null;
-    const def: IndicatorDef | null = bad ? null : this.def(id, title);
-    return this.json(op === "create" || op === "duplicate" ? 201 : 200, {
+    return {
       id,
       kind: "custom",
       file: `${id}.py`,
       status: bad ? "error" : "ok",
       reason: bad ? "SyntaxError: invalid syntax" : null,
-      line,
-      definition: def,
+      line: bad ? lineOf(source, "SYNTAX") : null,
+      definition: bad ? null : this.def(id, titleOf(source, id)),
       checks: [],
+    };
+  }
+
+  private definition(id: string, source: string, op: string, unchanged: boolean): Response {
+    const bad = source.includes("SYNTAX");
+    const line = bad ? lineOf(source, "SYNTAX") : null;
+    return this.json(op === "create" || op === "duplicate" ? 201 : 200, {
+      ...this.entryOf(id, source),
       version: mockVersion(source),
       saved: true,
       unchanged,

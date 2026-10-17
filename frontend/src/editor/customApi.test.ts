@@ -265,6 +265,16 @@ describe("editing off", () => {
   });
 });
 
+describe("the catalog of the mock", () => {
+  it("lists every file as the catalog's `custom` does: ok with its definition, or an error with its line", () => {
+    mock.place("good", 'TITLE = "Good one"\n');
+    mock.place("bad", "a = 1\nSYNTAX\n");
+    const [good, bad] = mock.catalogEntries();
+    expect(good).toMatchObject({ id: "good", kind: "custom", file: "good.py", status: "ok", reason: null, line: null, definition: { id: "good", title: "Good one" } });
+    expect(bad).toMatchObject({ id: "bad", status: "error", reason: "SyntaxError: invalid syntax", line: 2, definition: null });
+  });
+});
+
 describe("paths", () => {
   it("encode an id as one segment, so a name cannot reach another route", async () => {
     for (const id of ["../mine", "mine/source", "a?b", "a#b", "%2e%2e"]) {
