@@ -51,6 +51,7 @@ In the owner's order. Each item is one branch from main and stops for review.
    - **CI-3** (2 days): indicator instances per chart on the server (D1), with migration from `localStorage`, the menu's Built-in and Custom sections, deleting a definition that is in use.
      - **Backend:** merged (#33): migration 0008, the chart routes, the import, layouts' copies, where-used and delete. **Frontend:** steps 1 to 3 merged (#36: the sections, the states, deleting); steps 4 to 6 (the list on the server, the import, the reset note, layouts, API version 2) on a draft PR.
    - **CI-4** (3 days): the browser editor (CodeMirror), New/Edit/Duplicate/Rename/Delete/Import/Export, Save and Run with live preview, versions.
+     - Contract: #37 (docs). Frontend: plan #39, editor #42 (draft, built against a mock of the contract; Session B's backend is still to be built and tried with it).
    - **CI-5** (1 to 1.5 days): the cache and forming-bar updates, measured against the design's targets.
 2. **Storage steps 2 and later**, as decided:
    - **tick retention:** 30 days by default (7/30/90 days, 1 year, forever, off);
