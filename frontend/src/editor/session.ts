@@ -75,8 +75,8 @@ export interface SessionOptions {
   store: DraftStore | null;
   editing: Gate;
   onChange: (state: EditorState) => void;
-  /** The preview of a Run to draw, or null to remove it. */
-  onPreview: (values: PreviewValues | null) => void;
+  /** The preview of a Run to draw (with the text it was made from), or null to remove it. */
+  onPreview: (values: PreviewValues | null, source?: string) => void;
 }
 
 export type RunQuery = Pick<PreviewQuery, "instrument" | "timeframe" | "price" | "params" | "from" | "to" | "limit">;
@@ -301,12 +301,13 @@ export class EditorSession {
     if (this.state.phase !== "ready" || this.closed) return;
     if (this.blocked()) return;
     const token = ++this.runToken;
+    const sent = this.state.buffer;
     this.set({ running: true });
     try {
-      const values = await this.opts.api.preview({ source: this.state.buffer, id: this.id, ...query });
+      const values = await this.opts.api.preview({ source: sent, id: this.id, ...query });
       if (token !== this.runToken) return;
       this.set({ running: false, error: null });
-      this.opts.onPreview(values);
+      this.opts.onPreview(values, sent);
     } catch (err) {
       if (token !== this.runToken) return;
       this.set({ running: false, error: errorFromApi(err) });

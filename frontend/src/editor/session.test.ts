@@ -25,6 +25,7 @@ const QUERY = { instrument: "XAU_USD", timeframe: "15m", price: "mid" as const }
 let mock: MockServer;
 let store: MemoryStore;
 let previews: (PreviewValues | null)[];
+let previewSources: (string | undefined)[];
 let states: EditorState[];
 
 function make(opts: { api?: EditorApi; allowed?: boolean; id?: string } = {}) {
@@ -34,7 +35,10 @@ function make(opts: { api?: EditorApi; allowed?: boolean; id?: string } = {}) {
     store,
     editing: { allowed: opts.allowed ?? true, reason: opts.allowed === false ? "turned off" : null },
     onChange: (s) => states.push(s),
-    onPreview: (p) => previews.push(p),
+    onPreview: (p, source) => {
+      previews.push(p);
+      previewSources.push(source);
+    },
   });
   return session;
 }
@@ -44,6 +48,7 @@ beforeEach(() => {
   mock.place("mine", SRC);
   store = new MemoryStore();
   previews = [];
+  previewSources = [];
   states = [];
   vi.stubGlobal("window", { location: { href: "http://test/" }, dispatchEvent: () => true });
   vi.stubGlobal("fetch", mock.fetch);
@@ -347,6 +352,8 @@ describe("run", () => {
     expect(post.body).toMatchObject({ source: 'TITLE = "Draft"\n', id: "mine", ...QUERY });
     expect(previews).toHaveLength(1);
     expect(previews[0]).toMatchObject({ preview: true });
+    // The preview is told which text it was made from: the chart asks for more bars with that text, not with whatever is typed by then.
+    expect(previewSources).toEqual(['TITLE = "Draft"\n']);
     expect(mock.read("mine")).toBe(SRC);
     expect(s.state).toMatchObject({ running: false, error: null });
   });
