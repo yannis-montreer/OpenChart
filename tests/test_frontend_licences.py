@@ -37,5 +37,5 @@ def _locked_runtime() -> set[str]:
 def test_every_runtime_package_of_the_page_has_its_licence_listed():
     locked = _locked_runtime()
     listed = _runtime_list()
-    assert locked - listed == set(), "add these to FRONTEND_RUNTIME (packaging/third_party_licenses.py)"
+    assert locked - listed == set(), "add these to FRONTEND_RUNTIME in third_party_licenses.py"
     assert listed - locked == set(), "these are listed but no longer a runtime dependency"
