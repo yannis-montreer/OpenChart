@@ -20,17 +20,34 @@ import type { Clock } from "./tradingTime";
 
 const clockTime: Clock = (t) => t;
 
-export type DrawingType = "hline" | "trendline" | "ray" | "extended";
+/** The types an alert can follow: lines with a price at every time they exist. */
+export type LineType = "hline" | "trendline" | "ray" | "extended";
+
+/** Tools added later (docs/decisions-drawing-tools.md); their geometry is in shapes.ts. */
+export type ShapeType = "vline" | "text" | "rect" | "fib" | "measure" | "channel";
+
+export type DrawingType = LineType | ShapeType;
 
 export interface Point {
   t: number;
   p: number;
 }
 
-export const POINTS_NEEDED: Record<DrawingType, number> = { hline: 1, trendline: 2, ray: 2, extended: 2 };
+export const POINTS_NEEDED: Record<DrawingType, number> = {
+  hline: 1,
+  trendline: 2,
+  ray: 2,
+  extended: 2,
+  vline: 1,
+  text: 1,
+  rect: 2,
+  fib: 2,
+  measure: 2,
+  channel: 3,
+};
 
 /** Price of the drawing at clock time `t`, or null where the drawing does not exist. */
-export function linePrice(type: DrawingType, pts: Point[], t: number, clock: Clock = clockTime): number | null {
+export function linePrice(type: LineType, pts: Point[], t: number, clock: Clock = clockTime): number | null {
   if (type === "hline") return pts[0].p;
   const [from, to] = timeRange(type, pts);
   if (!(t >= from && t <= to)) return null;
@@ -41,7 +58,7 @@ export function linePrice(type: DrawingType, pts: Point[], t: number, clock: Clo
 }
 
 /** Clock-time interval where the drawing exists (may be infinite). */
-export function timeRange(type: DrawingType, pts: Point[]): [number, number] {
+export function timeRange(type: LineType, pts: Point[]): [number, number] {
   if (type === "hline" || type === "extended") return [-Infinity, Infinity];
   const [a, b] = pts;
   if (type === "trendline") return [Math.min(a.t, b.t), Math.max(a.t, b.t)];
@@ -231,7 +248,7 @@ export interface Vertex {
  * them are exact, because time and price are both linear inside one bar's slot.
  */
 export function lineVertices(
-  type: DrawingType,
+  type: LineType,
   pts: Point[],
   index: TimeIndex,
   from: number,
@@ -261,7 +278,7 @@ export function lineVertices(
  * cannot place are left out.
  */
 export function linePath(
-  type: Exclude<DrawingType, "hline">,
+  type: Exclude<LineType, "hline">,
   pts: Point[],
   index: TimeIndex,
   from: number,

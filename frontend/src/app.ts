@@ -28,6 +28,8 @@ import { ChartSync } from "./chart/chartSync";
 import { IndicatorLayer } from "./chart/indicators";
 import { CHART_TYPES, ChartView, type ChartContext } from "./chart/view";
 import { DrawingController, type AlertPlace, type Tool } from "./drawings/controller";
+import { isLineType } from "./drawings/shapes";
+import { DrawingsPanel } from "./drawings/listPanel";
 import { dropLegacyIndicators, loadPrefs, readLegacyIndicators, resolveTimezone, savePrefs, type Prefs } from "./prefs";
 import { formatClock, offsetLabel } from "./time";
 import { versionNotice } from "./version";
@@ -315,6 +317,15 @@ export class App {
     };
     const trash = button({ icon: "trash", title: "Delete all drawings on this instrument" });
     trash.addEventListener("click", () => this.confirmDeleteAll(trash));
+    const undoBtn = button({ icon: "undo", title: "Undo (Ctrl+Z)", disabled: true, onClick: () => void this.drawings.undo() });
+    const redoBtn = button({ icon: "redo", title: "Redo (Ctrl+Shift+Z)", disabled: true, onClick: () => void this.drawings.redo() });
+    this.drawings.onHistoryChange = () => {
+      undoBtn.disabled = !this.drawings.history.canUndo;
+      redoBtn.disabled = !this.drawings.history.canRedo;
+    };
+    this.drawings.onNotice = (body) => toast({ title: "Undo", body, icon: "info", timeout: 9000 });
+    const drawingsPanel = new DrawingsPanel(this.drawings);
+    const listBtn = button({ icon: "shapes", title: "Drawings: list, lock, hide", onClick: () => drawingsPanel.open(listBtn) });
     tools.append(
       tool("cursor", "crosshair", "Cursor (Esc)"),
       h("div", { class: "sep-h" }),
@@ -322,7 +333,18 @@ export class App {
       tool("ray", "ray", `Ray (Alt+Y). ${snapHint}`),
       tool("extended", "extended", `Extended line (Alt+E). ${snapHint}`),
       tool("hline", "hline", `Horizontal line (Alt+H). ${snapHint}`),
+      tool("vline", "vline", `Vertical line (Alt+V). ${snapHint}`),
       h("div", { class: "sep-h" }),
+      tool("rect", "rect", `Rectangle (Alt+B). ${snapHint}`),
+      tool("channel", "channel", `Parallel channel (Alt+C): two points for the base line, a third for the width. ${snapHint}`),
+      tool("fib", "fib", `Fibonacci retracement (Alt+F). ${snapHint}`),
+      tool("measure", "measure", `Measure (Alt+M). ${snapHint}`),
+      tool("text", "text", "Text (Alt+X)"),
+      h("div", { class: "sep-h" }),
+      undoBtn,
+      redoBtn,
+      h("div", { class: "sep-h" }),
+      listBtn,
       eye,
       trash,
       h("div", { class: "grow" }),
@@ -1000,6 +1022,10 @@ export class App {
     if (!this.instrument) return;
     const selected = this.drawings.selectedId ? this.drawings.get(this.drawings.selectedId) : undefined;
     const line = drawing ?? selected;
+    if (line && !isLineType(line.type)) {
+      toast({ title: "No alerts on this tool yet", body: "Alerts follow lines: horizontal, trend, ray and extended lines.", icon: "info", timeout: 5000 });
+      return;
+    }
     const existing = line ? this.alertsPanel.forDrawing(line.id) : [];
     if (existing.length === 1) return this.editAlert(existing[0]);
     if (existing.length > 1) return this.pickAlert(existing, place);
@@ -1113,8 +1139,11 @@ export class App {
         row("Alt + R", "Reset chart view"),
         row("Esc", "Cancel drawing, back to the cursor"),
         row("Alt + T / Y / E / H", "Trendline, ray, extended line, horizontal line"),
+        row("Alt + V / B / C", "Vertical line, rectangle (box), parallel channel"),
+        row("Alt + F / M / X", "Fibonacci retracement, measure, text"),
         row("Ctrl (while drawing)", "Snap to the bar's open, high, low or close"),
-        row("Del", "Delete the selected drawing"),
+        row("Del", "Delete the selected drawing (not a locked one)"),
+        row("Ctrl + Z / Ctrl + Shift + Z", "Undo / redo drawing changes"),
         row("Alt + A", "Alert on the selected line, or at a price level"),
         row("/", "Indicators"),
         row("Ctrl + S", "Save the layout"),

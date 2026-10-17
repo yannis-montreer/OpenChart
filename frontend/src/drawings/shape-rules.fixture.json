@@ -1,0 +1,46 @@
+{
+  "_comment": "Hand-written cases for the shape rules of the new drawing tools. Run by tests/test_drawing_tools.py (drawing_rules.shape_error) and shapes.test.ts (shapeError): they must agree. The clock is the identity, except that time inside `closure` [lo, hi] does not count.",
+  "cases": [
+    { "name": "hline one point", "type": "hline", "points": [[100, 5]], "ok": true },
+    { "name": "hline two points", "type": "hline", "points": [[100, 5], [200, 6]], "ok": false },
+    { "name": "trendline same time", "type": "trendline", "points": [[100, 5], [100, 6]], "ok": false },
+    { "name": "trendline across a closure only", "type": "trendline", "points": [[100, 5], [200, 6]], "closure": [100, 200], "ok": false },
+    { "name": "trendline fine", "type": "trendline", "points": [[100, 5], [200, 6]], "ok": true },
+
+    { "name": "vline one point", "type": "vline", "points": [[100, 5]], "ok": true },
+    { "name": "vline two points", "type": "vline", "points": [[100, 5], [200, 5]], "ok": false },
+    { "name": "vline no point", "type": "vline", "points": [], "ok": false },
+
+    { "name": "rect fine", "type": "rect", "points": [[100, 5], [200, 9]], "ok": true },
+    { "name": "rect corners in the other order", "type": "rect", "points": [[200, 9], [100, 5]], "ok": true },
+    { "name": "rect same time", "type": "rect", "points": [[100, 5], [100, 9]], "ok": false },
+    { "name": "rect same price", "type": "rect", "points": [[100, 5], [200, 5]], "ok": false },
+    { "name": "rect inside a closure", "type": "rect", "points": [[120, 5], [180, 9]], "closure": [100, 200], "ok": false },
+    { "name": "rect one point", "type": "rect", "points": [[100, 5]], "ok": false },
+
+    { "name": "fib fine", "type": "fib", "points": [[100, 5], [200, 9]], "ok": true },
+    { "name": "fib downwards", "type": "fib", "points": [[100, 9], [200, 5]], "ok": true },
+    { "name": "fib same price", "type": "fib", "points": [[100, 5], [200, 5]], "ok": false },
+    { "name": "fib same time", "type": "fib", "points": [[100, 5], [100, 9]], "ok": false },
+
+    { "name": "measure rising", "type": "measure", "points": [[100, 5], [200, 9]], "ok": true },
+    { "name": "measure level", "type": "measure", "points": [[100, 5], [200, 5]], "ok": true },
+    { "name": "measure vertical", "type": "measure", "points": [[100, 5], [100, 9]], "ok": true },
+    { "name": "measure identical points", "type": "measure", "points": [[100, 5], [100, 5]], "ok": false },
+    { "name": "measure inside a closure, same price", "type": "measure", "points": [[120, 5], [180, 5]], "closure": [100, 200], "ok": false },
+    { "name": "measure inside a closure, other price", "type": "measure", "points": [[120, 5], [180, 6]], "closure": [100, 200], "ok": true },
+
+    { "name": "channel fine", "type": "channel", "points": [[0, 0], [100, 10], [50, 6]], "ok": true },
+    { "name": "channel third point below", "type": "channel", "points": [[0, 0], [100, 10], [50, 2]], "ok": true },
+    { "name": "channel two points", "type": "channel", "points": [[0, 0], [100, 10]], "ok": false },
+    { "name": "channel base on one time", "type": "channel", "points": [[0, 0], [0, 10], [50, 6]], "ok": false },
+    { "name": "channel third point on the line", "type": "channel", "points": [[0, 0], [100, 10], [50, 5]], "ok": false },
+    { "name": "channel third point on the extended line", "type": "channel", "points": [[0, 0], [100, 10], [300, 30]], "ok": false },
+    { "name": "channel base across a closure only", "type": "channel", "points": [[100, 0], [200, 10], [150, 9]], "closure": [100, 200], "ok": false },
+
+    { "name": "text with label", "type": "text", "points": [[100, 5]], "label": "Support", "ok": true },
+    { "name": "text without label", "type": "text", "points": [[100, 5]], "label": null, "ok": false },
+    { "name": "text with empty label", "type": "text", "points": [[100, 5]], "label": "  ", "ok": false },
+    { "name": "text with two points", "type": "text", "points": [[100, 5], [200, 5]], "label": "x", "ok": false }
+  ]
+}
