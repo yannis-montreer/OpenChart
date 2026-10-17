@@ -36,6 +36,8 @@ class Style(BaseModel):
     dash: Literal["solid", "dashed", "dotted"] | None = None
     fill: StrictInt | None = Field(None, ge=0, le=100)  # opacity %, rect and channel
     extend: StrictBool | None = None  # channel: rays to the right; fib: levels to the edge
+    locked: StrictBool | None = None  # the chart will not move or delete it (the API still can)
+    hidden: StrictBool | None = None  # not drawn
 
     def values(self) -> dict[str, Any]:
         return self.model_dump(exclude_none=True)

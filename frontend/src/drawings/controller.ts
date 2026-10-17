@@ -45,7 +45,9 @@ import {
   textSize,
   withAlpha,
 } from "./shapes";
+import { UndoStack, type Entry } from "./history";
 import { DrawingLayer, type MediaTarget } from "./layer";
+import { TYPE_NAMES, bulkChange, canDeleteFromChart, canMove, cloneStyle, isLocked, patchBefore, visibleDrawings } from "./management";
 import { tradingClock, type Clock, type Closure, type TradingHoursJson } from "./tradingTime";
 import { StyleToolbar } from "./toolbar";
 
@@ -91,18 +93,9 @@ const BELL_PATHS = [
   "M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326",
 ];
 
-export const TYPE_NAMES: Record<DrawingType, string> = {
-  hline: "horizontal line",
-  trendline: "trendline",
-  ray: "ray",
-  extended: "extended line",
-  vline: "vertical line",
-  rect: "rectangle",
-  channel: "parallel channel",
-  fib: "Fibonacci retracement",
-  text: "text",
-  measure: "measure",
-};
+export { TYPE_NAMES };
+
+const isLockedAt = (d: Drawing | undefined): boolean => d !== undefined && isLocked(d);
 
 function dashPattern(style: DrawingStyle): number[] {
   if (style.dash === "dashed") return [style.width * 4, style.width * 3];
@@ -121,6 +114,13 @@ export class DrawingController {
   /** The alerts attached to a drawing (the line shows their state). */
   alertsOf: (drawingId: string) => Alert[] = () => [];
   onError: (text: string) => void = (text) => console.warn(text);
+  /** Undo or redo became possible or impossible. */
+  onHistoryChange: () => void = () => {};
+  /** The list of drawings or one of its rows changed (the list panel redraws). */
+  onListChange: () => void = () => {};
+  /** This browser session's changes, for Ctrl+Z; cleared on an instrument switch or reload. */
+  readonly history = new UndoStack();
+  private replaying = false;
 
   private drawings = new Map<string, Drawing>();
   private instrument?: string;
@@ -196,6 +196,8 @@ export class DrawingController {
       this.cancelPlacing();
       this.select(undefined);
       this.drawings.clear();
+      this.history.clear();
+      this.onHistoryChange();
       this.redraw();
     }
     await this.reload();
@@ -237,7 +239,10 @@ export class DrawingController {
       if (this.selectedId === d.id) this.select(undefined);
     } else {
       this.drawings.set(d.id, d);
-      if (this.selectedId === d.id) this.toolbar.show(d);
+      if (this.selectedId === d.id) {
+        if (d.style.hidden) this.select(undefined);
+        else this.toolbar.show(d);
+      }
     }
     this.redraw();
   }
@@ -312,24 +317,40 @@ export class DrawingController {
 
   redraw(): void {
     this.layer.requestUpdate();
+    this.onListChange();
+  }
+
+  /** The drawings, oldest first (the list panel). */
+  list(): Drawing[] {
+    return [...this.drawings.values()].sort((a, b) => a.created_at - b.created_at || (a.id < b.id ? -1 : 1));
+  }
+
+  private record(e: Entry): void {
+    if (this.replaying) return;
+    this.history.push(e);
+    this.onHistoryChange();
   }
 
   // Server changes
 
-  async create(type: DrawingType, points: Point[], style = this.style(), label: string | null = null): Promise<void> {
-    if (!this.instrument) return;
+  async create(type: DrawingType, points: Point[], style = this.style(), label: string | null = null): Promise<Drawing | undefined> {
+    if (!this.instrument) return undefined;
     try {
       const d = await drawingsApi.create({ instrument: this.instrument, type, points, style, label });
       this.drawings.set(d.id, d);
+      this.record({ kind: "create", drawing: d });
       this.select(d.id);
+      return d;
     } catch (err) {
       this.onError(`Could not save the drawing: ${(err as Error).message}`);
+      return undefined;
     }
   }
 
-  async update(id: string, patch: DrawingPatch): Promise<void> {
+  /** `undo` is the patch that takes the change back, when the drawing no longer holds its old state (a drag). */
+  async update(id: string, patch: DrawingPatch, undo?: DrawingPatch): Promise<boolean> {
     const before = this.drawings.get(id);
-    if (!before) return;
+    if (!before) return false;
     // Show the change at once; the server's answer (and broadcast) confirms it.
     const optimistic: Drawing = {
       ...before,
@@ -338,22 +359,29 @@ export class DrawingController {
       label: patch.clear_label ? null : (patch.label ?? before.label),
     };
     this.drawings.set(id, optimistic);
-    if (this.selectedId === id) this.toolbar.show(optimistic);
+    if (this.selectedId === id) {
+      if (optimistic.style.hidden) this.select(undefined);
+      else this.toolbar.show(optimistic);
+    }
     this.redraw();
     // Only a line's colour, width and dash are remembered for the next drawing (not a text's size, a fill or an extension).
     if (patch.style && before.type !== "text") {
       const { color, width, dash } = optimistic.style;
       this.onStyleUsed({ color, width, dash });
     }
+    let ok = true;
     try {
       const d = await drawingsApi.update(id, patch);
       this.drawings.set(id, d);
       if (this.selectedId === id) this.toolbar.show(d);
+      this.record({ kind: "update", id, undo: undo ?? patchBefore(before, patch), redo: patch });
     } catch (err) {
+      ok = false;
       this.drawings.set(id, before);
       this.onError(`Could not save the change: ${(err as Error).message}`);
     }
     this.redraw();
+    return ok;
   }
 
   async remove(id: string): Promise<void> {
@@ -364,6 +392,7 @@ export class DrawingController {
     this.redraw();
     try {
       await drawingsApi.remove(id);
+      this.record({ kind: "delete", drawing: before });
     } catch (err) {
       if (!(err instanceof ApiError && err.status === 404)) {
         this.drawings.set(id, before);
@@ -373,21 +402,105 @@ export class DrawingController {
     }
   }
 
+  /** Delete from the chart (Del, the toolbar, the menu): a locked drawing stays. */
+  async removeFromChart(id: string): Promise<void> {
+    const d = this.drawings.get(id);
+    if (!d) return;
+    if (!canDeleteFromChart(d)) {
+      this.onError("This drawing is locked. Unlock it to delete it.");
+      return;
+    }
+    await this.remove(id);
+  }
+
+  /** Delete every drawing that is not locked, as one step for Ctrl+Z. */
   async removeAll(): Promise<void> {
     if (!this.instrument) return;
-    this.drawings.clear();
+    const all = [...this.drawings.values()];
+    const gone = all.filter(canDeleteFromChart);
+    if (!gone.length) return;
     this.select(undefined);
     try {
-      await drawingsApi.removeAll(this.instrument);
+      if (gone.length === all.length) {
+        this.drawings.clear();
+        this.redraw();
+        await drawingsApi.removeAll(this.instrument);
+      } else {
+        for (const d of gone) {
+          this.drawings.delete(d.id);
+          await drawingsApi.remove(d.id);
+        }
+        this.redraw();
+      }
+      this.record(gone.length === 1 ? { kind: "delete", drawing: gone[0] } : { kind: "batch", entries: gone.map((drawing) => ({ kind: "delete" as const, drawing })) });
     } catch (err) {
       this.onError(`Could not delete the drawings: ${(err as Error).message}`);
       await this.reload();
     }
   }
 
+  /** Lock or unlock, hide or show every drawing of the instrument, as one step for Ctrl+Z. */
+  async setAll(field: "locked" | "hidden", value: boolean): Promise<void> {
+    const ids = bulkChange(this.list(), field, value);
+    const entries: Entry[] = [];
+    const patch: DrawingPatch = { style: { [field]: value } };
+    this.replaying = true; // the steps are recorded together below
+    try {
+      for (const id of ids) {
+        const before = this.drawings.get(id);
+        if (before && (await this.update(id, patch))) entries.push({ kind: "update", id, undo: patchBefore(before, patch), redo: patch });
+      }
+    } finally {
+      this.replaying = false;
+    }
+    if (entries.length) this.record(entries.length === 1 ? entries[0] : { kind: "batch", entries });
+  }
+
+  async undo(): Promise<void> {
+    await this.replay(this.history.undo());
+  }
+
+  async redo(): Promise<void> {
+    await this.replay(this.history.redo());
+  }
+
+  /** Carry out an entry from the history: ordinary API calls, not recorded again. */
+  private async replay(entry: Entry | undefined): Promise<void> {
+    if (!entry) return;
+    this.replaying = true;
+    try {
+      await this.apply(entry);
+    } catch (err) {
+      this.history.clear(); // what we know about the drawings no longer matches the server
+      this.onError(`Could not undo or redo: ${(err as Error).message}`);
+    } finally {
+      this.replaying = false;
+      this.onHistoryChange();
+    }
+  }
+
+  private async apply(e: Entry): Promise<void> {
+    switch (e.kind) {
+      case "create": {
+        const d = await this.create(e.drawing.type, e.drawing.points, e.drawing.style, e.drawing.label);
+        if (!d) throw new Error("the drawing could not be created again");
+        this.history.rename(e.drawing.id, d.id); // it has a new id now
+        return;
+      }
+      case "delete":
+        await this.remove(e.drawing.id);
+        return;
+      case "update":
+        if (!(await this.update(e.id, e.redo))) throw new Error("the drawing could not be changed");
+        return;
+      case "batch":
+        for (const x of e.entries) await this.apply(x);
+    }
+  }
+
   async clone(id: string): Promise<void> {
     const d = this.drawings.get(id);
-    if (d) await this.create(d.type, d.points, d.style, d.label);
+    if (d) await this.create(d.type, d.points, cloneStyle(d.style), d.label);
   }
 
   // Coordinates
@@ -526,6 +639,7 @@ export class DrawingController {
     this.select(hit.id);
     const logical = this.view.chart.timeScale().coordinateToLogical(pos.x) ?? 0;
     const price = this.view.priceSeries.coordinateToPrice(pos.y) ?? 0;
+    if (!canMove(d)) return; // locked: selected (to unlock it), never moved
     this.drag = {
       id: hit.id,
       part: hit.part,
@@ -573,10 +687,10 @@ export class DrawingController {
       }
     }
     if (!this.drag) return;
-    const { id, moved } = this.drag;
+    const { id, moved, original } = this.drag;
     const d = this.drawings.get(id);
     this.drag = undefined;
-    if (moved && d) void this.update(id, { points: d.points });
+    if (moved && d) void this.update(id, { points: d.points }, { points: original });
   }
 
   /**
@@ -693,8 +807,13 @@ export class DrawingController {
             ]
           : []),
         menuItem({ label: "Clone", icon: "copy", onClick: () => void this.clone(d.id) }),
+        menuItem({
+          label: isLocked(d) ? "Unlock" : "Lock",
+          icon: isLocked(d) ? "lockOpen" : "lock",
+          onClick: () => void this.update(d.id, { style: { locked: !isLocked(d) } }),
+        }),
         h("hr"),
-        menuItem({ label: "Delete", icon: "trash", hint: "Del", onClick: () => void this.remove(d.id) }),
+        menuItem({ label: isLocked(d) ? "Delete (unlock first)" : "Delete", icon: "trash", hint: "Del", disabled: isLocked(d), onClick: () => void this.removeFromChart(d.id) }),
       ),
     );
   }
@@ -707,6 +826,11 @@ export class DrawingController {
     if (!down) return;
     const target = e.target;
     if (target instanceof Element && target.closest("input, select, textarea, [contenteditable]") || document.querySelector(".modal-backdrop, .auth-screen")) return;
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && ["z", "y"].includes(e.key.toLowerCase())) {
+      e.preventDefault();
+      void (e.key.toLowerCase() === "y" || e.shiftKey ? this.redo() : this.undo());
+      return;
+    }
     if (e.key === "Escape") {
       if (this.placing || this.tool !== "cursor") this.setTool("cursor");
       else if (this.selectedId && !document.querySelector(".menu")) this.select(undefined);
@@ -714,7 +838,7 @@ export class DrawingController {
     }
     if ((e.key === "Delete" || e.key === "Backspace") && this.selectedId) {
       e.preventDefault();
-      void this.remove(this.selectedId);
+      void this.removeFromChart(this.selectedId);
       return;
     }
     if (e.altKey && !e.ctrlKey && !e.metaKey) {
@@ -748,7 +872,7 @@ export class DrawingController {
       const from = range.from - 2;
       const to = range.to + 2;
       if (!this.hidden) {
-        for (const d of this.drawings.values()) {
+        for (const d of visibleDrawings([...this.drawings.values()], false)) {
           const emphasis = d.id === this.selectedId || d.id === this.hover?.id || d.id === this.drag?.id;
           const shape = this.paint(ctx, mediaSize, d.type, d.points, d.style, emphasis, from, to, d.label);
           if (!shape) continue;
@@ -838,7 +962,7 @@ export class DrawingController {
     else if (type === "text") shape = this.paintText(ctx, pts, style, label ?? "", emphasis);
     else if (type === "measure") shape = this.paintMeasure(ctx, size, pts, style);
     ctx.restore();
-    if (shape && emphasis) for (const hd of shape.handles) if (hd) this.drawHandle(ctx, hd[0], hd[1], style.color);
+    if (shape && emphasis && !style.locked) for (const hd of shape.handles) if (hd) this.drawHandle(ctx, hd[0], hd[1], style.color);
     return shape;
   }
 
@@ -1169,6 +1293,7 @@ export class DrawingController {
     if (this.bellAt(x, y)) return "pointer";
     const hit = this.hitTest(x, y);
     if (!hit) return null;
+    if (isLockedAt(this.drawings.get(hit.id))) return "pointer";
     return hit.part === "body" ? (this.drag ? "grabbing" : "pointer") : "move";
   }
 }

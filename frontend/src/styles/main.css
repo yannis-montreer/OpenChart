@@ -818,3 +818,62 @@ kbd {
   font-size: 12px;
   pointer-events: none;
 }
+
+/* Drawings: list panel */
+
+.drawings-list {
+  min-width: 330px;
+  max-height: 60vh;
+  overflow: auto;
+  padding: 4px;
+}
+.dl-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px 8px;
+}
+.dl-head .btn {
+  height: 26px;
+  padding: 0 8px;
+}
+.dl-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px;
+  border-radius: 6px;
+}
+.dl-row.selected {
+  background: var(--hover, rgba(127, 127, 127, 0.18));
+}
+.dl-row.is-hidden .dl-title {
+  opacity: 0.5;
+  text-decoration: line-through;
+}
+.dl-row .btn {
+  height: 26px;
+  min-width: 26px;
+}
+.dl-row .btn.active {
+  color: var(--accent, #4d8dff);
+}
+.dl-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  flex: none;
+}
+.dl-title {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 4px 2px;
+}
+.dl-empty {
+  padding: 10px;
+  opacity: 0.7;
+}

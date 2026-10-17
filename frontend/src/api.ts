@@ -237,6 +237,10 @@ export interface DrawingStyle {
   fill?: number;
   /** Channel: rays to the right. Fibonacci: levels run to the edge of the chart. */
   extend?: boolean;
+  /** The chart does not move or delete it (the list panel can unlock it). */
+  locked?: boolean;
+  /** Not drawn (the list panel shows it again). */
+  hidden?: boolean;
 }
 
 export interface Drawing {

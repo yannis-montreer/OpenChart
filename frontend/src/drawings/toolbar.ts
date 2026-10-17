@@ -4,7 +4,7 @@ import type { Drawing, DrawingStyle } from "../api";
 import { lineAlertTitle } from "../ui/alertState";
 import { button, closeMenu, h, icon, menuItem, showMenu } from "../ui/dom";
 import type { DrawingController } from "./controller";
-import { TYPE_NAMES } from "./controller";
+import { TYPE_NAMES, isLocked } from "./management";
 import { fillOf, isLineType, styleOptions, textSize } from "./shapes";
 
 export const PALETTE = [
@@ -49,6 +49,8 @@ export class StyleToolbar {
   private fillBtn: HTMLButtonElement;
   private extendBtn: HTMLButtonElement;
   private sepBtn: HTMLElement;
+  private lockBtn: HTMLButtonElement;
+  private trashBtn: HTMLButtonElement;
 
   constructor(
     area: HTMLElement,
@@ -61,6 +63,8 @@ export class StyleToolbar {
     this.fillBtn = button({ label: "Fill", title: "Area opacity", onClick: () => this.openFill() });
     this.extendBtn = button({ label: "Extend", onClick: () => this.toggleExtend() });
     this.sepBtn = h("div", { class: "sep" });
+    this.lockBtn = button({ icon: "lock", title: "Lock", onClick: () => this.current && void this.ctl.update(this.current.id, { style: { locked: !isLocked(this.current) } }) });
+    this.trashBtn = button({ icon: "trash", title: "Delete (Del)", onClick: () => this.current && void this.ctl.removeFromChart(this.current.id) });
     this.bellBtn = button({
       icon: "bell",
       title: "Add alert on this line (Alt+A)",
@@ -79,7 +83,8 @@ export class StyleToolbar {
       this.sepBtn,
       this.bellBtn,
       button({ icon: "copy", title: "Clone", onClick: () => this.current && void this.ctl.clone(this.current.id) }),
-      button({ icon: "trash", title: "Delete (Del)", onClick: () => this.current && void this.ctl.remove(this.current.id) }),
+      this.lockBtn,
+      this.trashBtn,
     );
     // Clicks on the toolbar must not reach the chart.
     this.el.addEventListener("pointerdown", (e) => e.stopPropagation());
@@ -103,6 +108,12 @@ export class StyleToolbar {
     this.extendBtn.classList.toggle("active", Boolean(d.style.extend));
     this.extendBtn.dataset.tip = d.type === "fib" ? "Extend the levels to the right edge" : "Extend both lines to the right";
     this.extendBtn.setAttribute("aria-pressed", String(Boolean(d.style.extend)));
+    const locked = isLocked(d);
+    this.lockBtn.replaceChildren(icon(locked ? "lockOpen" : "lock"));
+    this.lockBtn.classList.toggle("active", locked);
+    this.lockBtn.dataset.tip = locked ? "Unlock (it cannot be moved or deleted while locked)" : "Lock (it cannot be moved or deleted)";
+    this.trashBtn.disabled = locked;
+    this.trashBtn.dataset.tip = locked ? "Unlock to delete" : "Delete (Del)";
     const alertable = isLineType(d.type);
     this.bellBtn.hidden = !alertable;
     this.sepBtn.hidden = !alertable;
