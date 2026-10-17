@@ -48,6 +48,7 @@ import {
   type MarkerOutput,
 } from "../api";
 import { button, h, icon, menuItem, showMenu } from "../ui/dom";
+import { ghostOf, legendState, newUid, type GhostState, type Instance } from "./chartList";
 import {
   buildBands,
   buildMarkers,
@@ -87,6 +88,11 @@ export function newEntry(def: IndicatorDef): IndicatorEntry {
   return { id: def.id, params, visible: true, price_labels: true, legend_values: true };
 }
 
+/** What stands in for a definition that is not there: it has no outputs, so nothing is drawn or asked for. */
+function stub(entry: IndicatorEntry): IndicatorDef {
+  return { id: entry.id, name: entry.id, title: entry.id, overlay: true, builtin: entry.kind === "builtin", params: [], outputs: [] };
+}
+
 /** Parameters the computation depends on (a style change needs no new values). */
 export function inputKey(def: IndicatorDef, params: IndicatorParams): string {
   return JSON.stringify(def.params.filter((p) => p.group === "inputs").map((p) => params[p.name]));
@@ -111,6 +117,12 @@ interface Active {
   row: HTMLElement;
   valueEls: Map<string, HTMLElement>;
   generation: number;
+  /** Not drawn: the list keeps it, the legend says why (a file that does not load, a definition that is gone). */
+  ghost: GhostState | null;
+  /** The server said no definition has this id: it cannot be saved back (the next save drops it). */
+  gone: boolean;
+  /** Inputs that went back to their defaults because the definition changed (until the next save). */
+  reset: string[];
   error?: string;
   /** The file's version the values were computed with (your own files; see refresh.ts). */
   version?: string;
@@ -149,26 +161,63 @@ export class IndicatorLayer {
     return [...this.catalog.values()];
   }
 
-  /** What a layout stores. */
+  /** The list as it is, every instance. */
   entries(): IndicatorEntry[] {
     return this.active.map((a) => structuredClone(a.entry));
   }
 
-  /** Replace every indicator (a layout was loaded). Unknown ids are skipped. Values are
-   * fetched now, or with `reload` false when the chart is about to load anyway. */
+  /**
+   * The list as it is saved to the server: without the instances the server said have no
+   * definition (it refuses a list that holds one). A file that has an error, is switched off or
+   * cannot run is kept: the server keeps its values as given.
+   */
+  entriesToSave(): IndicatorEntry[] {
+    return this.active.filter((a) => !a.gone).map((a) => structuredClone(a.entry));
+  }
+
+  /** The ids `entriesToSave` leaves out. */
+  missingIds(): string[] {
+    return this.active.filter((a) => a.gone).map((a) => a.entry.id);
+  }
+
+  /** Replace every indicator with these. Values are fetched now, or with `reload` false when the chart is about to load anyway. */
   setEntries(entries: IndicatorEntry[], reload = true): void {
+    this.setInstances(
+      entries.map((entry) => ({ entry, state: null, reset: [] })),
+      reload,
+    );
+  }
+
+  /**
+   * Replace every indicator with the server's list. One the catalog has no definition for,
+   * or that the server says cannot run, stays in the list as a legend row that says why
+   * (nothing is dropped: the next save writes the list back whole).
+   */
+  setInstances(list: Instance[], reload = true): void {
     for (const a of [...this.active]) this.dispose(a);
     this.active = [];
-    for (const e of entries) {
-      const def = this.catalog.get(e.id);
-      if (def) this.create(def, { ...newEntry(def), ...e, params: reconcileParams(def, e.params) });
+    for (const { entry, state, reset } of list) {
+      const def = this.catalog.get(entry.id);
+      const ghost = state ?? ghostOf(entry, def);
+      // Only the server's word counts for `gone`: a catalog that failed to load makes every id look missing here.
+      if (!def || ghost) this.create(stub(entry), structuredClone(entry), { ghost: ghost ?? "missing", reset, gone: state === "missing" });
+      else this.create(def, { ...newEntry(def), ...entry, params: reconcileParams(def, entry.params) }, { ghost: null, reset, gone: false });
     }
     this.layoutPanes();
     if (reload) this.reloadAll();
   }
 
+  /** The list was saved: what had been reset is stored now. */
+  clearResets(): void {
+    for (const a of this.active) {
+      if (!a.reset.length) continue;
+      a.reset = [];
+      this.renderRow(a);
+    }
+  }
+
   add(def: IndicatorDef): number {
-    const a = this.create(def, newEntry(def));
+    const a = this.create(def, { ...newEntry(def), uid: newUid(), kind: def.builtin ? "builtin" : "custom" });
     this.layoutPanes();
     void this.load(a);
     this.onChange();
@@ -184,14 +233,18 @@ export class IndicatorLayer {
     this.onChange();
   }
 
-  /** Drop every instance of one of your definitions that no longer exists (its file was deleted). */
-  removeDefinition(id: string): number {
+  /**
+   * Drop every instance of one of your definitions that no longer exists (its file was
+   * deleted). The server removed them from its lists in the same call, so nothing is saved
+   * (`save` false) and the lists it broadcasts follow.
+   */
+  removeDefinition(id: string, save = true): number {
     const gone = this.active.filter((a) => a.def.id === id && !a.def.builtin);
     if (!gone.length) return 0;
     for (const a of gone) this.dispose(a);
     this.active = this.active.filter((a) => !gone.includes(a));
     this.layoutPanes();
-    this.onChange();
+    if (save) this.onChange();
     return gone.length;
   }
 
@@ -204,8 +257,9 @@ export class IndicatorLayer {
   update(uid: number, entry: IndicatorEntry, save = true): void {
     const a = this.find(uid);
     if (!a) return;
+    if (a.ghost) return;
     const refetch = inputKey(a.def, a.entry.params) !== inputKey(a.def, entry.params);
-    a.entry = structuredClone(entry);
+    a.entry = { ...structuredClone(entry), uid: a.entry.uid, kind: a.entry.kind };
     this.style(a);
     this.renderRow(a);
     if (refetch) void this.load(a);
@@ -220,7 +274,11 @@ export class IndicatorLayer {
 
   // Series and panes
 
-  private create(def: IndicatorDef, entry: IndicatorEntry): Active {
+  private create(
+    def: IndicatorDef,
+    entry: IndicatorEntry,
+    note: { ghost: GhostState | null; reset: string[]; gone: boolean } = { ghost: null, reset: [], gone: false },
+  ): Active {
     const a: Active = {
       uid: this.nextUid++,
       def,
@@ -236,6 +294,9 @@ export class IndicatorLayer {
       row: h("div", { class: "legend-row" }),
       valueEls: new Map(),
       generation: 0,
+      ghost: note.ghost,
+      gone: note.gone,
+      reset: note.reset,
       lastTry: 0,
     };
     const chart = this.view.chart;
@@ -460,6 +521,7 @@ export class IndicatorLayer {
 
   /** Values, hits and levels for every bar held. */
   private async load(a: Active): Promise<void> {
+    if (a.ghost) return;
     const token = {};
     a.loading = token;
     try {
@@ -522,6 +584,7 @@ export class IndicatorLayer {
    * every few seconds.
    */
   private async loadTail(a: Active): Promise<void> {
+    if (a.ghost) return;
     const span = this.view.span();
     const q = this.query(a);
     if (!span || !q || a.loading) return;
@@ -594,6 +657,7 @@ export class IndicatorLayer {
   // Legend
 
   private renderRow(a: Active): void {
+    if (a.ghost) return this.renderGhost(a);
     const label = indicatorLabel(a.def, a.entry.params);
     const eye = button({
       icon: a.entry.visible ? "eye" : "eyeOff",
@@ -634,6 +698,7 @@ export class IndicatorLayer {
       h("span", { class: "legend-row-name", "data-tip": a.def.title }, label),
       values,
       ...(a.error ? [h("span", { class: "legend-row-error", "data-tip": a.error }, icon("warn", 14), "Could not compute")] : []),
+      ...this.resetChip(a),
       h(
         "span",
         { class: "legend-row-actions" },
@@ -647,6 +712,25 @@ export class IndicatorLayer {
       if (!(ev.target as Element).closest("button")) this.onSettings(a.uid);
     };
     this.renderValues(a);
+  }
+
+  /** A row for an instance that cannot be drawn: what it is, why, and Remove. */
+  private renderGhost(a: Active): void {
+    const state = legendState(a.ghost!);
+    a.valueEls = new Map();
+    a.row.className = "legend-row ghost";
+    a.row.replaceChildren(
+      h("span", { class: "legend-row-name", "data-tip": state.tip }, a.entry.id),
+      h("span", { class: "legend-row-error", "data-tip": a.gone ? `${state.tip} It is taken off the list with your next change.` : state.tip }, icon("warn", 14), state.label),
+      ...this.resetChip(a),
+      h("span", { class: "legend-row-actions" }, button({ icon: "trash", title: "Remove", onClick: () => this.remove(a.uid) })),
+    );
+  }
+
+  private resetChip(a: Active): HTMLElement[] {
+    return a.reset.length
+      ? [h("span", { class: "legend-row-reset", "data-tip": `Back to the defaults because the definition changed: ${a.reset.join(", ")}. Your next change on this chart keeps them.` }, "Settings reset")]
+      : [];
   }
 
   private renderValues(a: Active): void {
