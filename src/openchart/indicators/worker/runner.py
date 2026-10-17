@@ -153,6 +153,7 @@ class _Live:
     hello: dict[str, Any]
     known: set[str] = field(default_factory=set)  # script hashes it has the source of
     ran: set[str] = field(default_factory=set)  # hashes of the scripts that had jobs here
+    max_values: int = 0  # values per array an answer may hold: the current job's bars (S4)
     started: float = field(default_factory=time.monotonic)
     over_folder: str | None = None  # why the folder watch killed it
 
@@ -171,6 +172,7 @@ class IndicatorRunner:
         self.state = "stopped"  # starting | ready | restarting | failed | stopped
         self.last_error: str | None = None
         self.restarts = 0
+        self._rid = 0  # the last request id (S6): every answer must echo its request's
         self.start_seconds: float | None = None
         self.stderr_tail: collections.deque[str] = collections.deque(maxlen=40)
         self.ready_at = -1e9  # monotonic time the current worker became ready
@@ -489,7 +491,7 @@ class IndicatorRunner:
     async def _handshake(self, live: _Live, loop: asyncio.AbstractEventLoop, t: float) -> _Live:
         handle, frames = live.handle, live.frames
         threading.Thread(
-            target=self._read_frames, args=(handle, frames, loop), daemon=True, name="worker-out"
+            target=self._read_frames, args=(live, frames, loop), daemon=True, name="worker-out"
         ).start()
         if handle.stderr is not None:
             threading.Thread(
@@ -583,7 +585,11 @@ class IndicatorRunner:
     async def _ask(
         self, live: _Live, header: dict[str, Any], arrays: Mapping[str, Any], wait: float
     ) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
-        data = encode(header, arrays)
+        self._rid += 1
+        rid = self._rid
+        data = encode(dict(header, rid=rid), arrays)
+        # An answer's arrays are one value per bar sent; anything longer is not kept (S4).
+        live.max_values = max((len(v) for v in arrays.values()), default=0)
 
         def write() -> None:
             live.handle.stdin.write(data)
@@ -599,6 +605,9 @@ class IndicatorRunner:
                 raise _Died(sent=True)
             if isinstance(got, _Bad):
                 raise _BadFrame(got.reason)
+            if got[0].get("rid") != rid:  # S6: an answer read for the wrong request
+                live.handle.kill()
+                raise _BadFrame(f"an answer to another request ({got[0].get('rid')!r}, not {rid})")
             return got
 
         return await asyncio.wait_for(exchange(), wait)
@@ -609,14 +618,13 @@ class IndicatorRunner:
         return live.handle.exit_code()
 
     @staticmethod
-    def _read_frames(
-        handle: Handle, frames: asyncio.Queue, loop: asyncio.AbstractEventLoop
-    ) -> None:
+    def _read_frames(live: _Live, frames: asyncio.Queue, loop: asyncio.AbstractEventLoop) -> None:
+        handle = live.handle
         read = exact_reader(handle.stdout)
         end: object = _EOF
         try:
             while True:
-                got = read_frame(read)
+                got = read_frame(read, max_count=lambda: live.max_values)
                 loop.call_soon_threadsafe(frames.put_nowait, got)
         except (EOFError, OSError, ValueError, ProtocolError) as exc:
             if isinstance(exc, ProtocolError):
