@@ -820,6 +820,18 @@ the old key goes once every enabled chart has a list, and a toast says the old l
   cannot be drawn; the picker keeps saying so. A toast appears for every change another browser makes
   (4 seconds); it is cheap to remove if it is too much.
 
+## CI-4: the API contract, before the code (2026-10-17)
+
+`docs/api.md`, "Your indicator definitions": the write endpoints of design section 4, written first so the editor (Session A) can be built against them. Choices made here, for review:
+
+- **Templates:** `blank` plus the four tested examples of docs/custom-indicators.md, shipped in the package; New takes a template id and an optional title.
+- **Import never overwrites:** an existing id is a `409` with a `suggested` free id; without an id it is made from the file name.
+- **Save never creates** (`404`; New and Import create), keeps the last 10 versions in `.history/<id>/`, and takes an optional `base_version` so two tabs (or the editor and a text editor) cannot overwrite each other silently: `409` with the stored version.
+- **Restore is a save** (undoable); Rename edits the single `TITLE = "..."` line or answers `409` "edit TITLE in the code" (design 1.1).
+- **Preview stores and counts nothing:** no file, no history, no quarantine count, no save-time checks; same query and bars as the values route.
+- **Sources:** 256 KB as UTF-8, NUL and lone surrogates refused, a leading BOM dropped, line endings kept; writes atomic (temporary file and rename) and serialized per id; plain files only, never through a link.
+- **`indicators_changed`** gains `{id, op}` (compatible: pages that ignore the fields still refetch).
+
 ## Hardening after the security review (2026-10-17)
 
 The owner approved the plan in `docs/security-review-custom-indicators.md` ("After the review"): S1, S2, S3, S5, Session A's findings 1 to 3 of CI-2 (b)-(d), the non-atomic delete and the empty import are fixed; S4, S6, S7, S8, S9 and the change stamp are documented. Tests first: 27 failed against main before the code (each on its own assertion); three passed already and the mutation check shows they bite (the database-failure delete, which today's order happened to survive, and two guards: no rerun for a few more bars, times in range still accepted).
