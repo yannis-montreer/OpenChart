@@ -160,7 +160,8 @@ def custom_routes(server: Server, charts: ChartIndicators) -> APIRouter:
     async def delete(indicator_id: str, request: Request, confirm: bool = False) -> dict[str, Any]:
         await require_editing(request, server.settings, server.isolation)
         definition_file(indicator_id)
-        async with charts.lock:
+        # The charts' lock, and the file's own: a save of it in progress finishes first.
+        async with charts.lock, server.custom.file_lock(indicator_id):
             path = definition_file(indicator_id)  # again: another delete may have run
             found = await usage(indicator_id)
             if found["in_use"] and not confirm:

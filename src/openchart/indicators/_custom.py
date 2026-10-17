@@ -153,6 +153,7 @@ class CustomIndicators:
         self.isolation: Isolation | None = None  # None while the worker starts
         self._ready = asyncio.Event()
         self._defs: dict[str, CustomDefinition] = {}
+        self._file_locks: dict[str, asyncio.Lock] = {}
         self._scan = asyncio.Lock()
         # A script's own errors, by (hash, params, bars), and slow ones by (hash, params).
         self._errors: OrderedDict[tuple[str, str, str], ScriptFailed] = OrderedDict()
@@ -190,6 +191,11 @@ class CustomIndicators:
             for stem, path in files.items():
                 await self._update(stem, path)
             return [self._defs[s] for s in sorted(self._defs)]
+
+    def file_lock(self, indicator_id: str) -> asyncio.Lock:
+        """The lock every write of `<id>.py` holds (the editor's endpoints, delete), so a
+        delete never runs in the middle of a save of the same file."""
+        return self._file_locks.setdefault(indicator_id, asyncio.Lock())
 
     def forget(self, indicator_id: str) -> None:
         """Drop what is known of a file, so the next read describes it again: after a
