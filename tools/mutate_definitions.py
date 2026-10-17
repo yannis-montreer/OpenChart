@@ -117,7 +117,8 @@ MUTANTS = [
     one(
         "a write in place",
         F,
-        "            move(tmp, path)  # waits out a reader on Windows\n        except OSError as exc:\n",
+        "            move(tmp, path)  # waits out a reader on Windows\n"
+        "        except OSError as exc:\n",
         "            path.write_bytes(text.encode('utf-8'))\n        except OSError as exc:\n",
     ),
     one(
