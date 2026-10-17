@@ -432,7 +432,7 @@ The rest of this page is about the process that runs your files and what it can 
 | Windows service, sandbox not set up (or a source checkout) | none | — | off; custom indicators do not run (built-in ones do); rerun the installer |
 | Source install, `openchart run` | restricted token (Low integrity) + job object | not met | always off |
 | Release zip run by hand (not the service) | restricted token + job object | not met | always off |
-| Docker with `docker-compose.yml` | the `indicator-worker` container | met | per the setting (`auto` is off in Docker) |
+| Docker with `docker-compose.yml` | the `indicator-worker` container | met | per the setting below |
 | Docker without compose, Linux, macOS | a child process, same user | not met | always off |
 
 **The minimum isolation**, each point proven by a probe when the worker starts (the server
@@ -458,36 +458,40 @@ same way, prints the probes and runs a script.
 
 ## Editing in the browser (from CI-4)
 
-Editing custom code in a browser needs **all** of:
+Editing custom code in a browser needs **both** of:
 
 - the minimum isolation (above); no setting overrides it;
-- the setting, which only the server's own machine can change:
+- the setting **`on`**, which only the server's own machine can change:
 
   ```
-  openchart settings set indicator-editing auto   # the default
   openchart settings set indicator-editing on
   openchart settings set indicator-editing off
-  openchart settings set behind-proxy on          # a reverse proxy is in front
+  openchart settings set indicator-editing auto   # the default: off
   ```
 
   (`--data-dir C:\ProgramData\OpenChart\data` for the service.) It works while the server
-  runs and takes effect on the next request; no web page or API can change it.
-- with `auto`: a request from the server's own machine. Its TCP peer is 127.0.0.1 or ::1,
-  it carries none of `Forwarded`, `X-Forwarded-For`, `X-Real-IP`, `Tailscale-User-Login`,
-  and `behind-proxy` is off. On the Windows service, which listens on 0.0.0.0 for
-  Tailscale, that means yes in the browser on the PC (http://127.0.0.1:8000, the viewer)
-  and no from the phone. In Docker requests come from the bridge, so `auto` is off.
-- the login and the same-origin check, as for every change.
+  runs and takes effect on the next request; no web page or API can change it. The
+  Indicators menu shows whether editing is allowed and, if not, why and how to allow it.
 
-A proxy that adds none of those headers cannot be detected: with a proxy in front, set
-`behind-proxy on` or `indicator-editing off`.
+**`auto` never allows editing.** Until the security review it meant "from the browser on
+the server's own machine", told by a request arriving from 127.0.0.1 with no proxy header.
+But anything that forwards a port on the PC (an SSH tunnel, `socat`, a tunnel agent) makes
+a remote browser's request arrive from 127.0.0.1 the same way, so the rule could not keep
+the phone, or someone with your password and such a tunnel, out. With `on`, every browser
+that is logged in may edit, the phone included; turn it on when you edit and `off`
+afterwards if you prefer.
+
+The login and the same-origin check apply as for every change.
 
 ## What it does not protect against
 
 - **A determined attacker** with an operating-system or kernel exploit. A container is not
   a virtual machine, and an AppContainer is not either.
 - **A script that returns plausible but false values.**
-- **Scripts interfering with each other** inside the shared worker (they are all yours).
+- **Your custom indicators are not isolated from each other.** They all run in one worker
+  process: one of them can change what another shows (its values, even its answers), slow
+  it down or make it fail. The isolation is between them and your data, tokens and
+  network, not between one indicator and the next. Only put files there you would run.
 - **On an install below the minimum, almost anything a program running as you can do.**
 
 Treat a custom indicator like a program you run. That is why browser editing is off unless
