@@ -5,7 +5,7 @@ import pytest
 
 from openchart import API_VERSION
 from openchart.providers.base import Tick
-from tests.conftest import NOW, Harness
+from tests.conftest import NOW, PASSWORD, Harness, run_setup
 from tests.ws import receive, receive_until
 
 
@@ -169,3 +169,34 @@ def test_the_page_is_revalidated_and_built_assets_are_cached(tmp_path, monkeypat
         assert c.get("/").headers["cache-control"] == "no-cache"
         cached = c.get("/assets/index-abc123.js").headers["cache-control"]
         assert "immutable" in cached
+
+
+def test_a_write_to_a_path_nothing_serves_is_404_with_or_without_a_built_frontend(
+    tmp_path, monkeypatch
+):
+    """The static mount used to answer 405 to a DELETE or POST on an unknown path (an
+    encoded slash in an id never matches a route), so the answer depended on whether the
+    frontend was built. A real install always has it built: 404 is the honest answer."""
+    from fastapi.testclient import TestClient
+
+    from openchart.api import app as app_module
+
+    (tmp_path / "web").mkdir()
+    (tmp_path / "web" / "index.html").write_text("<html></html>")
+    answers = []
+    for web in (tmp_path / "web", tmp_path / "not-built"):
+        monkeypatch.setattr(app_module, "WEB_DIR", web)
+        harness = Harness(tmp_path / f"data-{web.name}")
+        with TestClient(app_module.create_app(harness.server)) as c:
+            c.server = harness.server
+            run_setup(c)
+            c.post("/api/login", json={"password": PASSWORD})
+            answers.append(
+                [
+                    c.delete("/api/custom-indicators/..%2Fmine?confirm=true").status_code,
+                    c.delete("/api/nothing-here").status_code,
+                    c.post("/api/nothing-here", json={}).status_code,
+                    c.put("/not-an-api-path", json={}).status_code,
+                ]
+            )
+    assert answers == [[404] * 4, [404] * 4]

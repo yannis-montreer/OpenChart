@@ -53,6 +53,15 @@ class WebFiles(StaticFiles):
     change; index.html is checked on every load, so a rebuild takes effect at once
     (a cached page would keep running the previous build)."""
 
+    async def __call__(self, scope, receive, send):
+        # Only GET and HEAD read files. Anything else that reached the mount matched no
+        # route, so it is "not found" (the base class says 405), as without a built UI.
+        if scope["type"] == "http" and scope["method"] not in ("GET", "HEAD"):
+            response = JSONResponse({"detail": "Not Found"}, status_code=404)
+            await response(scope, receive, send)
+            return
+        await super().__call__(scope, receive, send)
+
     def file_response(self, full_path, stat_result, scope, status_code=200):
         response = super().file_response(full_path, stat_result, scope, status_code)
         immutable = scope["path"].startswith("/assets/")
