@@ -26,6 +26,7 @@ import { ChartSync } from "./chart/chartSync";
 import { IndicatorLayer } from "./chart/indicators";
 import { CHART_TYPES, ChartView, type ChartContext } from "./chart/view";
 import { DrawingController, type AlertPlace, type Tool } from "./drawings/controller";
+import { isLineType } from "./drawings/shapes";
 import { dropLegacyIndicators, loadPrefs, readLegacyIndicators, resolveTimezone, savePrefs, type Prefs } from "./prefs";
 import { formatClock, offsetLabel } from "./time";
 import { versionNotice } from "./version";
@@ -309,6 +310,13 @@ export class App {
       tool("ray", "ray", `Ray (Alt+Y). ${snapHint}`),
       tool("extended", "extended", `Extended line (Alt+E). ${snapHint}`),
       tool("hline", "hline", `Horizontal line (Alt+H). ${snapHint}`),
+      tool("vline", "vline", `Vertical line (Alt+V). ${snapHint}`),
+      h("div", { class: "sep-h" }),
+      tool("rect", "rect", `Rectangle (Alt+B). ${snapHint}`),
+      tool("channel", "channel", `Parallel channel (Alt+C): two points for the base line, a third for the width. ${snapHint}`),
+      tool("fib", "fib", `Fibonacci retracement (Alt+F). ${snapHint}`),
+      tool("measure", "measure", `Measure (Alt+M). ${snapHint}`),
+      tool("text", "text", "Text (Alt+X)"),
       h("div", { class: "sep-h" }),
       eye,
       trash,
@@ -919,6 +927,10 @@ export class App {
     if (!this.instrument) return;
     const selected = this.drawings.selectedId ? this.drawings.get(this.drawings.selectedId) : undefined;
     const line = drawing ?? selected;
+    if (line && !isLineType(line.type)) {
+      toast({ title: "No alerts on this tool yet", body: "Alerts follow lines: horizontal, trend, ray and extended lines.", icon: "info", timeout: 5000 });
+      return;
+    }
     const existing = line ? this.alertsPanel.forDrawing(line.id) : [];
     if (existing.length === 1) return this.editAlert(existing[0]);
     if (existing.length > 1) return this.pickAlert(existing, place);
@@ -1032,6 +1044,8 @@ export class App {
         row("Alt + R", "Reset chart view"),
         row("Esc", "Cancel drawing, back to the cursor"),
         row("Alt + T / Y / E / H", "Trendline, ray, extended line, horizontal line"),
+        row("Alt + V / B / C", "Vertical line, rectangle (box), parallel channel"),
+        row("Alt + F / M / X", "Fibonacci retracement, measure, text"),
         row("Ctrl (while drawing)", "Snap to the bar's open, high, low or close"),
         row("Del", "Delete the selected drawing"),
         row("Alt + A", "Alert on the selected line, or at a price level"),
