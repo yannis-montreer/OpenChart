@@ -679,3 +679,14 @@ def test_a_delete_during_a_save_does_not_bring_the_file_back(ec, monkeypatch):
     assert not (ec.folder / "mine.py").exists()  # gone, as the delete said
     moved = ec.folder / out["delete"].json()["moved_to"]
     assert (moved / "mine.py").read_text(encoding="utf-8") == PLAIN + "# 2\n"  # the saved text
+
+
+def test_a_save_waits_for_a_reader_that_holds_the_file_a_moment(ec):
+    """On Windows a file someone has open cannot be replaced (WinError 32): a catalog read
+    at the moment of a save made it a 409. The rename waits a moment (as the delete's)."""
+    ok(create(ec, id="mine"), 201)
+    reader = open(ec.folder / "mine.py", "rb")  # noqa: SIM115 (closed by the timer)
+    threading.Timer(0.3, reader.close).start()
+    r = ec.put(f"{BASE}/mine/source", json={"source": PLAIN + "# 2\n"})
+    assert r.status_code == 200, r.text
+    assert (ec.folder / "mine.py").read_text(encoding="utf-8") == PLAIN + "# 2\n"

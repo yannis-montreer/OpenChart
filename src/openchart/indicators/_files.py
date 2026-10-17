@@ -29,6 +29,7 @@ import unicodedata
 from datetime import UTC, datetime
 from pathlib import Path
 
+from openchart.files import move
 from openchart.indicators._base import MAX_FILE_BYTES
 
 HISTORY_KEEP = 10  # versions per definition (design 1.1)
@@ -203,7 +204,7 @@ class Files:
         tmp = self._temporary(text.encode("utf-8"))
         try:
             if sys.platform == "win32":
-                os.rename(tmp, path)  # fails if the name exists: never overwrites
+                move(tmp, path, overwrite=False)  # fails if the name exists
             else:
                 os.link(tmp, path)  # the same, atomically, on POSIX
                 tmp.unlink()
@@ -237,7 +238,7 @@ class Files:
         kept = self._keep(folder, current)
         tmp = self._temporary(text.encode("utf-8"))
         try:
-            os.replace(tmp, path)
+            move(tmp, path)  # waits out a reader on Windows
         except OSError as exc:
             kept.unlink(missing_ok=True)  # the save did not happen: no version for it
             raise FileProblem(409, f"could not write {path.name}: {exc}") from None

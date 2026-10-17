@@ -90,8 +90,8 @@ MUTANTS = [
                 "        if False:\n            raise FileProblem(409, {",
             ),
             (
-                "                os.rename(tmp, path)  # fails if",
-                "                os.replace(tmp, path)  # fails if",
+                "                move(tmp, path, overwrite=False)  # fails if",
+                "                move(tmp, path)  # fails if",
             ),
             (
                 "                os.link(tmp, path)  # the same",
@@ -117,7 +117,8 @@ MUTANTS = [
     one(
         "a write in place",
         F,
-        "            os.replace(tmp, path)\n        except OSError as exc:\n",
+        "            move(tmp, path)  # waits out a reader on Windows\n"
+        "        except OSError as exc:\n",
         "            path.write_bytes(text.encode('utf-8'))\n        except OSError as exc:\n",
     ),
     one(

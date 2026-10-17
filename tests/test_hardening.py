@@ -311,3 +311,18 @@ def test_the_catalog_says_how_to_turn_editing_on(fc):
     assert "openchart settings set indicator-editing on" in editing["reason"]
     fc.portal.call(fc.server.settings.set, INDICATOR_EDITING, "on")
     assert fc.get("/api/indicators").json()["editing"]["allowed"] is True
+
+
+def test_a_delete_waits_for_a_reader_that_holds_the_file_a_moment(fc):
+    """Found in the stacked branch's full run: on Windows a file another thread or process
+    has open cannot be renamed (WinError 32), so a catalog read at the wrong moment made
+    the delete a 409. The move is retried for a moment (a no-op elsewhere)."""
+    import threading
+
+    allow_editing(fc)
+    write(fc.folder, "mine.py", "PLAIN\n")
+    reader = open(fc.folder / "mine.py", "rb")  # noqa: SIM115 (closed by the timer)
+    threading.Timer(0.3, reader.close).start()
+    r = fc.delete("/api/custom-indicators/mine")
+    assert r.status_code == 200, r.text
+    assert (fc.folder / r.json()["moved_to"] / "mine.py").read_text() == "PLAIN\n"

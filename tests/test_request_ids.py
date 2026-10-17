@@ -64,3 +64,36 @@ def test_the_real_worker_echoes_the_request_id():
     assert head["rid"] == 41
     head, _ = worker.handle({"cmd": "describe", "hash": "x", "rid": 42}, {})
     assert head["rid"] == 42  # also on an error answer
+
+
+def test_the_sidecars_own_answers_echo_the_request_id():
+    """Found by CI on Linux: the sidecar answers arming, a source that does not match its
+    hash, a timeout and a crash itself, not through `Worker.handle`, and those answers
+    carried no id, so the runner refused them (the sidecar never armed)."""
+    import socket
+    import threading
+
+    from openchart.indicators.worker import posix
+    from openchart.indicators.worker.protocol import encode, exact_reader, read_frame
+
+    class Stub:
+        def hello(self):
+            return {"ready": True}
+
+        def learn(self, req):
+            raise ValueError("the source does not match its hash")
+
+    server_end, client_end = socket.socketpair()
+    thread = threading.Thread(target=posix._serve, args=(server_end, Stub()), daemon=True)
+    thread.start()
+    f = client_end.makefile("rwb", buffering=0)
+    read = exact_reader(f)
+    assert read_frame(read)[0] == {"ready": True}
+    f.write(encode({"cmd": "arm", "memory_mb": 256, "rid": 7}))
+    assert read_frame(read)[0] == {"armed": True, "rid": 7}
+    f.write(encode({"cmd": "compute", "hash": "x", "source": "y", "rid": 8}))
+    head, _ = read_frame(read)
+    assert head["rid"] == 8 and head["error"]["type"] == "ValueError"
+    f.write(encode({"cmd": "exit"}))
+    thread.join(5)
+    client_end.close()
