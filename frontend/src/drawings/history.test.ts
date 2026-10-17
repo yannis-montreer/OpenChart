@@ -169,6 +169,19 @@ describe("alerts in a delete", () => {
     expect(s.redo()).toEqual({ kind: "delete", drawing: drawing("a"), alerts: [alert("y", "a"), alert("w", "a")] });
   });
 
+  it("are replaced inside a batch too", () => {
+    const s = new UndoStack();
+    s.push({ kind: "batch", entries: [{ kind: "delete", drawing: drawing("a") }, { kind: "delete", drawing: drawing("b") }] });
+    s.setAlerts("a", [alert("y", "a")]);
+    expect(s.undo()).toEqual({
+      kind: "batch",
+      entries: [
+        { kind: "create", drawing: drawing("b"), alerts: undefined },
+        { kind: "create", drawing: drawing("a"), alerts: [alert("y", "a")] },
+      ],
+    });
+  });
+
   it("leave other drawings' entries alone", () => {
     const s = new UndoStack();
     s.push({ kind: "delete", drawing: drawing("b"), alerts: [alert("x", "b")] });

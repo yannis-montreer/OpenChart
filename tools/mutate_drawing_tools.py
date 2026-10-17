@@ -119,6 +119,16 @@ SERVER = [
         "if False:",
     ),
     one(
+        "a hidden line is dropped from the alert engine",
+        "openchart/alerts/engine.py",
+        "        old = self.lines.get(drawing.id)\n        self.lines[drawing.id] = drawing\n",
+        "        old = self.lines.get(drawing.id)\n"
+        '        if drawing.style.get("hidden"):\n'
+        "            self.lines.pop(drawing.id, None)\n"
+        "            return\n"
+        "        self.lines[drawing.id] = drawing\n",
+    ),
+    one(
         "any write to the page is a 404",
         "openchart/api/app.py",
         'scope["method"] not in ("GET", "HEAD")',
@@ -289,14 +299,14 @@ BROWSER += [
     one(
         "a delete is undone as a delete",
         HIST,
-        'return { kind: "create", drawing: e.drawing };',
-        'return { kind: "delete", drawing: e.drawing };',
+        'return { kind: "create", drawing: e.drawing, alerts: e.alerts };',
+        'return { kind: "delete", drawing: e.drawing, alerts: e.alerts };',
     ),
     one(
         "a create is undone as a create",
         HIST,
-        'return { kind: "delete", drawing: e.drawing };',
-        'return { kind: "create", drawing: e.drawing };',
+        'return { kind: "delete", drawing: e.drawing, alerts: e.alerts };',
+        'return { kind: "create", drawing: e.drawing, alerts: e.alerts };',
     ),
     one(
         "a batch is undone in the same order",
@@ -408,6 +418,69 @@ BROWSER += [
     ),
     one("no price in a line's row", MAN, 'd.type === "hline" ?', "false ?"),
     one("no label in a row", MAN, "if (d.label) return", "if (false) return"),
+]
+
+
+BROWSER += [
+    one(
+        "a triggered alert is restored",
+        MAN,
+        'a.status === "active" || a.status === "stopped"',
+        'a.status !== "expired"',
+    ),
+    one(
+        "a restored alert stays on the old drawing",
+        MAN,
+        "drawing_id: drawingId,",
+        "drawing_id: a.drawing_id,",
+    ),
+    one("a restored alert loses its name", MAN, "    name: a.name,\n", '    name: "",\n'),
+    one(
+        "an expiry is always sent",
+        MAN,
+        "...(a.expires_at === null ? {} : { expires_at: a.expires_at }),",
+        "expires_at: a.expires_at,",
+    ),
+    one("no summary without alerts", MAN, "if (total + skipped === 0) return null;", ""),
+    one("singular for two alerts", MAN, "restored === 1 ?", "restored === 2 ?"),
+    one("failures not reported", MAN, "if (failed > 0) text +=", "if (false) text +="),
+    one("finished alerts not reported", MAN, "if (skipped > 0) text +=", "if (false) text +="),
+    one(
+        "a create is undone without its alerts",
+        HIST,
+        'return { kind: "delete", drawing: e.drawing, alerts: e.alerts };',
+        'return { kind: "delete", drawing: e.drawing };',
+    ),
+    one(
+        "a delete is undone without its alerts",
+        HIST,
+        'return { kind: "create", drawing: e.drawing, alerts: e.alerts };',
+        'return { kind: "create", drawing: e.drawing };',
+    ),
+    one(
+        "alerts set on every drawing",
+        HIST,
+        "e.drawing.id === drawingId) return { ...e, alerts };",
+        "true) return { ...e, alerts };",
+    ),
+    one(
+        "alerts not set in the redo list",
+        HIST,
+        "    this.undone = this.undone.map(set);\n",
+        "",
+    ),
+    one(
+        "alerts not set in the undo list",
+        HIST,
+        "    this.done = this.done.map(set);\n",
+        "",
+    ),
+    one(
+        "alerts not set in a batch",
+        HIST,
+        'if (e.kind === "batch") return { kind: "batch", entries: e.entries.map(set) };',
+        'if (e.kind === "batch") return e;',
+    ),
 ]
 
 
