@@ -11,6 +11,7 @@ PARAMS = [
     Int("d_smooth", 3, min=1, max=5000, label="%D smoothing"),
     Float("overbought", 80, min=0, max=100, label="Overbought level"),
     Float("oversold", 20, min=0, max=100, label="Oversold level"),
+    Float("middle", 50, min=0, max=100, label="Middle level"),
     Color("k_color", "#2962ff", label="%K colour"),
     Color("d_color", "#ff6d00", label="%D colour"),
     Width("width", 1),
@@ -21,6 +22,7 @@ OUTPUTS = [
     Line("d", "%D", color="d_color", width="width"),
     Level("overbought", "Overbought", color="level_color"),
     Level("oversold", "Oversold", color="level_color"),
+    Level("middle", "Middle", color="level_color"),  # last: the other ids stay where they were
 ]
 
 

@@ -83,19 +83,46 @@ def ref_rsi(x, n):
     return out
 
 
-def ref_macd(x, fast, slow, signal):
-    f, s = ref_ema(x, fast), ref_ema(x, slow)
+def ref_wma(x, n):
+    out = [NAN] * len(x)  # the newest weighs n, down to 1
+    for i in range(n - 1, len(x)):
+        w = x[i - n + 1 : i + 1]
+        out[i] = sum((k + 1) * v for k, v in enumerate(w)) / (n * (n + 1) / 2)
+    return out
+
+
+def ref_vwma(x, vol, n):
+    out = [NAN] * len(x)
+    for i in range(n - 1, len(x)):
+        pv = sum(a * b for a, b in zip(x[i - n + 1 : i + 1], vol[i - n + 1 : i + 1], strict=True))
+        v = sum(vol[i - n + 1 : i + 1])
+        out[i] = pv / v if v > 0 else NAN
+    return out
+
+
+def ref_ma(kind, x, n, vol=None):
+    return {
+        "SMA": lambda: ref_sma(x, n),
+        "EMA": lambda: ref_ema(x, n),
+        "RMA": lambda: ref_rma(x, n),
+        "WMA": lambda: ref_wma(x, n),
+        "VWMA": lambda: ref_vwma(x, vol, n),
+    }[kind]()
+
+
+def ref_macd(x, fast, slow, signal, osc="EMA", sig_ma="EMA"):
+    f, s = ref_ma(osc, x, fast), ref_ma(osc, x, slow)
     line = [a - b for a, b in zip(f, s, strict=True)]
-    sig = ref_ema(line, signal)
+    sig = ref_ma(sig_ma, line, signal)
     return line, sig, [a - b for a, b in zip(line, sig, strict=True)]
 
 
-def ref_bands(x, n, mult):
-    basis = ref_sma(x, n)
+def ref_bands(x, n, mult, kind="SMA", vol=None):
+    basis = ref_ma(kind, x, n, vol)
     upper, lower = [NAN] * len(x), [NAN] * len(x)
     for i in range(n - 1, len(x)):
         w = x[i - n + 1 : i + 1]
-        m = sum(w) / n
+        m = sum(w) / n  # the deviation is always about the window's own simple mean
         dev = math.sqrt(sum((v - m) ** 2 for v in w) / n)  # population, as TradingView
         upper[i], lower[i] = basis[i] + mult * dev, basis[i] - mult * dev
     return basis, upper, lower
@@ -204,6 +231,49 @@ def test_macd(fast, slow, signal):
     same(got["hist"], hist)
 
 
+@pytest.mark.parametrize(
+    "osc,sig",
+    [("EMA", "SMA"), ("SMA", "EMA"), ("SMA", "SMA")],
+    ids=["osc-EMA-sig-SMA", "osc-SMA-sig-EMA", "both-SMA"],
+)
+def test_macd_moving_average_types(osc, sig):
+    got = computed("macd", FRAME, osc_ma=osc, signal_ma=sig)
+    line, signal, hist = ref_macd(FRAME["c"].tolist(), 12, 26, 9, osc, sig)
+    same(got["macd"], line)
+    same(got["signal"], signal)
+    same(got["hist"], hist)
+
+
+@pytest.mark.parametrize("kind", ["SMA", "EMA", "RMA", "WMA", "VWMA"])
+@pytest.mark.parametrize("n", [5, 20])
+def test_bollinger_basis_types(kind, n):
+    got = computed("bollinger", FRAME, length=n, ma_type=kind)
+    basis, upper, lower = ref_bands(FRAME["c"].tolist(), n, 2.0, kind, FRAME["v"].tolist())
+    same(got["basis"], basis)
+    same(got["upper"], upper)
+    same(got["lower"], lower)
+
+
+def test_bollinger_vwma_without_any_volume_is_a_gap():
+    frame = FRAME.copy()
+    frame["v"] = 0.0
+    got = computed("bollinger", frame, ma_type="VWMA")
+    assert np.isnan(got["basis"]).all() and np.isnan(got["upper"]).all()
+
+
+@pytest.mark.parametrize("n", [1, 5, 20])
+def test_volume_moving_average(n):
+    got = computed("volume", FRAME, show_ma=True, ma_length=n)
+    same(got["ma"], ref_sma(FRAME["v"].tolist(), n))
+    same(got["volume"], FRAME["v"].tolist())
+
+
+def test_volume_moving_average_is_off_by_default_and_then_all_gaps():
+    got = computed("volume", FRAME)
+    assert np.isnan(got["ma"]).all()
+    assert np.isnan(computed("volume", FRAME, ma_length=5)["ma"]).all()  # length alone: nothing
+
+
 @pytest.mark.parametrize("n,mult", [(20, 2.0), (5, 1.0), (30, 2.5)])
 def test_bollinger(n, mult):
     got = computed("bollinger", FRAME, length=n, mult=mult)
@@ -264,18 +334,32 @@ def test_all_of_them_load_next_to_ema():
 def test_inputs_and_defaults_are_tradingviews():
     expected = {
         "sma": {"length": 9, "source": "close"},
-        "rsi": {"length": 14, "source": "close", "overbought": 70, "oversold": 30},
-        "macd": {"fast": 12, "slow": 26, "signal": 9, "source": "close"},
-        "bollinger": {"length": 20, "mult": 2.0, "source": "close"},
+        "rsi": {
+            "length": 14,
+            "source": "close",
+            "overbought": 70,
+            "middle": 50,
+            "oversold": 30,
+        },
+        "macd": {
+            "fast": 12,
+            "slow": 26,
+            "signal": 9,
+            "source": "close",
+            "osc_ma": "EMA",
+            "signal_ma": "EMA",
+        },
+        "bollinger": {"length": 20, "mult": 2.0, "source": "close", "ma_type": "SMA"},
         "atr": {"length": 14, "smoothing": "RMA"},
         "stochastic": {
             "k_length": 14,
             "k_smooth": 1,
             "d_smooth": 3,
             "overbought": 80,
+            "middle": 50,
             "oversold": 20,
         },
-        "volume": {},
+        "volume": {"show_ma": False, "ma_length": 20},
     }
     for oid, want in expected.items():
         inputs = {
@@ -286,23 +370,26 @@ def test_inputs_and_defaults_are_tradingviews():
 
 def test_output_kinds_and_panes():
     assert kinds("sma") == ["line"] and described("sma")["overlay"] is True
-    assert kinds("rsi") == ["line", "level", "level"]
+    assert kinds("rsi") == ["line", "level", "level", "level"]
     assert kinds("macd") == ["histogram", "line", "line"]
     assert kinds("bollinger") == ["line", "line", "line", "fill"]
     assert described("bollinger")["overlay"] is True
     assert kinds("atr") == ["line"]
-    assert kinds("stochastic") == ["line", "line", "level", "level"]
-    assert kinds("volume") == ["histogram"]
+    assert kinds("stochastic") == ["line", "line", "level", "level", "level"]
+    assert kinds("volume") == ["histogram", "line"]
     for oid in ("rsi", "macd", "atr", "stochastic", "volume"):
         assert described(oid)["overlay"] is False, oid
 
 
 def test_levels_follow_their_inputs_and_the_fill_is_between_the_bands():
     levels = [o for o in described("rsi")["outputs"] if o["kind"] == "level"]
-    assert [o["input"] for o in levels] == ["overbought", "oversold"]
-    assert [o["label"] for o in levels] == ["Overbought", "Oversold"]
+    # The middle level comes last, so the ids of the two older levels do not move.
+    assert [o["input"] for o in levels] == ["overbought", "oversold", "middle"]
+    assert [o["label"] for o in levels] == ["Overbought", "Oversold", "Middle"]
+    assert all(o["style"] == "dashed" for o in levels)
     levels = [o for o in described("stochastic")["outputs"] if o["kind"] == "level"]
-    assert [o["input"] for o in levels] == ["overbought", "oversold"]
+    assert [o["input"] for o in levels] == ["overbought", "oversold", "middle"]
+    assert all(o["style"] == "dashed" for o in levels)
     out = described("bollinger")["outputs"]
     assert out[-1]["between"] == [out[1]["name"], out[2]["name"]]
     assert [o["label"] for o in out[:3]] == ["Basis", "Upper", "Lower"]
@@ -313,12 +400,25 @@ def test_levels_follow_their_inputs_and_the_fill_is_between_the_bands():
 def test_volume_says_it_is_tick_volume():
     d = described("volume")
     assert d["outputs"][0]["label"] == "Tick volume"
+    assert d["outputs"][1]["label"] == "Tick volume MA"
     assert "tick" in d["title"].lower()
+
+
+def test_the_new_choices_offer_exactly_the_helpers_that_exist():
+    def choices(oid, name):
+        return next(p["choices"] for p in described(oid)["params"] if p["name"] == name)
+
+    assert choices("macd", "osc_ma") == choices("macd", "signal_ma") == ["EMA", "SMA"]
+    assert choices("bollinger", "ma_type") == ["SMA", "EMA", "RMA", "WMA", "VWMA"]
 
 
 def test_the_levels_are_bounded_numbers():
     for oid in ("rsi", "stochastic"):
         ind = indicator(oid)
+        with pytest.raises(ValueError):
+            ind.normalize({"middle": 101})
+        with pytest.raises(ValueError):
+            ind.normalize({"middle": -1})
         with pytest.raises(ValueError):
             ind.normalize({"overbought": 101})
         with pytest.raises(ValueError):
@@ -330,11 +430,18 @@ def test_the_levels_are_bounded_numbers():
 VARIANTS = {
     "sma": [{}, {"length": 30, "source": "hlc3"}],
     "rsi": [{}, {"length": 5}],
-    "macd": [{}, {"fast": 5, "slow": 9, "signal": 3}],
-    "bollinger": [{}, {"length": 8, "mult": 1.5}],
+    "macd": [
+        {},
+        {"fast": 5, "slow": 9, "signal": 3},
+        {"osc_ma": "SMA"},
+        {"signal_ma": "SMA"},
+        {"osc_ma": "SMA", "signal_ma": "SMA"},
+    ],
+    "bollinger": [{}, {"length": 8, "mult": 1.5}]
+    + [{"ma_type": k} for k in ("EMA", "RMA", "WMA", "VWMA")],
     "atr": [{}, {"length": 5, "smoothing": "WMA"}, {"smoothing": "SMA"}, {"smoothing": "EMA"}],
     "stochastic": [{}, {"k_length": 5, "k_smooth": 3, "d_smooth": 2}],
-    "volume": [{}],
+    "volume": [{}, {"show_ma": True}, {"show_ma": True, "ma_length": 200}],
 }
 CASES = [(oid, p) for oid, ps in VARIANTS.items() for p in ps]
 CASE_IDS = [
