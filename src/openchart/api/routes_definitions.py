@@ -105,13 +105,12 @@ def _script_detail(exc: ScriptFailed) -> dict[str, Any]:
 
 def definition_routes(server: Server, charts: ChartIndicators) -> APIRouter:
     router = APIRouter(prefix="/api/custom-indicators")
-    locks: dict[str, asyncio.Lock] = {}
 
     def files() -> Files:
         return Files(server.custom.folder)
 
     def lock(indicator_id: str) -> asyncio.Lock:
-        return locks.setdefault(indicator_id, asyncio.Lock())
+        return server.custom.file_lock(indicator_id)  # shared with the delete
 
     async def run(fn, *args, **kwargs):
         """A file operation, in a thread; its FileProblem as the HTTP answer."""

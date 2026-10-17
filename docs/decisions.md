@@ -791,6 +791,9 @@ The contract of #37, implemented (`api/routes_definitions.py`, `indicators/_file
 - **Request ids (S6):** see the security review's CI-4 section. Answers carry `rid`; probes and arming too.
 - **The delete's broadcast** carries `{id, op: "delete"}` like the others.
 - **Not done here:** an `API_VERSION` bump (the frontend session decides when its editor needs these routes), the Settings display of the gate (frontend).
+- **Review of this change (finding 1, test first):** a delete did not wait for a save of the same file, so a save paused between keeping its history version and writing the file wrote it again after the delete had moved it (the test held the save there and showed the file back). Every write of `<id>.py`, the delete included, now holds the file's own lock (`CustomIndicators.file_lock`); the delete takes the charts' lock first, the editor's endpoints only the file lock, so no two locks are ever taken in the other order.
+- **Mutation check** (`tools/mutate_definitions.py`, 37 mutants): the first run was stopped after 7 mutants, all killed (one, "BOM kept", reported as killed by an error rather than a test's name), because a full run takes about 5 minutes a mutant here (a fresh server for each of about 100 tests); the rest are not run yet. Listed as unfinished in the PR.
+
 
 ## CI-5 backend: the values cache, the forming bar, the read cap (2026-10-17)
 
