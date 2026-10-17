@@ -87,8 +87,21 @@ Tests first (`tests/test_retention.py`, 65 failed before the code), then the cod
   validation, the depth endpoint, a longer depth clearing the mark); the feed's target; VACUUM
   and `--no-vacuum`; the access log switch passed to uvicorn; five logs kept; compose limits;
   migration 0009 on a synthetic database at version 8 (rows kept, NULL depth).
-- Mutation check: `tools/mutate_retention.py`, results in the PR.
-- Frontend: `retention.test.ts` (labels, the line, UTC dates).
+- Mutation check (`tools/mutate_retention.py`): 29 mutants (the limits and their rounding, the
+  tick-day and minute boundaries, part files, the cache invalidation, the epoch, the grace,
+  disabled instruments, "off" and "forever", the daily schedule, log pruning, settings from an
+  older page, the download target and mark, VACUUM, the access log): 29 killed. Two would have
+  survived for lack of a test (disabled instruments, the server pruning logs); tests were added
+  before the run rather than marking them equivalent.
+- Frontend: `retention.test.ts` (labels, the line, UTC dates). Checked in a browser against a
+  fake broker on a scratch port: both choices save and the server reports them; no console
+  error. Found there and fixed: the depth choice took the instrument row's whole width.
+- Full suite: 1328 passed, 2 failed, 8 skipped, 1 xfailed. Neither failure is this change:
+  `test_worker_runner.py::test_a_job_past_its_deadline_is_killed_and_a_new_worker_starts`
+  fails on this PC with the machine busy, on other branches too; and
+  `test_chart_indicators.py::test_delete_refuses_names_that_are_not_ids[..%2Fmine]` fails
+  only when the web UI has been built in the worktree (the static files answer 405 instead of
+  the API's 404); it passes with the build moved aside, and on `main`.
 
 ## Open questions
 
