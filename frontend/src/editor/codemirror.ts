@@ -60,6 +60,7 @@ const highlight = HighlightStyle.define([
 export function createCodeMirror(host: HTMLElement, hooks: EditorHooks, doc: string): CodeEditor {
   const readOnly = new Compartment();
   let quiet = false; // setText must not look like typing
+  let isReadOnly = false;
   const view = new EditorView({
     parent: host,
     state: EditorState.create({
@@ -109,7 +110,12 @@ export function createCodeMirror(host: HTMLElement, hooks: EditorHooks, doc: str
       view.focus();
     },
     markError: (line) => view.dispatch({ effects: markLine.of(line) }),
-    setReadOnly: (ro) => view.dispatch({ effects: readOnly.reconfigure(ro ? [EditorState.readOnly.of(true), EditorView.editable.of(false)] : []) }),
+    setReadOnly(ro) {
+      // Called after every state change, some of them from inside an update: only touch the view when it changes.
+      if (ro === isReadOnly) return;
+      isReadOnly = ro;
+      view.dispatch({ effects: readOnly.reconfigure(ro ? [EditorState.readOnly.of(true), EditorView.editable.of(false)] : []) });
+    },
     destroy: () => view.destroy(),
   };
 }

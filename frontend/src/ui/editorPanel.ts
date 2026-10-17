@@ -58,6 +58,8 @@ export function openEditorPanel(opts: PanelOptions): PanelController {
   let showVersions = false;
   let lastMarked: number | null = null;
   let title = opts.title;
+  /** Said in the status line for as long as the plain text box stands in for the code editor. */
+  let fallbackNote = "";
 
   // Parts
 
@@ -243,7 +245,7 @@ export function openEditorPanel(opts: PanelOptions): PanelController {
     sizeEl.textContent = `${(bytes / 1024).toFixed(1)} of 256 KB`;
     sizeEl.classList.toggle("over", bytes > MAX_SOURCE_BYTES);
     sizeEl.classList.toggle("near", bytes > MAX_SOURCE_BYTES * 0.9);
-    const bits = [s.dirty || (s.phase === "gone" && s.buffer !== "") ? "Unsaved changes" : "", s.notice?.text ?? ""].filter(Boolean);
+    const bits = [s.dirty || (s.phase === "gone" && s.buffer !== "") ? "Unsaved changes" : "", s.notice?.text ?? "", fallbackNote].filter(Boolean);
     status.textContent = bits.join(" · ");
     status.classList.toggle("warn", s.notice?.kind === "failed" || s.notice?.kind === "off" || s.notice?.kind === "conflict");
     if (editor && !s.viewing) {
@@ -380,7 +382,8 @@ export function openEditorPanel(opts: PanelOptions): PanelController {
       },
       s.buffer,
       (why) => {
-        status.textContent = `The code editor could not be loaded (${why}); a plain text box is used instead.`;
+        fallbackNote = "The code editor could not be loaded, so a plain text box is used. Saving and running work the same.";
+        console.warn("code editor not loaded:", why);
       },
     );
     host.querySelector(".ed-loading")?.remove();

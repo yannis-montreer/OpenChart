@@ -201,7 +201,9 @@ export class EditorSession {
   edit(text: string): void {
     const { phase, stored } = this.state;
     if (phase !== "ready" && phase !== "gone") return;
-    this.set({ buffer: text, dirty: stored ? text !== stored.source : true, problem: sourceProblem(text) });
+    // What was true of the last save is not true of the text any more; a conflict or "editing is off" still is.
+    const past = this.state.notice && ["saved", "unchanged", "restored"].includes(this.state.notice.kind);
+    this.set({ buffer: text, dirty: stored ? text !== stored.source : true, problem: sourceProblem(text), ...(past ? { notice: null } : {}) });
     if (stored && phase === "ready") syncDraft(this.opts.store, this.id, text, stored);
   }
 

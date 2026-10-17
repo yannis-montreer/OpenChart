@@ -155,6 +155,22 @@ describe("edit", () => {
     expect(s.state.problem).toBeNull();
   });
 
+  it("typing after a save clears the 'Saved.' note, and keeps the notes that still hold", async () => {
+    const s = make();
+    await s.open();
+    s.edit("one");
+    await s.save();
+    expect(s.state.notice?.kind).toBe("saved");
+    s.edit("two");
+    expect(s.state.notice).toBeNull();
+
+    mock.place("mine", "changed elsewhere");
+    await s.save();
+    expect(s.state.notice?.kind).toBe("conflict");
+    s.edit("three");
+    expect(s.state.notice?.kind).toBe("conflict");
+  });
+
   it("does nothing before the file is open", () => {
     const s = make();
     s.edit("x");
