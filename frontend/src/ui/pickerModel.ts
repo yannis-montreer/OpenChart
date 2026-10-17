@@ -35,6 +35,16 @@ export interface PickerRow {
   line: number | null;
   /** Deleting a definition; null for a built-in one (it is not a file of yours). */
   canDelete: Gate | null;
+  /** The other things you can do with a file of yours (CI-4); null for a built-in one. */
+  actions: RowActions | null;
+}
+
+/** All behind the one setting: when editing is off, every one of them is. */
+export interface RowActions {
+  edit: Gate;
+  rename: Gate;
+  duplicate: Gate;
+  export: Gate;
 }
 
 export interface PickerSection {
@@ -45,10 +55,16 @@ export interface PickerSection {
   hint: string | null;
   /** Lines that apply to the whole section (weaker isolation, a built-in that did not load). */
   notices: string[];
+  /** New and Import (your files only; null for the built-in section). */
+  canCreate: Gate | null;
+  /** Why editing is off, once for the section (your files only); null while it is on. */
+  editNote: string | null;
 }
 
 export interface PickerModel {
   sections: PickerSection[];
+  /** New and Import, also when a search leaves no section to put them in. */
+  create: Gate;
   /** Shown when a search matches nothing at all. */
   empty: string | null;
 }
@@ -84,6 +100,7 @@ function builtinRow(def: IndicatorDef): PickerRow {
     why: null,
     line: null,
     canDelete: null,
+    actions: null,
   };
 }
 
@@ -111,6 +128,7 @@ function customRow(entry: CustomEntry, catalog: IndicatorCatalog, builtinIds: Se
     file: entry.file,
     line: entry.line,
     canDelete: gate(catalog),
+    actions: { edit: gate(catalog), rename: gate(catalog), duplicate: gate(catalog), export: gate(catalog) },
   };
   const def = entry.status === "ok" ? entry.definition : null;
   if (def && builtinIds.has(def.id)) {
@@ -181,17 +199,20 @@ export function pickerModel(catalog: IndicatorCatalog, query: string): PickerMod
   ];
 
   const searching = words.length > 0;
+  const create = gate(catalog);
   const all: PickerSection[] = [
-    { kind: "builtin", heading: "Built-in", rows: builtin, hint: null, notices: builtinNotices },
+    { kind: "builtin", heading: "Built-in", rows: builtin, hint: null, notices: builtinNotices, canCreate: null, editNote: null },
     {
       kind: "custom",
       heading: "Your files",
       rows: custom,
       hint: custom.length || searching ? null : "No files of yours yet.",
       notices: customNotices,
+      canCreate: create,
+      editNote: create.allowed ? null : `Editing is off: ${create.reason}`,
     },
   ];
   const sections = all.filter((s) => !searching || s.rows.length > 0);
 
-  return { sections, empty: searching && sections.length === 0 ? "No indicator matches." : null };
+  return { sections, create, empty: searching && sections.length === 0 ? "No indicator matches." : null };
 }
