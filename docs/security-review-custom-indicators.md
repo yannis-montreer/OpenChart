@@ -24,7 +24,7 @@ the next step (CI-4) must not make worse.
 | S1 | medium | `auto` editing trusts any loopback peer without proxy headers | **fixed** (hardening-1) |
 | S2 | low | a deeply nested header from the worker kills the server's reader thread | **fixed** (hardening-1) |
 | S3 | low | non-finite or huge numbers in `params` are a 500 | **fixed** (hardening-1) |
-| S4 | low | the server reads up to 256 MB of arrays per answer before checking them | documented (for CI-5) |
+| S4 | low | the server reads up to 256 MB of arrays per answer before checking them | **fixed** in CI-5 (read cap) |
 | S5 | info | `$` in the id patterns accepts a trailing newline | **fixed** (hardening-1) |
 | S6 | low | a script can write frames to the protocol stream; the next request gets them | **fixed** in CI-4 (request ids); still not isolated from each other |
 | S7 | info | definition files are read through links; a syntax error echoes a line | CI-4's endpoints refuse links; the catalog's listing still follows them |
@@ -297,3 +297,15 @@ that were `xfail` before):
 - **S7, S9:** the editor's endpoints read and write `<id>.py` only as a plain file (no
   link, junction or hard link) and create lowercase names from ids; the catalog's listing
   of files placed by hand is unchanged (it still reads through a link a person made).
+
+## CI-5 (2026-10-17)
+
+- **S4:** the runner tells its reader how many values an answer's arrays may hold (the
+  bars it sent; none for a describe or a warmup). An array listed with more is read and
+  dropped a megabyte at a time and replaced by a stand-in of the claimed length that holds
+  no values (stride 0), so `check_wire` refuses it with its usual message ("'out' has
+  3,000,000 values for 20 bars"), the stream stays in step and the worker is not
+  restarted. Measured: reading a 24 MB answer for a 20-bar job peaks under 4 MB
+  (`tests/test_values_cache.py`). The limit is read once the header has arrived: the
+  reader waits for each frame before its job is sent (found by the tests, which failed
+  with a limit taken too early).

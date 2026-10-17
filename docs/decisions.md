@@ -791,3 +791,23 @@ The contract of #37, implemented (`api/routes_definitions.py`, `indicators/_file
 - **Request ids (S6):** see the security review's CI-4 section. Answers carry `rid`; probes and arming too.
 - **The delete's broadcast** carries `{id, op: "delete"}` like the others.
 - **Not done here:** an `API_VERSION` bump (the frontend session decides when its editor needs these routes), the Settings display of the gate (frontend).
+
+## CI-5 backend: the values cache, the forming bar, the read cap (2026-10-17)
+
+Design 3.8. Built on the CI-4 branch (it changes the values route CI-4 reshaped); the PR says which it depends on. Tests first (`tests/test_values_cache.py`): 12 failed before the code; 3 passed as guards (a code change, rewritten bars and a failure must not be answered from a cache).
+
+- **The key leaves nothing out that values depend on, and needs no clearing:** kind, id, version (a custom file's hash), the inputs **without the Style tab's** (colour and width), `info`, the number of bars asked for, and a SHA-1 of the bars computed on (warmup included). A code change, or a repair or refill rewriting bars, is a new key; an old entry is never asked for again and leaves by the size bound (about 100 MB of values, least recently used first). **Decided here:** style inputs are left out on the assumption that a script draws with them and does not compute with them; a script that computes with a colour would be answered with values computed for another colour. Documented in docs/api.md.
+- **One computation for every tab:** a request whose key is being computed waits for that computation (tested with four requests held by the fake worker's gate: one job).
+- **The forming bar:** a window that ends on the forming bar (`/api/candles`' `forming` flag) is computed at most once a second per window (same first and last bar, same inputs) and answered in between with the last result, so the newest tick can be up to a second late there; a new bar is a new window and is computed at once. This is the design's "once a second at most, shared by every tab"; the browser's two-bar refresh already sends only `warmup + 2` bars.
+- **S4:** see the security review's CI-5 section.
+- **Measured** (`tools/measure_values.py`, real worker with the restricted token on this PC, 30 days of synthetic minutes, 5m bars, 20 runs per script for SMA cross, RSI with bands and the Bollinger fill, through the test client, the machine otherwise idle):
+
+  | Measure | Target | Measured | |
+  |---|---|---|---|
+  | compute in the worker (the exchange), median | 20 ms | 5.7 ms (max 55) | met |
+  | worker start | 2 s | 1.4 s (2.4 s with the machine busy) | met when idle |
+  | request, 5,000 bars, p95 | 60 ms | 233 ms (247 ms from the cache) | **missed** |
+  | forming-bar tail, median | 15 ms | 44 ms | **missed** |
+  | worker memory, peak | 80-120 MB idle | 56 MB peak | below |
+
+  **The two misses are the bars, not the indicator:** `/api/candles` alone takes 107 ms (p95) for the same 5,000 5m bars and 14.5 ms for 2, and a request answered from the values cache costs as much as one computed (a profile shows the time in reading and aggregating 25,000 minutes into 5,000 bars, and in the test client's thread hops). Caching values cannot reach these targets; caching the recent bars of minute-based timeframes (as the 4h/D/W cache does for complete bars) is the next step, not done here. The test client adds overhead a real browser request through uvicorn does not have; not measured separately.
