@@ -4,7 +4,8 @@
 
 .DESCRIPTION
     - Registers the service (default name "OpenChart"): starts on boot, restarts when the
-      server stops or crashes, logs to <data folder>\logs\service.log (rotated at 10 MB).
+      server stops or crashes, logs to <data folder>\logs\service.log (rotated at 10 MB;
+      the server deletes rotated logs beyond the newest 5, once a day).
     - Runs it as LocalSystem. LocalSystem cannot read your Windows Credential Manager, so
       the OANDA and Telegram tokens are copied from it into the encrypted file
       <data folder>\secrets.enc, whose key goes to a file only SYSTEM and Administrators

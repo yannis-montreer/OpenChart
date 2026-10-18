@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -18,12 +19,15 @@ from openchart.api.auth import SESSION_COOKIE, SESSION_SECONDS, PasswordError, c
 from openchart.config import OandaConfig
 from openchart.market.instruments import instrument_hours
 from openchart.providers.base import InstrumentInfo, ProviderError
+from openchart.retention import DEFAULT_TICK_RETENTION, TICK_RETENTION, change_m1_depth
 from openchart.server import Server
-from openchart.settings import EncryptedFileSecrets, describe_secret
+from openchart.settings import TICK_RETENTION_KEY, EncryptedFileSecrets, describe_secret
 
 log = logging.getLogger(__name__)
 
 Environment = Literal["practice", "live"]
+TickRetention = Literal["7d", "30d", "90d", "1y", "forever", "off"]  # retention.TICK_RETENTION
+M1Depth = Literal["3m", "1y", "2y"]  # retention.M1_DEPTHS
 
 
 class SetupBody(BaseModel):
@@ -53,7 +57,8 @@ class SettingsUpdate(BaseModel):
     telegram_token: str | None = Field(None, repr=False)
     telegram_chat_id: str | None = None
     clear_telegram: bool = False
-    store_ticks: bool | None = None
+    store_ticks: bool | None = None  # older pages; `tick_retention` wins when both are sent
+    tick_retention: TickRetention | None = None
     timezone: str | None = None
     listen_on_network: bool | None = None
 
@@ -71,6 +76,11 @@ class TelegramTestBody(BaseModel):
 
 class InstrumentBody(BaseModel):
     instrument: str
+    m1_depth: M1Depth | None = None  # None: the default (2 years)
+
+
+class DepthBody(BaseModel):
+    m1_depth: M1Depth
 
 
 def client_host(request: Request) -> str:
@@ -164,6 +174,8 @@ def account_routes(server: Server) -> APIRouter:
                 "token": describe_secret(server.secrets, "telegram_token"),
             },
             "store_ticks": app.store_ticks,
+            "tick_retention": app.tick_retention,
+            "tick_retention_choices": list(TICK_RETENTION),
             "timezone": app.timezone,
             "listen_on_network": app.listen_on_network,
             "secret_store": server.secrets.backend if server.secrets else None,
@@ -317,9 +329,15 @@ def account_routes(server: Server) -> APIRouter:
             if body.telegram_chat_id is not None:
                 await server.settings.set("telegram_chat_id", body.telegram_chat_id.strip())
 
-        if body.store_ticks is not None and body.store_ticks != app.store_ticks:
-            await server.settings.set("store_ticks", body.store_ticks)
-            reconfigure = True
+        retention = body.tick_retention
+        older_page = retention is None and body.store_ticks is not None
+        if older_page and body.store_ticks != app.store_ticks:
+            retention = DEFAULT_TICK_RETENTION if body.store_ticks else "off"
+        if retention is not None and retention != app.tick_retention:
+            # Applied by the next daily run (`Server.run_retention`); "off" stops storing.
+            await server.settings.set(TICK_RETENTION_KEY, retention)
+            await server.settings.set("store_ticks", retention != "off")
+            reconfigure = reconfigure or (retention != "off") != app.store_ticks
         if body.timezone is not None:
             await server.settings.set("timezone", body.timezone)
         if body.listen_on_network is not None and body.listen_on_network != app.listen_on_network:
@@ -379,8 +397,25 @@ def account_routes(server: Server) -> APIRouter:
         info = await enable_instrument(
             body.instrument.strip().upper(), await oanda_instruments(oanda)
         )
+        if body.m1_depth is not None:
+            await change_m1_depth(
+                server.store, server.source, info.instrument, body.m1_depth, time.time()
+            )
         await server.reconfigure()  # the feed backfills new instruments when it starts
         return {"ok": True, "instrument": info.instrument}
+
+    @router.put("/instruments/{instrument}/m1-depth")
+    async def set_m1_depth(instrument: str, body: DepthBody) -> dict[str, Any]:
+        """How far back minutes are kept. Longer: the missing minutes are downloaded, newest
+        first. Shorter: the older minutes are deleted by the next daily run."""
+        if await server.store.instrument(server.source, instrument) is None:
+            raise HTTPException(404, f"unknown instrument {instrument!r}")
+        download = await change_m1_depth(
+            server.store, server.source, instrument, body.m1_depth, time.time()
+        )
+        if download:
+            await server.reconfigure()  # the feed resumes the download to the new limit
+        return {"ok": True, "m1_depth": body.m1_depth, "downloading": download}
 
     @router.delete("/instruments/{instrument}")
     async def remove_instrument(instrument: str) -> dict[str, Any]:

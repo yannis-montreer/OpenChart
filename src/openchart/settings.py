@@ -305,16 +305,27 @@ class AppSettings:
     store_ticks: bool
     timezone: str
     listen_on_network: bool
+    tick_retention: str = "30d"  # retention.TICK_RETENTION; "off" when ticks are not stored
+
+
+TICK_RETENTION_KEY = "tick_retention"
 
 
 async def load_app_settings(store: SettingsStore, config: Config) -> AppSettings:
+    from openchart.retention import DEFAULT_TICK_RETENTION, TICK_RETENTION
+
+    store_ticks = await store.get("store_ticks", config.store_ticks)
+    retention = await store.get(TICK_RETENTION_KEY)
+    if retention not in TICK_RETENTION:  # never chosen (before storage steps 2): the default
+        retention = DEFAULT_TICK_RETENTION if store_ticks else "off"
     return AppSettings(
         oanda_environment=await store.get("oanda_environment", config.oanda.environment),
         oanda_account_id=await store.get("oanda_account_id", config.oanda.account_id),
         telegram_chat_id=await store.get("telegram_chat_id", ""),
-        store_ticks=await store.get("store_ticks", config.store_ticks),
+        store_ticks=retention != "off",
         timezone=await store.get("timezone", ""),
         listen_on_network=await store.get("listen_on_network", config.host != "127.0.0.1"),
+        tick_retention=retention,
     )
 
 

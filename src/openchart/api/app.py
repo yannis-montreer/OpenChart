@@ -23,7 +23,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from openchart import API_VERSION, __version__
+from openchart import API_VERSION, __version__, retention
 from openchart.api.auth import SESSION_COOKIE
 from openchart.api.chart_indicators import ChartIndicators
 from openchart.api.hub import Client
@@ -181,6 +181,7 @@ def create_app(server: Server) -> FastAPI:
     async def instruments() -> list[dict[str, Any]]:
         rows = await server.store.instruments(server.source)
         closures = {r.instrument: await server.store.closures(r.source, r.instrument) for r in rows}
+        years, now = server.config.backfill_years, time.time()
         return [
             {
                 "instrument": r.instrument,
@@ -192,6 +193,11 @@ def create_app(server: Server) -> FastAPI:
                 "enabled": r.enabled,
                 "hours": r.hours.to_dict() if r.hours else None,
                 "closures": [list(c) for c in closures[r.instrument]],
+                # Minute history kept (docs/api.md, storage steps 2): the choice, whether
+                # it is the default, and the limit today (minutes ending before it go).
+                "m1_depth": retention.m1_depth_choice(r.m1_depth, years),
+                "m1_depth_default": r.m1_depth is None,
+                "m1_from": retention.cutoff(now, retention.m1_depth_days(r.m1_depth, years)),
             }
             for r in rows
         ]

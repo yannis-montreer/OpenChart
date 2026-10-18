@@ -9,7 +9,10 @@ compacted into a single `data.parquet`. The directory is a hive-partitioned data
 
 from __future__ import annotations
 
+import logging
 import os
+import shutil
+import threading
 import time
 from collections import defaultdict
 from datetime import UTC, datetime
@@ -19,6 +22,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from openchart.providers.base import Tick
+
+log = logging.getLogger(__name__)
 
 SCHEMA = pa.schema(
     [
@@ -45,6 +50,8 @@ class TickWriter:
         self.source = source
         self._buffer: dict[tuple[str, str], list[Tick]] = defaultdict(list)
         self._seq = 0
+        # Flush, compaction and retention run in threads: one at a time on the files.
+        self._files = threading.Lock()
 
     def day_dir(self, instrument: str, day: str) -> Path:
         return self.root / self.source / instrument / f"date={day}"
@@ -66,6 +73,10 @@ class TickWriter:
 
     def flush(self) -> int:
         """Write buffered ticks as new part files. Blocking; call via a thread."""
+        with self._files:
+            return self._flush()
+
+    def _flush(self) -> int:
         buffer, self._buffer = self._buffer, defaultdict(list)
         written = 0
         for (instrument, day), ticks in buffer.items():
@@ -87,6 +98,10 @@ class TickWriter:
 
     def compact_closed_days(self, today: str | None = None) -> int:
         """Merge part files of finished UTC days into one `data.parquet`. Blocking."""
+        with self._files:
+            return self._compact(today)
+
+    def _compact(self, today: str | None) -> int:
         today = today or _day(time.time())
         compacted = 0
         for directory in self.root.glob(f"{self.source}/*/date=*"):
@@ -105,6 +120,32 @@ class TickWriter:
                 part.unlink()
             compacted += 1
         return compacted
+
+    def delete_expired(self, now: float, days: int) -> list:
+        """Delete the day folders whose whole UTC day ended at or before `now - days`
+        (`retention.expired_tick_days`), one log line each. Blocking; call via a thread."""
+        from openchart.retention import expired_tick_days
+
+        gone = []
+        with self._files:
+            for d in expired_tick_days(self.root, self.source, now, days):
+                try:
+                    shutil.rmtree(d.path)
+                except OSError as exc:  # a reader holds a file (Windows): next time
+                    log.warning(
+                        "retention: could not delete ticks of %s %s: %s", d.instrument, d.day, exc
+                    )
+                    continue
+                log.info(
+                    "retention: ticks of %s %s deleted (%d file(s), %.1f MB; kept %d days)",
+                    d.instrument,
+                    d.day,
+                    d.files,
+                    d.bytes / 1e6,
+                    days,
+                )
+                gone.append(d)
+        return gone
 
 
 def read_ticks(root: str | Path, source: str, instrument: str, day: str) -> pa.Table:

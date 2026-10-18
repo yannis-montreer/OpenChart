@@ -46,6 +46,10 @@ export interface Instrument {
   hours: TradingHoursJson | null;
   /** Learned closures (holidays, early closes): [start, end) in UTC epoch seconds. */
   closures: Closure[];
+  /** Minute history kept ("3m", "1y", "2y"), whether it is the default, and its limit today. */
+  m1_depth?: string;
+  m1_depth_default?: boolean;
+  m1_from?: number;
 }
 
 /** An instrument's history download (newest first: hourly, then minute candles). */
@@ -177,6 +181,9 @@ export interface Settings {
   oanda: { environment: "practice" | "live"; account_id: string; token: SecretInfo };
   telegram: { chat_id: string; token: SecretInfo };
   store_ticks: boolean;
+  /** How long raw ticks are kept ("7d" … "forever", or "off": not stored). */
+  tick_retention?: string;
+  tick_retention_choices?: string[];
   timezone: string;
   listen_on_network: boolean;
   secret_store: string | null;
@@ -222,8 +229,14 @@ export const account = {
   testTelegram: (body: Record<string, string>, setupCode?: string) =>
     request<TestOutcome>("POST", "api/settings/test/telegram", { body, headers: code(setupCode) }),
   available: (q: string) => get<AvailableInstrument[]>("api/instruments/available", { q }),
-  addInstrument: (instrument: string) =>
-    request<{ ok: true }>("POST", "api/instruments", { body: { instrument } }),
+  addInstrument: (instrument: string, m1_depth?: string) =>
+    request<{ ok: true }>("POST", "api/instruments", { body: m1_depth ? { instrument, m1_depth } : { instrument } }),
+  setM1Depth: (instrument: string, m1_depth: string) =>
+    request<{ ok: true; m1_depth: string; downloading: boolean }>(
+      "PUT",
+      `api/instruments/${encodeURIComponent(instrument)}/m1-depth`,
+      { body: { m1_depth } },
+    ),
   removeInstrument: (instrument: string) =>
     request<{ ok: true }>("DELETE", `api/instruments/${encodeURIComponent(instrument)}`),
 };

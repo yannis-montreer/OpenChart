@@ -402,6 +402,12 @@ code {
 .inst-row .btn {
   height: 28px;
 }
+/* The minute-history choice of a row: as wide as its text, not the row. */
+.inst-row select.input {
+  width: auto;
+  flex: none;
+  height: 30px;
+}
 
 @media (max-width: 760px) {
   .modal {

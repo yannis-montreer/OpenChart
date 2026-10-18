@@ -331,3 +331,13 @@ A tick is always sent before the candle update it causes.
 A live bar for `1m` and above starts from stored history: subscribing to `4h` mid-period gives the whole 4h bar so far, not just the ticks since subscribing. It uses the same arithmetic as `/api/candles`, so live and historical bars agree.
 
 **Reconnecting:** after a dropped connection, fetch `/api/candles?from=<t of your last bar>` and resubscribe; the bar at `from` is included and replaces yours. A client that falls 2000 messages behind is disconnected (close code 1013) and should do the same.
+
+## Retention: raw ticks and minute history (storage steps 2)
+
+Decisions and rules: `docs/decisions-retention.md`. Nothing newer than a limit is ever deleted; the server applies the limits at start and just after 00:00 UTC each day, from a day after its first start with them.
+
+- `GET /api/settings` also returns `tick_retention` (one of `tick_retention_choices`: `"7d"`, `"30d"` (default), `"90d"`, `"1y"`, `"forever"`, `"off"`). `store_ticks` is `false` exactly when it is `"off"`.
+- `PUT /api/settings` accepts `tick_retention` (anything else is a 422). A body with only `store_ticks` (an older page) sets `"off"`, or the default when ticks were off. `"off"` stops storing ticks and deletes none.
+- `GET /api/instruments`: each row also has `m1_depth` (`"3m"`, `"1y"` or `"2y"`), `m1_depth_default` (true when it is the install's default, 2 years or `OPENCHART_BACKFILL_YEARS`) and `m1_from` (UTC epoch seconds: minutes that end at or before it are deleted by the next daily run).
+- `POST /api/instruments` accepts an optional `m1_depth`.
+- `PUT /api/instruments/{instrument}/m1-depth` with `{"m1_depth": "1y"}`: 404 for an unknown instrument, 422 for another value. Answers `{"ok": true, "m1_depth": "1y", "downloading": false}`; `downloading` is true when the new depth reaches further back than the finished download did, in which case the feed restarts and downloads the missing minutes, newest first. A shorter depth deletes nothing at once.
