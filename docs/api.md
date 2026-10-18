@@ -237,6 +237,15 @@ Everything under `/api/custom-indicators` answers **`403`** `{detail: "Editing c
 
 **Errors, all routes:** `400` a malformed body or id; `403` editing not allowed (the reason in `detail`); `404` no such file, version or template; `409` the id exists (`suggested`), the file changed since `base_version` (`version`), a name that is not a plain file, a `TITLE` line Rename cannot edit, a definition in use (`usage`); `413` a source over 256 KB; `422` a preview that fails, or a refused body (FastAPI's `detail` list); `503` the worker is not running (preview only: saves never need the worker to store the file).
 
+## Warmup notice
+
+`GET /api/indicators/{id}` fetches at most `20000` bars before the first one shown (`MAX_WARMUP`). When the settings need more (the indicator's `warmup(params)` is above it: a built-in EMA of length 2000 or more, a custom file that declares a large warmup), the values are still returned, computed on the bars that were fetched, and the answer says so:
+
+- **`notice`**, only when the warmup was cut: `{"kind": "warmup_cut", "needed": 20010, "limit": 20000, "message": "..."}`. `needed` is the declared warmup in bars, `limit` what the server uses; `message` is for people. The chart shows it as a small "Warmup cut" warning on the indicator's legend row.
+- **`checks.warmup_cut`**, custom files only: the same object, added to the answer's copy of `checks` (the save-time results kept for the file's version do not contain it).
+
+An answer whose warmup fits has neither. Clients that ignore the fields keep working.
+
 ## Layouts
 
 | Route | |

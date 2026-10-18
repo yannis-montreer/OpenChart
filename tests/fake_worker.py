@@ -11,7 +11,7 @@ colour #00ff00 on XAU_USD 5m, `WARMUP <n>` declares n bars of warmup, `FILL <fol
 `MODE2` describe other inputs (a choice instead of the width; MODE2 renames a choice),
 `NODESCRIBE` fails to load, `DEEPHEADER` answers a header nested too deep to parse
 (`DEEPHEADERAFTER`: sends one after its own good answer), `WRONGRID` answers with another
-request id;
+request id, `PRICE` echoes the closes plus 1000 unless the price type is mid;
 anything else describes one output and echoes the closes.
 """
 
@@ -274,6 +274,8 @@ def main():
                 else:
                     head = {"outputs": ["out"]}
                     out = {"out": arrays["c"]}
+                    if "PRICE" in source:  # values that depend on the price type alone
+                        out = {"out": arrays["c"] + (0.0 if info.get("price") == "mid" else 1e3)}
                     if "SHIFT" in source:  # the next bar's close: lookahead
                         out = {"out": np.append(arrays["c"][1:], np.nan)}
                     if "MARKERS" in source:

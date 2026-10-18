@@ -57,6 +57,13 @@
   gap: 4px;
   color: var(--warn);
 }
+.legend-row-notice {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--warn);
+  font-size: 11px;
+}
 .legend-row-reset {
   color: var(--warn);
   font-size: 11px;

@@ -133,6 +133,7 @@ def indicator_routes(server: Server) -> APIRouter:
             raise HTTPException(
                 422, f"{indicator.name} failed: {type(exc).__name__}: {exc}"
             ) from None
+        needed = warm
         warm = min(max(warm, 0), MAX_WARMUP)
         bars, frame, forming = await read_bars(
             server, instrument, tf, price, from_, to, limit, warm
@@ -143,18 +144,7 @@ def indicator_routes(server: Server) -> APIRouter:
                 return await server.custom.compute(custom, frame, settings, info, warmup=warm)
             return await asyncio.to_thread(indicator.run, frame, settings, info)
 
-        # CI-5: the same values for the same version, inputs (not style) and bars.
-        style = {p.name for p in indicator.params if p.group == "style"}
-        about = (
-            "custom" if custom is not None else "builtin",
-            indicator.id,
-            custom.digest if custom is not None else "builtin",
-            json.dumps({k: v for k, v in settings.items() if k not in style}, sort_keys=True),
-            json.dumps(info.to_json(), sort_keys=True),
-            len(bars),
-        )
-        key = (*about, frame_digest(frame))
-        window = (*about, len(frame), int(frame["ts"].iloc[0]), int(frame["ts"].iloc[-1]))
+        key, window = values_key(indicator, custom, settings, info, bars, frame)
         try:
             if frame.empty:
                 series = await compute()
@@ -181,11 +171,32 @@ def indicator_routes(server: Server) -> APIRouter:
             "price": price,
             **shape(indicator, settings, bars, series),
         }
+        cut = _warmup_cut(needed)
+        if cut:
+            out["notice"] = cut
         if custom is not None:  # the save-time checks of this version with these settings
             out["checks"] = server.custom.checks_for(custom, settings)
+            if cut:  # a copy: the stored checks belong to the file's version, not to this request
+                out["checks"] = {**(out["checks"] or {}), "warmup_cut": cut}
         return out
 
     return router
+
+
+def _warmup_cut(needed: int) -> dict[str, Any] | None:
+    """What the answer says when the indicator needs more history than MAX_WARMUP bars."""
+    if needed <= MAX_WARMUP:
+        return None
+    return {
+        "kind": "warmup_cut",
+        "needed": needed,
+        "limit": MAX_WARMUP,
+        "message": (
+            f"These settings need {needed:,} bars of earlier history to settle, but only "
+            f"{MAX_WARMUP:,} are used, so the first values may differ from a longer history. "
+            "Use a shorter length to settle them."
+        ),
+    }
 
 
 async def read_bars(
@@ -232,6 +243,33 @@ async def read_bars(
             first, need = int(older["ts"].iloc[0]), need - len(older)
     frame = pd.concat([*before, bars], ignore_index=True) if before else bars
     return bars, frame.reset_index(drop=True), forming
+
+
+def values_key(
+    indicator: Indicator,
+    custom: Any,
+    settings: dict[str, Any],
+    info: Info,
+    bars: pd.DataFrame,
+    frame: pd.DataFrame,
+) -> tuple[tuple, tuple | None]:
+    """The values cache's key and forming window (CI-5): the same values for the same
+    version, inputs (not style), price type and bars. The warmup cut depends only on these
+    (the version and inputs give the warmup; the bars computed on include the cut warmup),
+    so a cached answer and its notice always belong together."""
+    style = {p.name for p in indicator.params if p.group == "style"}
+    about = (
+        "custom" if custom is not None else "builtin",
+        indicator.id,
+        custom.digest if custom is not None else "builtin",
+        json.dumps({k: v for k, v in settings.items() if k not in style}, sort_keys=True),
+        json.dumps(info.to_json(), sort_keys=True),
+        len(bars),
+    )
+    if frame.empty:
+        return (*about, frame_digest(frame)), None
+    window = (*about, len(frame), int(frame["ts"].iloc[0]), int(frame["ts"].iloc[-1]))
+    return (*about, frame_digest(frame)), window
 
 
 def frame_digest(frame: pd.DataFrame) -> str:

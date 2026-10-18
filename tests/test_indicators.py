@@ -71,7 +71,8 @@ def test_sources():
 def test_the_builtin_ema_and_its_schema():
     registry = load_indicators()
     assert registry.errors == []
-    assert list(registry.indicators) == ["ema"]  # built-in only: your files go to the worker
+    # built-in only: your files go to the worker
+    assert sorted(registry.indicators) == sorted(["ema", *BUILTIN_REST])
     described = registry.get("ema").to_json()
     assert described["overlay"] is True
     assert [(p["name"], p["type"], p["default"], p["group"]) for p in described["params"]] == [
@@ -121,6 +122,12 @@ def candles(client, **query):
     return client.get("/api/candles", params=q).json()["candles"]
 
 
+BUILTIN_REST = ["sma", "rsi", "macd", "bollinger", "atr", "stochastic", "volume"]
+# Average True Range, Bollinger Bands, Moving Average Convergence Divergence, ... Exponential,
+# ... Simple, Relative Strength Index, Stochastic, Volume (tick volume)
+IN_MENU_ORDER = ["atr", "bollinger", "macd", "ema", "sma", "rsi", "stochastic", "volume"]
+
+
 def values(client, indicator="ema", params=None, **query):
     q = {"instrument": "XAU_USD", "timeframe": "5m", "params": json.dumps(params or {}), **query}
     return client.get(f"/api/indicators/{indicator}", params=q)
@@ -128,9 +135,9 @@ def values(client, indicator="ema", params=None, **query):
 
 def test_the_catalog(client):
     body = client.get("/api/indicators").json()
-    assert [i["id"] for i in body["indicators"]] == ["ema"]
+    assert [i["id"] for i in body["indicators"]] == IN_MENU_ORDER  # by title
     assert body["errors"] == [] and body["folder"].endswith("indicators")
-    assert [i["id"] for i in body["builtin"]] == ["ema"] and body["custom"] == []
+    assert [i["id"] for i in body["builtin"]] == IN_MENU_ORDER and body["custom"] == []
     assert body["isolation"]["level"] == "unavailable"  # the test server runs no worker
     assert body["editing"]["allowed"] is False
 
