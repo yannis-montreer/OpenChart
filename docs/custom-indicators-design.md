@@ -1,7 +1,7 @@
 # Custom indicators: design proposal
 
-Status: **approved** on 2026-10-15, with the changes below. CI-0 (the spike) is under
-way; its report is `docs/ci0-spike-report.md`.
+Status: **approved** on 2026-10-15, with the changes below, and built: CI-0 to CI-5 are
+merged (see `docs/roadmap.md`). The spike report is `docs/ci0-spike-report.md`.
 
 Decisions and changes:
 
@@ -9,15 +9,15 @@ Decisions and changes:
   list is migrated the first time a chart is opened.
 - **D2:** approved, with a change. The editing setting stays server-side only. The `auto`
   rule is to be revisited, because the owner's service binds 0.0.0.0 for Tailscale; a
-  recommendation is in the spike report. Not built yet.
+  recommendation is in the spike report. Built in CI-1 (#17).
 - **D3 to D6:** approved.
 - **No ACL changes** to the owner's venv or base Python, ever.
   - **Source installs** use the restricted-token worker, with a visible "weaker isolation"
     notice.
   - **AppContainer** is for the service install only, set up by the installer.
   - Section 3.2's `openchart indicator-sandbox setup` for source installs is dropped.
-- **Migration numbers** are picked at merge time: the next free one. Storage step 1 (0007)
-  is not merged yet.
+- **Migration numbers** are picked at merge time: the next free one. (Storage step 1,
+  0007, merged first in #13; CI-3 took 0008 and storage step 2 took 0009.)
 - **A TradingView export** for the comparison tests is optional, belongs to the owner, and
   is never committed.
 - **Browser editing stays off below the minimum isolation**, with no override. The

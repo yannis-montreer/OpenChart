@@ -177,7 +177,7 @@ NSSM 2.24 is at https://nssm.cc/download (or `winget install NSSM.NSSM`). Stop a
 | M4 Setup wizard, login, settings | done |
 | M5 Drawings | done |
 | M6 Alerts and Telegram | done |
-| M7 Indicators, chart types, layouts | done (reduced scope: EMA only) |
+| M7 Indicators, chart types, layouts | done (the first set of built-in indicators came later, #47) |
 | M8 Packaging and deployment | done |
 | M9 Second instrument (EURUSD) | done |
 
@@ -267,17 +267,17 @@ Works:
 
 - Setup, login and settings (M4): first-run wizard with connection tests, single-password login (argon2, 30-day HTTP-only session cookie, rate limited), settings page, instruments added and removed from the UI (history downloads in the background), secrets in the OS credential store and never returned by the API.
 
-- Drawings (M5): horizontal line, trendline, ray and extended line from the left toolbar. Click point 1, click point 2 (or press, drag, release); hover shows the handles; drag a handle or the whole line; Delete removes; right-click for style, label, clone and delete; a floating toolbar sets colour, width and dash. Hold Ctrl while drawing to snap to the bar's open, high, low or close. Drawings are stored on the server and every open browser sees changes at once. The eye hides them; the bin deletes all of them on the instrument.
+- Drawings (M5): horizontal line, trendline, ray and extended line, and since #48 the vertical line, rectangle, channel, Fibonacci, text and measure ([docs/decisions-drawing-tools.md](docs/decisions-drawing-tools.md)), from the left toolbar. Click point 1, click point 2 (or press, drag, release); hover shows the handles; drag a handle or the whole line; Delete removes; right-click for style, label, clone and delete; a floating toolbar sets colour, width and dash. Hold Ctrl while drawing to snap to the bar's open, high, low or close. Drawings are stored on the server and every open browser sees changes at once. The eye hides them; the bin deletes all of them on the instrument.
 
 - Alerts (M6): right-click a line and choose Add alert (or select it and press Alt+A, or use the Alert button; without a selected line the alert is on a price level). Crossing, crossing up or down; once, once per bar, on bar close or at most once a minute; bid, mid or ask; an expiry. Alerts run in the server whether a browser is open or not, on exactly the line drawn, and go to Telegram (set it up in Settings) and to open browsers. The bell in the right column lists them (stop, restart, edit, delete) with a log of what fired and whether Telegram got it. If the computer slept, the feed dropped or the server was off, the missed minutes are checked as soon as it is back and those alerts arrive marked as late; after sleep Telegram also tells you how long the server was frozen. Telegram also gets "engine started" and "feed stalled" / "feed recovered" messages.
 
-- Indicators (M7): the Indicators button (or `/`) lists them; for now EMA. Each one gets a legend row (hide, settings, remove) and a settings dialog with Inputs and Style tabs. Values are computed by the server on the chart's bars and price type. You can add your own: a Python file in `data/indicators/`, picked up when the file changes (no restart) and run in a separate worker process; [docs/indicators.md](docs/indicators.md) describes the file, [docs/custom-indicators.md](docs/custom-indicators.md) where it runs and how isolated that is.
+- Indicators (M7): the Indicators button (or `/`) lists them: EMA, SMA, RSI, MACD, Bollinger Bands, ATR, Stochastic and tick volume. Each one gets a legend row (hide, settings, remove) and a settings dialog with Inputs and Style tabs. Values are computed by the server on the chart's bars and price type. You can add your own: a Python file in `data/indicators/`, picked up when the file changes (no restart) and run in a separate worker process; [docs/indicators.md](docs/indicators.md) describes the file, [docs/custom-indicators.md](docs/custom-indicators.md) where it runs and how isolated that is.
 - Chart types (M7): candles, bars, line, area and Heikin Ashi (display only: drawings, alerts and price labels use real prices).
 - Layouts (M7): the layout menu in the top bar saves the chart (instrument, timeframe, chart type, price type, theme, panel, indicators) under a name on the server and loads it back; the starred one loads on start. Ctrl+S saves.
 
 - Several instruments (M9): add one in Settings, Instruments (search, Add). Its history downloads in the background, newest first (hourly candles within seconds, then minute candles), while the others keep streaming, all through the one price stream. A panel on the chart, the watchlist and Settings show the progress. Prices, the magnet, axis, legend, watchlist, alerts and Telegram use each instrument's own decimals; lines and alerts use its own trading hours and learned closures. Drawings and alerts belong to their instrument; indicators and the chart settings stay when you switch, as in TradingView.
 
-Not yet: multi-timeframe indicators, indicator alerts and the other indicators of the first set (deferred, see docs/decisions.md).
+Not yet: multi-timeframe indicators and indicator alerts (deferred, see docs/decisions.md).
 
 - Deep history: 1h, 4h, daily and weekly charts go back as far as the broker has H1 (gold on OANDA: March 2006). The server downloads it in the background on first start. Complete 4h/D/W bars are cached, so these charts load in milliseconds.
 

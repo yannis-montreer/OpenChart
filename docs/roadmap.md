@@ -1,7 +1,7 @@
 # Roadmap
 
 What is merged, what is parked on a branch, and what comes next. Decisions behind each
-item are in `docs/decisions.md`. Updated 2026-10-16.
+item are in `docs/decisions.md` (and the `docs/decisions-*.md` files named below). Updated 2026-10-18, to main at #50.
 
 ## Merged into main
 
@@ -28,6 +28,16 @@ item are in `docs/decisions.md`. Updated 2026-10-16.
 | Custom indicators CI-2 step (b): the output kinds (`Histogram`, `Area`, `Fill`, `Level`, `Marker`, `Background`), the `String` input, `info`, long column names, and schema and result validation in the worker and again in the server | #21 |
 | Custom indicators CI-2 step (c): the save-time lookahead and warmup checks (they warn, never block), and a tool that breaks one rule at a time to prove the tests catch it | #22 |
 | The indicator worker starts at normal priority and drops to below normal after its hello (a worker starved by busy cores did not start) | #23 |
+| CI-2 step (d), the output kinds drawn in the chart; the guide, the edit-redraw and stale-parameters fixes (catch-up); indicators computed on the forming bar; `/api/candles` ends with the forming bar; review findings and docs fixes | #24, #26, #28, #29, #31, #32, #34, #35 |
+| Custom indicators CI-3: indicators per chart on the server (migration 0008), the picker's Built-in and Your files sections, the import, layouts, API version 2 | #33, #36, #38 |
+| Custom indicators CI-4: the API contract, the editor's write endpoints (request ids, S6), the browser editor | #37, #39, #41, #42 |
+| Hardening after the security review (S1, S2, S3, S5) | #40 |
+| Custom indicators CI-5: values cache, forming bar once a second, read cap (S4) | #46 |
+| Review findings: contradictory tip, countdown NaN, CI-3 docs | #43, #44, #45 |
+| Bar cache for the read path (`docs/decisions-bar-cache.md`) | #49 |
+| More drawing tools: vertical line, rectangle, channel, Fibonacci, text, measure (`docs/decisions-drawing-tools.md`) | #48 |
+| Built-in indicators: SMA, RSI, MACD, Bollinger, ATR, Stochastic, tick volume (`docs/decisions-builtin-indicators.md`) | #47 |
+| Storage step 2: tick retention, minute history per instrument (migration 0009), purge with VACUUM, log limits (`docs/decisions-retention.md`) | #50 |
 
 **v0.1.0 is released as a pre-release** (owner, 2026-10-15).
 
@@ -43,30 +53,13 @@ item are in `docs/decisions.md`. Updated 2026-10-16.
 
 In the owner's order. Each item is one branch from main and stops for review.
 
-1. **Custom indicators**, CI-2 to CI-5 (design: `docs/custom-indicators-design.md`). CI-1 is merged (#17), and so are steps (a), (b) and (c) of CI-2 (#19, #21, #22).
-   - **CI-2, steps (d) and (e) (next)**, one reviewable branch each (on open draft PRs when this was written; steps (b) and (c) are merged):
-     - **(d)** drawing the new output kinds in the chart;
-     - **(e)** `docs/custom-indicators.md` with the four examples and the Pine cheat sheet.
+1. **Custom indicators** (design: `docs/custom-indicators-design.md`): CI-1 to CI-5 are all merged (see the table above). What is left of it:
    - **To check in TradingView** (inferred so far, in `docs/decisions.md`): `pivotlow` ties and pivots with several equal bars on the left, `rising`/`falling` for n other than 2, and `rsi` on a window where nothing moved (100).
-   - **CI-3** (2 days): indicator instances per chart on the server (D1), with migration from `localStorage`, the menu's Built-in and Custom sections, deleting a definition that is in use.
-     - **Backend:** merged (#33): migration 0008, the chart routes, the import, layouts' copies, where-used and delete. **Frontend:** steps 1 to 3 merged (#36: the sections, the states, deleting); steps 4 to 6 merged (#38: the list on the server, the import, the reset note, layouts, API version 2). CI-3 is done.
-   - **CI-4** (3 days): the browser editor (CodeMirror), New/Edit/Duplicate/Rename/Delete/Import/Export, Save and Run with live preview, versions.
-     - **Contract:** `docs/api.md`, "Your indicator definitions" (PR #37).
-     - **Constraints from the security review** (`docs/security-review-custom-indicators.md`), to keep in the editor's backend:
-       - **request ids on the worker protocol** (S6): every request carries an id the answer echoes; a mismatch is a protocol error (the worker is replaced);
-       - **plain files only** (S7): create with an exclusive open, never through or onto a link, junction or folder; the listing skips links;
-       - **lowercase ids that match the whole pattern** (S5, S9): file names are created from the id, so `Mine.py` cannot be made, and a lookup compares the listed name exactly (Windows is case-insensitive);
-       - **writes atomic** (temporary file in the folder, then a rename), 256 KB cap, nothing outside the indicators folder, `.history/` and `.deleted/`.
-     - Frontend: plan #39, editor #42 (draft, built against a mock of the contract; Session B's backend is still to be built and tried with it).
-   - **CI-5** (1 to 1.5 days): the cache and forming-bar updates, measured against the design's targets.
-2. **Storage steps 2 and later**, as decided:
-   - **tick retention:** 30 days by default (7/30/90 days, 1 year, forever, off);
-   - **M1 depth:** 2 years by default, with 3 months and 1 year as choices;
-   - **`purge`** runs VACUUM by default (`--no-vacuum` to skip);
-   - **logs:** access log off, 5 rotated service logs kept, compose `max-size 10m` / `max-file 3`.
+   - **The editor and the security review:** the constraints (S5 to S7, S9) are in `docs/security-review-custom-indicators.md`; the editor's backend (#41) and frontend (#42) are merged. The editor was built against a mock of the contract first; its trial against the real backend is the owner's field test.
+2. **Storage steps 2 and later:** step 2 is merged (#50: tick retention 30 days by default, M1 depth 2 years by default, `purge` with VACUUM, log limits). Later steps are in `docs/storage-review.md` (parked below).
 3. **5-second candles and bar replay**, as separate milestones. 5s candles use the spread/offsets layout and are kept 1 year by default.
-4. **More drawing tools:** rectangles, Fibonacci, channels, text labels (SPEC section 10).
-5. **More indicators,** indicator alerts, multi-timeframe indicators (deferred by the owner).
+4. **Drawing tools:** the first set is merged (#48). Further tools (SPEC section 10) as the owner asks.
+5. **Indicators:** the first set is merged (#47). Still deferred by the owner: indicator alerts and multi-timeframe indicators.
 6. **Multi-source providers:** MT5, cTrader. Dukascopy is opt-in, for personal installs only, never bundled or hosted; revisit it with this item.
 7. **Later (SPEC section 13):** backtester, paper trading, economic calendar, webhook notifier.
 
