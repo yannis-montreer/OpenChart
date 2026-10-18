@@ -3,6 +3,7 @@
 - Sub-minute bars: from stored ticks.
 - 1m to 30m: from stored M1.
 - 1h: from H1 where M1 does not reach, M1 from there.
+- 1m to 1h are kept in memory once read (`market.bars`), when the reader is given the cache.
 - 4h, D, W: complete bars from the cache (`market.cache`), the forming bar computed
   from base data on the fly.
 """
@@ -17,6 +18,7 @@ import numpy as np
 import pandas as pd
 
 from openchart.market.aggregate import PRICES, Bar, empty_frame, resample, ticks_frame
+from openchart.market.bars import BarCache
 from openchart.market.cache import CandleCache, is_cached
 from openchart.market.sessions import bar_bounds
 from openchart.market.timeframes import Kind, Timeframe
@@ -43,10 +45,12 @@ class SeriesReader:
         buffered_ticks=None,  # callable(instrument) -> list[Tick] not yet written to disk
         cache: CandleCache | None = None,
         live=None,  # callable(instrument) -> the forming M1 `Bar` or None (see `forming`)
+        bars: BarCache | None = None,  # 1m to 1h bars in memory (`market.bars`)
     ):
         self.store = store
         self.live = live
         self.cache = cache
+        self.bars = bars
         self.ticks_root = Path(ticks_root) if ticks_root else None
         self.buffered_ticks = buffered_ticks
 
@@ -142,11 +146,18 @@ class SeriesReader:
         # Bars are never cut: one that starts before `start` is left out, and one that
         # starts before `end` is returned whole.
         lo, hi = bar_bounds(start, tf)
-        read_end = bar_bounds(end - 1, tf)[1]
-        frame = await self.store.read_base_frame(
-            source, instrument, lo if lo == start else hi, read_end, price, self._uses_h1(tf)
-        )
-        bars = resample(frame, tf)
+        first, read_end = lo if lo == start else hi, bar_bounds(end - 1, tf)[1]
+
+        async def compute(a: int, b: int) -> pd.DataFrame:
+            frame = await self.store.read_base_frame(
+                source, instrument, a, b, price, self._uses_h1(tf)
+            )
+            return resample(frame, tf)
+
+        if self.bars is not None and self.bars.covers(tf):
+            bars = await self.bars.read(source, instrument, tf, price, first, read_end, compute)
+        else:
+            bars = await compute(first, read_end)
         return bars[bars["ts"] < end].reset_index(drop=True)
 
     async def _latest_from_base(self, source, instrument, tf, price, end, limit) -> pd.DataFrame:

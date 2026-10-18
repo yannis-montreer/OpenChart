@@ -137,3 +137,31 @@ difference over the 5,000 bars shown: RSI length 900 `4e-10`, length 2000 `3e-5`
 4. Raising a maximum later breaks nothing; lowering one later breaks saved charts.
 If TradingView parity matters more, **raise to 2000** (not 5000): difference `3e-5`, and the
 warning appears only above 952. Open for the owner.
+
+## After #46 and #49 were merged (2026-10-18): the notice and the two caches
+
+- **Merge:** `origin/main` merged into this branch (a merge commit). The values route keeps
+  main's structure: bars through `read_bars` (the reader with the bar cache), values through
+  the values cache. This branch's only route changes on top: `needed = warm` before the cap,
+  and the `notice` / `checks.warmup_cut` built from `needed` for every answer, cached or not.
+- **Why the caches cannot hide or repeat a notice:** the notice is computed per request from
+  the declared warmup, never stored in the values cache. The values it goes with are cached
+  under a key (`values_key`, moved out of the route so it can be tested and mutated) holding
+  the kind, id and version, the inputs without style, `info` (price type included), the
+  number of bars asked for and a digest of the bars computed on (the cut warmup included). A
+  store write bumps the version counter; the bar cache cuts its run and the next frame, so
+  its digest, differs.
+- **Tests** (`tests/test_warmup_notice_cache.py`): for pairs of requests differing only in
+  the indicator, the inputs (cut then fits, fits then cut), the bar range or the price type,
+  the answer from the warm cache equals the answer from an empty one, notice included; after
+  a store write the values change and the notice stays.
+- **Found:** a range with no bars answered 500 on main (the forming window read the first
+  bar of an empty frame); `values_key` returns no window then. Test added, failing before.
+- **Mutation check** (`tools/mutate_values_key.py`): 11 mutants, 10 killed, 1 equivalent
+  (the kind: the version after it already tells a built-in from a file). The first run left
+  three alive (the indicator id, the price type, the kind): the test pairs computed on
+  different bars, so the frame digest alone told them apart. Added: an EMA/SMA pair on the
+  same bars, and a file whose values depend on the price type alone with bid equal to mid
+  (the fake worker's `PRICE`). `tools/mutate_bar_cache.py` on the merge: 19 killed, 1
+  equivalent, as on #49.
+- **Full suite** on the merge: 1786 passed, 9 skipped.

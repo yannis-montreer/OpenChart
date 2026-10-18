@@ -31,6 +31,7 @@ from openchart.api.routes_account import account_routes, client_host
 from openchart.api.routes_alerts import alert_routes
 from openchart.api.routes_charts import chart_routes
 from openchart.api.routes_custom_indicators import custom_routes
+from openchart.api.routes_definitions import definition_routes
 from openchart.api.routes_drawings import drawing_routes
 from openchart.api.routes_indicators import indicator_routes
 from openchart.api.routes_layouts import layout_routes
@@ -52,6 +53,15 @@ class WebFiles(StaticFiles):
     """The web UI. Built files under assets/ have a content hash in their name and never
     change; index.html is checked on every load, so a rebuild takes effect at once
     (a cached page would keep running the previous build)."""
+
+    async def __call__(self, scope, receive, send):
+        # Only GET and HEAD read files. Anything else that reached the mount matched no
+        # route, so it is "not found" (the base class says 405), as without a built UI.
+        if scope["type"] == "http" and scope["method"] not in ("GET", "HEAD"):
+            response = JSONResponse({"detail": "Not Found"}, status_code=404)
+            await response(scope, receive, send)
+            return
+        await super().__call__(scope, receive, send)
 
     def file_response(self, full_path, stat_result, scope, status_code=200):
         response = super().file_response(full_path, stat_result, scope, status_code)
@@ -134,6 +144,7 @@ def create_app(server: Server) -> FastAPI:
     app.include_router(indicator_routes(server))
     app.include_router(chart_routes(server, charts))
     app.include_router(custom_routes(server, charts))
+    app.include_router(definition_routes(server, charts))
     app.include_router(layout_routes(server, charts))
 
     @app.get("/api/health")

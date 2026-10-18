@@ -62,6 +62,11 @@ function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** What the legend shows besides the list itself: each instance and the state of its definition. */
+function statusKey(chart: ChartIndicators): string {
+  return chart.indicators.map((i) => `${i.uid}:${i.status}`).join("|");
+}
+
 export class ChartSync {
   private current: Key | null = null;
   /** The list on screen is the current chart's own (it was read). */
@@ -70,6 +75,8 @@ export class ChartSync {
   private loading = false;
   private token = 0;
   private revisions = new Map<string, number>();
+  /** The statuses of the list last shown, per chart. */
+  private statuses = new Map<string, string>();
   private queue = new Map<string, { key: Key; entries: IndicatorEntry[]; gone: string[] }>();
   private running: Promise<void> | null = null;
   private busy = new Map<string, number>();
@@ -157,6 +164,34 @@ export class ChartSync {
       case "ignore":
         break;
     }
+  }
+
+  /**
+   * A definition of yours was saved or deleted (here or in another browser): a file may now fail
+   * to load, or load again, with the list itself unchanged (the same revision). Read the list
+   * and show it when a status differs; a newer list is taken as any change from elsewhere is.
+   */
+  async refreshStatuses(): Promise<void> {
+    const key = this.current;
+    if (!key || !this.loaded || this.loading) return;
+    const mine = this.token;
+    const k = keyOf(key);
+    await this.guard(k, async () => {
+      await this.settled();
+      try {
+        const chart = await this.api.get(key.source, key.instrument);
+        if (mine !== this.token) return;
+        const known = this.revisions.get(k) ?? 0;
+        if (chart.revision > known) {
+          this.take(chart, "remote");
+          this.hooks.notify({ type: "remote", instrument: key.instrument });
+        } else if (chart.revision === known && statusKey(chart) !== this.statuses.get(k)) {
+          this.take(chart, "open");
+        }
+      } catch {
+        // unreachable: the statuses are read again with the next change
+      }
+    });
   }
 
   /** After a reconnect: changes made while away. */
@@ -269,6 +304,7 @@ export class ChartSync {
 
   private take(chart: ChartIndicators, why: ShowWhy): void {
     this.revisions.set(keyOf(chart), chart.revision);
+    this.statuses.set(keyOf(chart), statusKey(chart));
     this.hooks.show(chart, why);
     this.announceResets(chart);
   }

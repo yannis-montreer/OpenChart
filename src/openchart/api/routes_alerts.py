@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from openchart.alerts.notify import default_name
+from openchart.drawing_rules import LINE_TYPES
 from openchart.market.timeframes import Kind, parse_timeframe
 from openchart.server import Server
 from openchart.store.alerts import Alert
@@ -109,8 +110,14 @@ def alert_routes(server: Server) -> APIRouter:
         alert = Alert(id="", instrument=body.instrument, type=body.type)
         if body.type == "line_cross":
             drawing = await DrawingStore(server.db.conn).get(body.drawing_id or "")
-            if drawing is None or drawing.instrument != body.instrument:
-                raise HTTPException(400, "a line alert needs a line on this instrument")
+            if (
+                drawing is None
+                or drawing.instrument != body.instrument
+                or drawing.type not in LINE_TYPES
+            ):
+                raise HTTPException(
+                    400, "a line alert needs a line on this instrument (not another drawing)"
+                )
             alert.drawing_id = drawing.id
         elif body.level is None:
             raise HTTPException(400, "a level alert needs a price level")

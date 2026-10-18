@@ -5,6 +5,7 @@ import {
   api,
   CLIENT_API_VERSION,
   chartsApi,
+  customApi,
   drawingsApi,
   indicatorsApi,
   layoutsApi,
@@ -18,6 +19,7 @@ import {
   type LayoutState,
   type Meta,
   type Price,
+  type PreviewValues,
   type Status,
   type TimeframeMeta,
 } from "./api";
@@ -26,6 +28,8 @@ import { ChartSync } from "./chart/chartSync";
 import { IndicatorLayer } from "./chart/indicators";
 import { CHART_TYPES, ChartView, type ChartContext } from "./chart/view";
 import { DrawingController, type AlertPlace, type Tool } from "./drawings/controller";
+import { isLineType } from "./drawings/shapes";
+import { DrawingsPanel } from "./drawings/listPanel";
 import { dropLegacyIndicators, loadPrefs, readLegacyIndicators, resolveTimezone, savePrefs, type Prefs } from "./prefs";
 import { formatClock, offsetLabel } from "./time";
 import { versionNotice } from "./version";
@@ -34,7 +38,17 @@ import { AlertsPanel } from "./ui/alertsPanel";
 import { DownloadPanel, isDownloading, lineText } from "./ui/download";
 import { showLogin } from "./ui/auth";
 import { button, closeMenu, h, icon, installTooltips, menuItem, showMenu, showMenuAt, type IconName } from "./ui/dom";
+import {
+  exportDefinition,
+  openDuplicateDefinition,
+  openImportDefinition,
+  openNewDefinition,
+  openRenameDefinition,
+  type Created,
+} from "./ui/definitionActions";
+import { openEditorPanel, type PanelController } from "./ui/editorPanel";
 import { openIndicatorPicker, openIndicatorSettings } from "./ui/indicatorDialogs";
+import { gate as editingGate } from "./ui/pickerModel";
 import { LayoutMenu } from "./ui/layoutMenu";
 import { SettingsDialog, type Section } from "./ui/settings";
 import { toast } from "./ui/toast";
@@ -97,6 +111,7 @@ export class App {
   drawings!: DrawingController;
   indicators!: IndicatorLayer;
   private sync!: ChartSync;
+  private editor?: PanelController;
   private catalog: IndicatorCatalog = { indicators: [], errors: [], folder: "" };
   private layoutMenu = new LayoutMenu({
     state: () => this.layoutState(),
@@ -302,6 +317,15 @@ export class App {
     };
     const trash = button({ icon: "trash", title: "Delete all drawings on this instrument" });
     trash.addEventListener("click", () => this.confirmDeleteAll(trash));
+    const undoBtn = button({ icon: "undo", title: "Undo (Ctrl+Z)", disabled: true, onClick: () => void this.drawings.undo() });
+    const redoBtn = button({ icon: "redo", title: "Redo (Ctrl+Shift+Z)", disabled: true, onClick: () => void this.drawings.redo() });
+    this.drawings.onHistoryChange = () => {
+      undoBtn.disabled = !this.drawings.history.canUndo;
+      redoBtn.disabled = !this.drawings.history.canRedo;
+    };
+    this.drawings.onNotice = (body) => toast({ title: "Undo", body, icon: "info", timeout: 9000 });
+    const drawingsPanel = new DrawingsPanel(this.drawings);
+    const listBtn = button({ icon: "shapes", title: "Drawings: list, lock, hide", onClick: () => drawingsPanel.open(listBtn) });
     tools.append(
       tool("cursor", "crosshair", "Cursor (Esc)"),
       h("div", { class: "sep-h" }),
@@ -309,7 +333,18 @@ export class App {
       tool("ray", "ray", `Ray (Alt+Y). ${snapHint}`),
       tool("extended", "extended", `Extended line (Alt+E). ${snapHint}`),
       tool("hline", "hline", `Horizontal line (Alt+H). ${snapHint}`),
+      tool("vline", "vline", `Vertical line (Alt+V). ${snapHint}`),
       h("div", { class: "sep-h" }),
+      tool("rect", "rect", `Rectangle (Alt+B). ${snapHint}`),
+      tool("channel", "channel", `Parallel channel (Alt+C): two points for the base line, a third for the width. ${snapHint}`),
+      tool("fib", "fib", `Fibonacci retracement (Alt+F). ${snapHint}`),
+      tool("measure", "measure", `Measure (Alt+M). ${snapHint}`),
+      tool("text", "text", "Text (Alt+X)"),
+      h("div", { class: "sep-h" }),
+      undoBtn,
+      redoBtn,
+      h("div", { class: "sep-h" }),
+      listBtn,
       eye,
       trash,
       h("div", { class: "grow" }),
@@ -613,14 +648,9 @@ export class App {
         this.sync.receive(m);
         break;
       case "indicators_changed":
-        // A definition of yours was deleted (here or in another browser): the catalog has changed.
-        void indicatorsApi
-          .catalog()
-          .then((c) => {
-            this.catalog = c;
-            this.indicators.setCatalog(c.indicators);
-          })
-          .catch(() => undefined);
+        // A definition of yours was created, saved, renamed, duplicated, restored or deleted (here or in
+        // another browser): the catalog has changed, and so may the state of the instances that use it.
+        void this.catalogChanged(m.id, m.op);
         break;
       case "closures": {
         const inst = this.instruments.find((i) => i.instrument === m.instrument);
@@ -808,13 +838,86 @@ export class App {
     openIndicatorPicker({
       catalog: this.catalog,
       onPick: (def) => void this.indicators.add(def),
-      reload: async () => {
-        this.catalog = await indicatorsApi.catalog();
-        this.indicators.setCatalog(this.catalog.indicators);
-        return this.catalog;
+      reload: () => this.readCatalog(),
+      onDeleted: (id) => {
+        this.indicators.removeDefinition(id, false);
+        if (this.editor?.id === id) void this.editor.requestClose();
       },
-      onDeleted: (id) => this.indicators.removeDefinition(id, false),
+      definitions: {
+        edit: (id) => void this.openEditor(id),
+        create: () => void openNewDefinition({ taken: this.customIds(), onDone: (r) => this.created(r) }),
+        import: () => openImportDefinition({ taken: this.customIds(), onDone: (r) => this.created(r) }),
+        rename: (id, title) => openRenameDefinition({ id, title, onDone: () => void this.readCatalog().catch(() => undefined) }),
+        duplicate: (id, title) => openDuplicateDefinition({ id, title, taken: this.customIds(), onDone: (r) => this.created(r) }),
+        export: (id) => exportDefinition(id),
+      },
     });
+  }
+
+  private async readCatalog(): Promise<IndicatorCatalog> {
+    this.catalog = await indicatorsApi.catalog();
+    this.indicators.setCatalog(this.catalog.indicators);
+    this.editor?.setEditing(editingGate(this.catalog));
+    return this.catalog;
+  }
+
+  /** The ids of your files, whether or not they load (a name is taken either way). */
+  private customIds(): string[] {
+    return [...(this.catalog.custom ?? []).map((e) => e.id), ...this.catalog.errors.map((e) => e.file.replace(/\.py$/i, ""))];
+  }
+
+  private created(r: Created): void {
+    toast({ title: "Saved", body: `${r.def.file} is in your indicators folder.`, icon: "save", timeout: 3000 });
+    void this.readCatalog().catch(() => undefined);
+    if (r.edit) void this.openEditor(r.def.id);
+  }
+
+  /** `indicators_changed`: read the catalog, then the editor's file and the instances that use it. */
+  private async catalogChanged(id: string | undefined, op: string | undefined): Promise<void> {
+    try {
+      await this.readCatalog();
+    } catch {
+      return; // unreachable: the next change reads it again
+    }
+    if (this.editor && (id === undefined || id === this.editor.id)) {
+      this.editor.changed(op ?? "save");
+      this.editor.setTitle((this.catalog.custom ?? []).find((e) => e.id === this.editor?.id)?.definition?.title ?? this.editor.id);
+    }
+    void this.sync.refreshStatuses();
+  }
+
+  private async openEditor(id: string): Promise<void> {
+    if (this.editor) {
+      if (this.editor.id === id) {
+        this.editor.focus();
+        return;
+      }
+      if (!(await this.editor.requestClose())) return;
+    }
+    const title = (this.catalog.custom ?? []).find((e) => e.id === id)?.definition?.title ?? id;
+    this.editor = openEditorPanel({
+      id,
+      title,
+      editing: editingGate(this.catalog),
+      query: () => {
+        const c = this.chart.ctx;
+        return c ? { instrument: c.instrument.instrument, timeframe: c.timeframe.name, price: c.price } : null;
+      },
+      onPreview: (values, source) => this.showPreview(id, values, source),
+      onClosed: () => {
+        this.editor = undefined;
+        this.indicators.clearPreview();
+      },
+    });
+  }
+
+  /** The dashed preview of a Run: the chart asks the server for its values with the text that was run. */
+  private showPreview(id: string, values: PreviewValues | null, source: string | undefined): void {
+    if (!values || source === undefined) {
+      this.indicators.clearPreview();
+      return;
+    }
+    this.indicators.setPreview(values.definition, (q) => customApi.preview({ source, id, ...q }));
   }
 
   private indicatorSettings(uid: number): void {
@@ -919,6 +1022,10 @@ export class App {
     if (!this.instrument) return;
     const selected = this.drawings.selectedId ? this.drawings.get(this.drawings.selectedId) : undefined;
     const line = drawing ?? selected;
+    if (line && !isLineType(line.type)) {
+      toast({ title: "No alerts on this tool yet", body: "Alerts follow lines: horizontal, trend, ray and extended lines.", icon: "info", timeout: 5000 });
+      return;
+    }
     const existing = line ? this.alertsPanel.forDrawing(line.id) : [];
     if (existing.length === 1) return this.editAlert(existing[0]);
     if (existing.length > 1) return this.pickAlert(existing, place);
@@ -1032,8 +1139,11 @@ export class App {
         row("Alt + R", "Reset chart view"),
         row("Esc", "Cancel drawing, back to the cursor"),
         row("Alt + T / Y / E / H", "Trendline, ray, extended line, horizontal line"),
+        row("Alt + V / B / C", "Vertical line, rectangle (box), parallel channel"),
+        row("Alt + F / M / X", "Fibonacci retracement, measure, text"),
         row("Ctrl (while drawing)", "Snap to the bar's open, high, low or close"),
-        row("Del", "Delete the selected drawing"),
+        row("Del", "Delete the selected drawing (not a locked one)"),
+        row("Ctrl + Z / Ctrl + Shift + Z", "Undo / redo drawing changes"),
         row("Alt + A", "Alert on the selected line, or at a price level"),
         row("/", "Indicators"),
         row("Ctrl + S", "Save the layout"),

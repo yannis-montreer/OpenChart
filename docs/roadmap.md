@@ -49,7 +49,7 @@ In the owner's order. Each item is one branch from main and stops for review.
      - **(e)** `docs/custom-indicators.md` with the four examples and the Pine cheat sheet.
    - **To check in TradingView** (inferred so far, in `docs/decisions.md`): `pivotlow` ties and pivots with several equal bars on the left, `rising`/`falling` for n other than 2, and `rsi` on a window where nothing moved (100).
    - **CI-3** (2 days): indicator instances per chart on the server (D1), with migration from `localStorage`, the menu's Built-in and Custom sections, deleting a definition that is in use.
-     - **Backend:** merged (#33): migration 0008, the chart routes, the import, layouts' copies, where-used and delete. **Frontend:** steps 1 to 3 merged (#36: the sections, the states, deleting); steps 4 to 6 (the list on the server, the import, the reset note, layouts, API version 2) on a draft PR.
+     - **Backend:** merged (#33): migration 0008, the chart routes, the import, layouts' copies, where-used and delete. **Frontend:** steps 1 to 3 merged (#36: the sections, the states, deleting); steps 4 to 6 merged (#38: the list on the server, the import, the reset note, layouts, API version 2). CI-3 is done.
    - **CI-4** (3 days): the browser editor (CodeMirror), New/Edit/Duplicate/Rename/Delete/Import/Export, Save and Run with live preview, versions.
      - **Contract:** `docs/api.md`, "Your indicator definitions" (PR #37).
      - **Constraints from the security review** (`docs/security-review-custom-indicators.md`), to keep in the editor's backend:
@@ -57,6 +57,7 @@ In the owner's order. Each item is one branch from main and stops for review.
        - **plain files only** (S7): create with an exclusive open, never through or onto a link, junction or folder; the listing skips links;
        - **lowercase ids that match the whole pattern** (S5, S9): file names are created from the id, so `Mine.py` cannot be made, and a lookup compares the listed name exactly (Windows is case-insensitive);
        - **writes atomic** (temporary file in the folder, then a rename), 256 KB cap, nothing outside the indicators folder, `.history/` and `.deleted/`.
+     - Frontend: plan #39, editor #42 (draft, built against a mock of the contract; Session B's backend is still to be built and tried with it).
    - **CI-5** (1 to 1.5 days): the cache and forming-bar updates, measured against the design's targets.
 2. **Storage steps 2 and later**, as decided:
    - **tick retention:** 30 days by default (7/30/90 days, 1 year, forever, off);

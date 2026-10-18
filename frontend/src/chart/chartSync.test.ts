@@ -654,3 +654,68 @@ describe("loading a layout", () => {
     expect(h.shown.at(-1)?.chart.indicators.map((i) => i.id)).toEqual(["ema"]);
   });
 });
+
+describe("statuses after a definition was saved (CI-4)", () => {
+  it("shows the list again when a file's status changed at the same revision", async () => {
+    const s = fakeServer({ [key(SRC, A)]: { revision: 3, indicators: [inst("mid", { kind: "custom" })] } });
+    const h = fakeHooks();
+    const sync = new ChartSync(s.api, h.hooks);
+    await sync.open(SRC, A);
+    s.set(SRC, A, 3, [inst("mid", { kind: "custom", status: "error" })]); // a save broke the file: the revision is the same
+    await sync.refreshStatuses();
+    expect(h.shown.map((x) => x.chart.indicators[0].status)).toEqual(["ok", "error"]);
+    expect(h.events).toEqual([]); // nothing to announce: the list itself did not change
+  });
+
+  it("does nothing when nothing differs", async () => {
+    const s = fakeServer({ [key(SRC, A)]: { revision: 3, indicators: [inst("mid", { kind: "custom" })] } });
+    const h = fakeHooks();
+    const sync = new ChartSync(s.api, h.hooks);
+    await sync.open(SRC, A);
+    await sync.refreshStatuses();
+    expect(h.shown).toHaveLength(1);
+  });
+
+  it("a file that loads again is shown again too", async () => {
+    const s = fakeServer({ [key(SRC, A)]: { revision: 3, indicators: [inst("mid", { kind: "custom", status: "error" })] } });
+    const h = fakeHooks();
+    const sync = new ChartSync(s.api, h.hooks);
+    await sync.open(SRC, A);
+    s.set(SRC, A, 3, [inst("mid", { kind: "custom" })]);
+    await sync.refreshStatuses();
+    expect(h.shown.at(-1)?.chart.indicators[0].status).toBe("ok");
+  });
+
+  it("takes a newer list like any change from another browser", async () => {
+    const s = fakeServer({ [key(SRC, A)]: { revision: 3, indicators: [inst("ema")] } });
+    const h = fakeHooks();
+    const sync = new ChartSync(s.api, h.hooks);
+    await sync.open(SRC, A);
+    s.set(SRC, A, 4, [inst("ema"), inst("rsi")]);
+    await sync.refreshStatuses();
+    expect(h.shown.at(-1)?.chart.revision).toBe(4);
+    expect(h.events).toContainEqual({ type: "remote", instrument: A });
+  });
+
+  it("does nothing with no chart open, an unloaded list, or an unreachable server", async () => {
+    const s = fakeServer();
+    const h = fakeHooks();
+    const sync = new ChartSync(s.api, h.hooks);
+    await sync.refreshStatuses();
+    expect(s.calls).toEqual([]);
+    await sync.open(SRC, A);
+    s.api.fail = () => new Error("down");
+    await expect(sync.refreshStatuses()).resolves.toBeUndefined();
+    expect(h.shown).toHaveLength(1);
+  });
+
+  it("an older answer than the list on screen is ignored", async () => {
+    const s = fakeServer({ [key(SRC, A)]: { revision: 5, indicators: [inst("ema")] } });
+    const h = fakeHooks();
+    const sync = new ChartSync(s.api, h.hooks);
+    await sync.open(SRC, A);
+    s.set(SRC, A, 2, [inst("ema", { status: "error" })]);
+    await sync.refreshStatuses();
+    expect(h.shown).toHaveLength(1);
+  });
+});

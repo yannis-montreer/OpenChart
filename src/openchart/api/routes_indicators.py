@@ -14,6 +14,7 @@ without it, a built-in wins and a custom file is found when no built-in has its 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
 from typing import Any
@@ -23,11 +24,11 @@ import pandas as pd
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from openchart.api.editing import editing_for
-from openchart.indicators._base import Info
+from openchart.indicators._base import Indicator, Info
 from openchart.indicators.worker.runner import ScriptFailed, WorkerUnavailable
 from openchart.market.aggregate import PRICES
 from openchart.market.series import MAX_LIMIT
-from openchart.market.timeframes import TIMEFRAMES, parse_timeframe
+from openchart.market.timeframes import TIMEFRAMES, Timeframe, parse_timeframe
 from openchart.server import Server
 
 MAX_WARMUP = 20_000  # bars
@@ -134,43 +135,25 @@ def indicator_routes(server: Server) -> APIRouter:
             ) from None
         needed = warm
         warm = min(max(warm, 0), MAX_WARMUP)
-
-        read = server.reader.candles
-        bars = await read(
-            server.source,
-            instrument,
-            tf,
-            price=price,
-            start=from_,
-            end=to,
-            limit=limit,
-            forming=True,  # the bar that is forming has a value too (it is not stored yet)
+        bars, frame, forming = await read_bars(
+            server, instrument, tf, price, from_, to, limit, warm
         )
-        bars = bars[COLUMNS]
-        before: list[pd.DataFrame] = []
-        if warm and not bars.empty:
-            first, need = int(bars["ts"].iloc[0]), warm
-            while need > 0:  # page back, MAX_LIMIT bars at a time
-                older = await read(
-                    server.source,
-                    instrument,
-                    tf,
-                    price=price,
-                    end=first,
-                    limit=min(need, MAX_LIMIT),
-                )
-                if older.empty:
-                    break
-                before.insert(0, older[COLUMNS])
-                first, need = int(older["ts"].iloc[0]), need - len(older)
-        frame = pd.concat([*before, bars], ignore_index=True) if before else bars
-        frame = frame.reset_index(drop=True)
 
-        try:
+        async def compute() -> dict[str, pd.Series]:
             if custom is not None:
-                series = await server.custom.compute(custom, frame, settings, info, warmup=warm)
+                return await server.custom.compute(custom, frame, settings, info, warmup=warm)
+            return await asyncio.to_thread(indicator.run, frame, settings, info)
+
+        key, window = values_key(indicator, custom, settings, info, bars, frame)
+        try:
+            if frame.empty:
+                series = await compute()
             else:
-                series = await asyncio.to_thread(indicator.run, frame, settings, info)
+                series = await server.values_cache.get(
+                    key, compute, window=window if forming else None
+                )
+                if custom is not None:  # no-op unless this came from the cache
+                    server.custom.from_cache(custom, frame, settings, info, series, warmup=warm)
         except ScriptFailed as exc:
             raise _failed(indicator.name, exc) from None
         except WorkerUnavailable as exc:
@@ -179,18 +162,6 @@ def indicator_routes(server: Server) -> APIRouter:
             raise HTTPException(
                 422, f"{indicator.name} failed: {type(exc).__name__}: {exc}"
             ) from None
-        n = len(bars)
-        numbers: dict[str, list[float | None]] = {}
-        hits: dict[str, list[int]] = {}
-        levels: dict[str, float] = {}
-        for oid, o in zip(indicator.output_ids(), indicator.outputs, strict=True):
-            if o.data == "number":
-                numbers[oid] = _floats(series[oid].iloc[len(series[oid]) - n :])
-            elif o.data == "bool":
-                tail = series[oid].to_numpy()[len(series[oid]) - n :]
-                hits[oid] = np.flatnonzero(tail).tolist()
-            elif o.kind == "level":
-                levels[oid] = float(settings[o.value] if isinstance(o.value, str) else o.value)
         out = {
             "id": indicator.id,
             "kind": "custom" if custom is not None else "builtin",
@@ -198,11 +169,7 @@ def indicator_routes(server: Server) -> APIRouter:
             "instrument": instrument,
             "timeframe": tf.name,
             "price": price,
-            "params": settings,
-            "t": [int(t) for t in bars["ts"]],
-            "values": numbers,
-            "hits": hits,
-            "levels": levels,
+            **shape(indicator, settings, bars, series),
         }
         cut = _warmup_cut(needed)
         if cut:
@@ -229,6 +196,112 @@ def _warmup_cut(needed: int) -> dict[str, Any] | None:
             f"{MAX_WARMUP:,} are used, so the first values may differ from a longer history. "
             "Use a shorter length to settle them."
         ),
+    }
+
+
+async def read_bars(
+    server: Server,
+    instrument: str,
+    tf: Timeframe,
+    price: str,
+    from_: int | None,
+    to: int | None,
+    limit: int | None,
+    warm: int,
+) -> tuple[pd.DataFrame, pd.DataFrame, bool]:
+    """The bars `/api/candles` returns for this query (the forming bar included), the
+    frame to compute on (those bars with `warm` earlier ones before them), and whether the
+    last bar is the forming one."""
+    read = server.reader.candles
+    bars = await read(
+        server.source,
+        instrument,
+        tf,
+        price=price,
+        start=from_,
+        end=to,
+        limit=limit,
+        forming=True,  # the bar that is forming has a value too (it is not stored yet)
+    )
+    forming = "forming" in bars.attrs
+    bars = bars[COLUMNS]
+    before: list[pd.DataFrame] = []
+    if warm and not bars.empty:
+        first, need = int(bars["ts"].iloc[0]), warm
+        while need > 0:  # page back, MAX_LIMIT bars at a time
+            older = await read(
+                server.source,
+                instrument,
+                tf,
+                price=price,
+                end=first,
+                limit=min(need, MAX_LIMIT),
+            )
+            if older.empty:
+                break
+            before.insert(0, older[COLUMNS])
+            first, need = int(older["ts"].iloc[0]), need - len(older)
+    frame = pd.concat([*before, bars], ignore_index=True) if before else bars
+    return bars, frame.reset_index(drop=True), forming
+
+
+def values_key(
+    indicator: Indicator,
+    custom: Any,
+    settings: dict[str, Any],
+    info: Info,
+    bars: pd.DataFrame,
+    frame: pd.DataFrame,
+) -> tuple[tuple, tuple | None]:
+    """The values cache's key and forming window (CI-5): the same values for the same
+    version, inputs (not style), price type and bars. The warmup cut depends only on these
+    (the version and inputs give the warmup; the bars computed on include the cut warmup),
+    so a cached answer and its notice always belong together."""
+    style = {p.name for p in indicator.params if p.group == "style"}
+    about = (
+        "custom" if custom is not None else "builtin",
+        indicator.id,
+        custom.digest if custom is not None else "builtin",
+        json.dumps({k: v for k, v in settings.items() if k not in style}, sort_keys=True),
+        json.dumps(info.to_json(), sort_keys=True),
+        len(bars),
+    )
+    if frame.empty:
+        return (*about, frame_digest(frame)), None
+    window = (*about, len(frame), int(frame["ts"].iloc[0]), int(frame["ts"].iloc[-1]))
+    return (*about, frame_digest(frame)), window
+
+
+def frame_digest(frame: pd.DataFrame) -> str:
+    """The bars computed on, as a digest: rewritten bars are another key."""
+    h = hashlib.sha1(usedforsecurity=False)
+    for name in COLUMNS:
+        h.update(np.ascontiguousarray(frame[name].to_numpy(), dtype="<f8").tobytes())
+    return h.hexdigest()
+
+
+def shape(
+    indicator: Indicator, settings: dict[str, Any], bars: pd.DataFrame, series: dict
+) -> dict[str, Any]:
+    """`params, t, values, hits, levels` of the answer, for the requested bars only."""
+    n = len(bars)
+    numbers: dict[str, list[float | None]] = {}
+    hits: dict[str, list[int]] = {}
+    levels: dict[str, float] = {}
+    for oid, o in zip(indicator.output_ids(), indicator.outputs, strict=True):
+        if o.data == "number":
+            numbers[oid] = _floats(series[oid].iloc[len(series[oid]) - n :])
+        elif o.data == "bool":
+            tail = series[oid].to_numpy()[len(series[oid]) - n :]
+            hits[oid] = np.flatnonzero(tail).tolist()
+        elif o.kind == "level":
+            levels[oid] = float(settings[o.value] if isinstance(o.value, str) else o.value)
+    return {
+        "params": settings,
+        "t": [int(t) for t in bars["ts"]],
+        "values": numbers,
+        "hits": hits,
+        "levels": levels,
     }
 
 

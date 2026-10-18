@@ -122,6 +122,7 @@ Errors: `400` unknown timeframe or price, `404` unknown instrument, `422` invali
   - `levels`: `{name: number}` for each `level`, already resolved with this request's `params`.
   - Every key of `values`, `hits` and `levels` is the `name` of an output; `fill` outputs have none (the browser draws them from the two outputs they name).
   - 404 for an unknown indicator or instrument, 400 for bad `params`. **422 when the indicator's code fails or returns something that cannot be drawn** (a missing or undeclared output, the wrong number of values, text in a line, numbers in a marker, ...): `{"detail": "SMA cross failed: ResultError: output 'up' must be true/false values ..."}`. The server checks every answer itself, also those of the worker. A bad result is not counted toward the quarantine (it is not a crash or a timeout), and the worker keeps running; the cost of repeating one is bounded by the job deadline and by the server remembering the same error for the same script, parameters and bars.
+  - **Computed values are cached in the server** (CI-5): the same indicator version, inputs and bars are answered without computing again; inputs of the Style tab (colours, widths) are not part of that, so a restyle never recomputes. A window that ends on the forming bar is computed at most once a second and in between answered with the last result for that window (the newest tick can be up to a second late there); a new bar is computed at once. Identical requests that arrive together share one computation.
   - **A marker or background is only checked to be 0 or 1** on the server (booleans reach it as numbers); the worker's own check that the script returned real `True/False` is the only one that can tell them apart.
 - **Checks (your own files only):** the first request for a version of a file with given `params` queues the save-time checks on its bars (docs/custom-indicators.md). They never hold up or block the answer. `checks` in the values answer is the check for these `params`; each entry of `custom` in `GET /api/indicators` has `checks`, the list for its current version (at most 5 settings). Built-in indicators have no `checks`.
 
@@ -230,7 +231,9 @@ Everything under `/api/custom-indicators` answers **`403`** `{detail: "Editing c
 - `404` for an id that is not one of your files.
 - **In use:** `DELETE` answers `409` `{detail: {message, usage}}`, the message as the confirmation shows it (`"SMA cross" is on 2 charts (EUR_USD, XAU_USD) and in 1 saved layout ("Gold H1"). Deleting it removes it from all of them.`). `?confirm=true` removes its instances from every chart and saved layout first (`chart_indicators_changed` for each chart, `layouts_changed`), then moves the files. Only custom instances count and go: a built-in indicator with the same id is untouched, and a layout entry saved without a `kind` counts only when no built-in has that id.
 - `409` without any change when `.deleted` or `.history/<id>` is not a plain folder inside yours (a file, or a link elsewhere).
-- After a delete, every page gets `indicators_changed` (fetch the catalog again).
+- After a delete, every page gets `indicators_changed` `{id, op: "delete"}` (fetch the catalog again).
+
+**Errors, all routes:** `400` a malformed body or id; `403` editing not allowed (the reason in `detail`); `404` no such file, version or template; `409` the id exists (`suggested`), the file changed since `base_version` (`version`), a name that is not a plain file, a `TITLE` line Rename cannot edit, a definition in use (`usage`); `413` a source over 256 KB; `422` a preview that fails, or a refused body (FastAPI's `detail` list); `503` the worker is not running (preview only: saves never need the worker to store the file).
 
 **Errors, all routes:** `400` a malformed body or id; `403` editing not allowed (the reason in `detail`); `404` no such file, version or template; `409` the id exists (`suggested`), the file changed since `base_version` (`version`), a name that is not a plain file, a `TITLE` line Rename cannot edit, a definition in use (`usage`); `413` a source over 256 KB; `422` a preview that fails, or a refused body (FastAPI's `detail` list); `503` the worker is not running (preview only: saves never need the worker to store the file).
 
@@ -273,6 +276,24 @@ An answer whose warmup fits has neither. Clients that ignore the fields keep wor
 - `style`: `{color: "#rrggbb", width: 1-4, dash: "solid" | "dashed" | "dotted"}`; `label` up to 100 characters.
 - Every change is sent to all connected browsers as a websocket `drawing_changed` message.
 - Line geometry (how `points` define the line, in trading time): SPEC section 9.
+
+### More drawing tools
+
+Added with `docs/decisions-drawing-tools.md` (this section extends the `type`, `points` and `style` rules above). No migration; the `drawings` table, the routes and `drawing_changed` are the same.
+
+| `type` | `points` | Valid when | Notes |
+|---|---|---|---|
+| `vline` | 1 | always | `t` is the line; `p` is kept but not drawn |
+| `text` | 1 | `label` has 1-100 characters after trimming | the text is `label`; `clear_label` and a blank `label` are refused (`400`); `style.width` 1-4 is the size |
+| `rect` | 2 opposite corners | trading time between them and different prices | |
+| `fib` | 2: start (level 1), end (level 0) | trading time between them and different prices | levels 0, 0.236, 0.382, 0.5, 0.618, 0.786, 1 are fixed |
+| `measure` | 2 | the points differ in trading time or in price | |
+| `channel` | 3: base line (2), then a point on the parallel line | trading time between the first two, and the third not on the base line | the base line is extended in trading time; the offset of the third point from it is the channel's width |
+
+- `style` also takes `fill` (integer 0-100, opacity of the area of a `rect` or `channel`) and `extend` (boolean: a `channel` runs to the right as rays, a `fib`'s levels to the edge). Both are stored only when sent; without them the tool's default applies.
+- `style` also takes `locked` and `hidden` (booleans, stored only when sent). **Locks guard against accidents in this browser:** the web page will not move or delete a locked drawing, but the server stores the flag and does not enforce it, so `PUT` and `DELETE` on a locked drawing work. A hidden drawing is not drawn, and its alerts stay active.
+- A `line_cross` alert needs a `hline`, `trendline`, `ray` or `extended` line: on any other type `POST /api/alerts` answers `400`.
+- A change that breaks a rule is refused with `400` on create and on update, like the two-point lines.
 
 ## WebSocket `/ws`
 

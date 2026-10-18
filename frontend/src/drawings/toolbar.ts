@@ -4,7 +4,8 @@ import type { Drawing, DrawingStyle } from "../api";
 import { lineAlertTitle } from "../ui/alertState";
 import { button, closeMenu, h, icon, menuItem, showMenu } from "../ui/dom";
 import type { DrawingController } from "./controller";
-import { TYPE_NAMES } from "./controller";
+import { TYPE_NAMES, isLocked } from "./management";
+import { fillOf, isLineType, styleOptions, textSize } from "./shapes";
 
 export const PALETTE = [
   "#4d8dff", "#22c55e", "#ef4444", "#f59e0b", "#a855f7", "#06b6d4",
@@ -45,6 +46,11 @@ export class StyleToolbar {
   private dashBtn: HTMLButtonElement;
   private labelBtn: HTMLButtonElement;
   private bellBtn: HTMLButtonElement;
+  private fillBtn: HTMLButtonElement;
+  private extendBtn: HTMLButtonElement;
+  private sepBtn: HTMLElement;
+  private lockBtn: HTMLButtonElement;
+  private trashBtn: HTMLButtonElement;
 
   constructor(
     area: HTMLElement,
@@ -54,6 +60,11 @@ export class StyleToolbar {
     this.widthBtn = button({ label: "2px", title: "Line width", onClick: () => this.openWidth() });
     this.dashBtn = button({ title: "Line style", onClick: () => this.openDash() });
     this.labelBtn = button({ icon: "text", title: "Label", onClick: () => this.openLabel() });
+    this.fillBtn = button({ label: "Fill", title: "Area opacity", onClick: () => this.openFill() });
+    this.extendBtn = button({ label: "Extend", onClick: () => this.toggleExtend() });
+    this.sepBtn = h("div", { class: "sep" });
+    this.lockBtn = button({ icon: "lock", title: "Lock", onClick: () => this.current && void this.ctl.update(this.current.id, { style: { locked: !isLocked(this.current) } }) });
+    this.trashBtn = button({ icon: "trash", title: "Delete (Del)", onClick: () => this.current && void this.ctl.removeFromChart(this.current.id) });
     this.bellBtn = button({
       icon: "bell",
       title: "Add alert on this line (Alt+A)",
@@ -67,10 +78,13 @@ export class StyleToolbar {
       this.widthBtn,
       this.dashBtn,
       this.labelBtn,
-      h("div", { class: "sep" }),
+      this.fillBtn,
+      this.extendBtn,
+      this.sepBtn,
       this.bellBtn,
       button({ icon: "copy", title: "Clone", onClick: () => this.current && void this.ctl.clone(this.current.id) }),
-      button({ icon: "trash", title: "Delete (Del)", onClick: () => this.current && void this.ctl.remove(this.current.id) }),
+      this.lockBtn,
+      this.trashBtn,
     );
     // Clicks on the toolbar must not reach the chart.
     this.el.addEventListener("pointerdown", (e) => e.stopPropagation());
@@ -80,9 +94,29 @@ export class StyleToolbar {
   show(d: Drawing): void {
     this.current = d;
     this.colorBtn.replaceChildren(h("span", { class: "swatch", style: `background:${d.style.color}` }));
-    this.widthBtn.querySelector("span")!.textContent = `${d.style.width}px`;
+    const opts = styleOptions(d.type);
+    this.widthBtn.querySelector("span")!.textContent = d.type === "text" ? `${textSize(d.style.width)}px` : `${d.style.width}px`;
+    this.widthBtn.dataset.tip = d.type === "text" ? "Text size" : "Line width";
     this.dashBtn.replaceChildren(linePreview({ dash: d.style.dash, width: 2 }));
-    this.labelBtn.classList.toggle("active", Boolean(d.label));
+    this.dashBtn.hidden = !opts.dash;
+    this.labelBtn.hidden = !opts.label;
+    this.labelBtn.dataset.tip = d.type === "text" ? "Edit text" : "Label";
+    this.labelBtn.classList.toggle("active", Boolean(d.label) && d.type !== "text");
+    this.fillBtn.hidden = !opts.fill;
+    this.fillBtn.querySelector("span")!.textContent = `Fill ${fillOf(d.type, d.style.fill)}%`;
+    this.extendBtn.hidden = !opts.extend;
+    this.extendBtn.classList.toggle("active", Boolean(d.style.extend));
+    this.extendBtn.dataset.tip = d.type === "fib" ? "Extend the levels to the right edge" : "Extend both lines to the right";
+    this.extendBtn.setAttribute("aria-pressed", String(Boolean(d.style.extend)));
+    const locked = isLocked(d);
+    this.lockBtn.replaceChildren(icon(locked ? "lockOpen" : "lock"));
+    this.lockBtn.classList.toggle("active", locked);
+    this.lockBtn.dataset.tip = locked ? "Unlock. Locks guard against accidents in this browser; the server does not enforce them" : "Lock. Guards against accidents in this browser: the chart will not move or delete it";
+    this.trashBtn.disabled = locked;
+    this.trashBtn.dataset.tip = locked ? "Unlock to delete" : "Delete (Del)";
+    const alertable = isLineType(d.type);
+    this.bellBtn.hidden = !alertable;
+    this.sepBtn.hidden = !alertable;
     // The bell shows whether the line has alerts, and whether any of them is active.
     const state = this.ctl.alertState(d.id);
     this.bellBtn.replaceChildren(icon(state === "active" ? "bellRing" : state === "inactive" ? "bellOff" : "bell"));
@@ -98,6 +132,26 @@ export class StyleToolbar {
   hide(): void {
     this.current = undefined;
     this.el.hidden = true;
+  }
+
+  private toggleExtend(): void {
+    if (this.current) this.set({ extend: !this.current.style.extend });
+  }
+
+  private openFill(): void {
+    const d = this.current;
+    if (!d) return;
+    const now = fillOf(d.type, d.style.fill);
+    showMenu(
+      this.fillBtn,
+      h(
+        "div",
+        {},
+        ...[0, 10, 20, 30, 50].map((pct) =>
+          menuItem({ label: pct === 0 ? "No fill" : `${pct}%`, selected: pct === now, onClick: () => this.set({ fill: pct }) }),
+        ),
+      ),
+    );
   }
 
   private set(style: Partial<DrawingStyle>): void {
@@ -129,6 +183,17 @@ export class StyleToolbar {
   private openWidth(): void {
     const d = this.current;
     if (!d) return;
+    if (d.type === "text") {
+      showMenu(
+        this.widthBtn,
+        h(
+          "div",
+          {},
+          ...[1, 2, 3, 4].map((w) => menuItem({ label: `${textSize(w)}px`, selected: w === d.style.width, onClick: () => this.set({ width: w }) })),
+        ),
+      );
+      return;
+    }
     showMenu(
       this.widthBtn,
       h(
@@ -159,10 +224,11 @@ export class StyleToolbar {
   openLabel(): void {
     const d = this.current;
     if (!d) return;
-    const input = h("input", { class: "input", maxlength: "100", placeholder: "Text shown on the line" });
+    const input = h("input", { class: "input", maxlength: "100", placeholder: d.type === "text" ? "Text" : "Text shown on the line" });
     input.value = d.label ?? "";
     const save = () => {
       const text = input.value.trim();
+      if (!text && d.type === "text") return; // a text keeps its words
       void this.ctl.update(d.id, text ? { label: text } : { clear_label: true });
       closeMenu();
     };

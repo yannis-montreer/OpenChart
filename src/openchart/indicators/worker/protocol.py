@@ -83,10 +83,33 @@ def frame_size(prefix: bytes) -> int:
     return size
 
 
-def read_frame(read_exact: Callable[[int], bytes]) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
-    """One frame, from a function that returns exactly n bytes or raises EOFError."""
+SKIP_CHUNK = 2**20  # bytes read at a time from an array that is skipped
+
+
+def read_frame(
+    read_exact: Callable[[int], bytes], max_count: int | Callable[[], int] | None = None
+) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
+    """One frame, from a function that returns exactly n bytes or raises EOFError.
+
+    With `max_count` (the job's bar count, S4; a function is asked only once the header has
+    arrived, since the reader waits for a frame before the job it answers is even sent), an
+    array listed with more values is read and dropped a megabyte at a time, never held: in
+    its place comes a stand-in with no values of its own (stride 0) but the length the
+    worker claimed, so the server's check
+    (`Indicator.check_wire`) refuses it with the usual message and the stream stays in step.
+    """
     header, listed = parse_header(read_exact(frame_size(read_exact(4))))
-    arrays = {name: np.frombuffer(read_exact(8 * n), dtype="<f8") for name, n in listed}
+    if callable(max_count):
+        max_count = max_count()
+    arrays: dict[str, np.ndarray] = {}
+    for name, n in listed:
+        if max_count is not None and n > max_count:
+            left = 8 * n
+            while left:
+                left -= len(read_exact(min(left, SKIP_CHUNK)))
+            arrays[name] = np.lib.stride_tricks.as_strided(np.zeros(1), shape=(n,), strides=(0,))
+        else:
+            arrays[name] = np.frombuffer(read_exact(8 * n), dtype="<f8")
     return header, arrays
 
 

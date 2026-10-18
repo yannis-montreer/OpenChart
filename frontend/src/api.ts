@@ -234,6 +234,14 @@ export interface DrawingStyle {
   color: string;
   width: number;
   dash: "solid" | "dashed" | "dotted";
+  /** Opacity in percent of the area of a rectangle or channel (absent: the tool's default). */
+  fill?: number;
+  /** Channel: rays to the right. Fibonacci: levels run to the edge of the chart. */
+  extend?: boolean;
+  /** The chart does not move or delete it (the list panel can unlock it). */
+  locked?: boolean;
+  /** Not drawn (the list panel shows it again). */
+  hidden?: boolean;
 }
 
 export interface Drawing {
@@ -641,9 +649,88 @@ export function definitionPath(id: string): string {
   return `api/custom-indicators/${encodeURIComponent(id)}`;
 }
 
+// Writing your own definitions (the CI-4 contract, docs/api.md "Your indicator definitions")
+
+export interface TemplateInfo {
+  id: string;
+  title: string;
+  description: string;
+}
+
+/** The answer of New, Import, Save, Rename, Duplicate and Restore: the catalog's entry plus what the write did. */
+export interface SavedDefinition extends CustomEntry {
+  version: string;
+  saved: boolean;
+  /** The source sent was the one already stored: no new history version. */
+  unchanged: boolean;
+  error: { type: string; message: string; line: number | null; traceback: string | null } | null;
+}
+
+export interface SourceInfo {
+  id: string;
+  file: string;
+  /** The first 12 hex digits of the source's SHA-256. */
+  version: string;
+  source: string;
+  bytes: number;
+  updated_at: number;
+}
+
+export interface VersionInfo {
+  /** The UTC time it was saved, `YYYYMMDDTHHMMSSZ` (`-2`, `-3` ... in the same second). */
+  version: string;
+  saved_at: number;
+  bytes: number;
+  digest: string;
+}
+
+export interface VersionSource {
+  id: string;
+  version: string;
+  source: string;
+  saved_at: number;
+}
+
+export interface PreviewQuery {
+  source: string;
+  id?: string;
+  instrument: string;
+  timeframe: string;
+  price?: Price;
+  params?: IndicatorParams;
+  from?: number;
+  to?: number;
+  limit?: number;
+}
+
+/** The values answer, plus the schema the unsaved source declares. */
+export interface PreviewValues extends IndicatorValues {
+  definition: IndicatorDef;
+  preview: true;
+}
+
 export const customApi = {
   usage: (id: string) => get<DefinitionUsage>(`${definitionPath(id)}/usage`),
   /** Without `confirm`, a definition in use answers 409 with where it is used. */
   remove: (id: string, confirm = false) =>
     request<DeletedDefinition>("DELETE", definitionPath(id), { params: { confirm: confirm ? "true" : undefined } }),
+  templates: () => get<TemplateInfo[]>("api/custom-indicators/templates"),
+  /** New: a copy of a template under `id`. 409 with `suggested` when the file exists. */
+  create: (body: { id: string; template: string; title?: string }) => request<SavedDefinition>("POST", "api/custom-indicators", { body }),
+  /** Import: the source as it is; without `id` the server makes one of `filename`. Never overwrites. */
+  importSource: (body: { source: string; id?: string; filename?: string }) => request<SavedDefinition>("POST", "api/custom-indicators", { body }),
+  source: (id: string) => get<SourceInfo>(`${definitionPath(id)}/source`),
+  /** Where Export downloads the file from (same origin, so the session cookie goes with it). */
+  exportPath: (id: string) => `${definitionPath(id)}/source?download=true`,
+  /** Save: never creates (404). With `base_version`, a file that changed since is a 409 and nothing is written. */
+  save: (id: string, body: { source: string; base_version?: string }) => request<SavedDefinition>("PUT", `${definitionPath(id)}/source`, { body }),
+  rename: (id: string, title: string) => request<SavedDefinition>("PATCH", definitionPath(id), { body: { title } }),
+  duplicate: (id: string, body: { id?: string; title?: string } = {}) => request<SavedDefinition>("POST", `${definitionPath(id)}/duplicate`, { body }),
+  versions: (id: string) => get<VersionInfo[]>(`${definitionPath(id)}/versions`),
+  version: (id: string, version: string) => get<VersionSource>(`${definitionPath(id)}/versions/${encodeURIComponent(version)}`),
+  /** A save of that version's text, so the current file goes into the history first. */
+  restore: (id: string, version: string, body: { base_version?: string } = {}) =>
+    request<SavedDefinition>("POST", `${definitionPath(id)}/versions/${encodeURIComponent(version)}/restore`, { body }),
+  /** Run: the unsaved source on a chart query; nothing is stored. */
+  preview: (body: PreviewQuery) => request<PreviewValues>("POST", "api/custom-indicators/preview", { body }),
 };

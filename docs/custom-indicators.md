@@ -8,7 +8,7 @@ isolated that is, and when you may edit it in the browser. The file format itsel
 [indicators.md](indicators.md); the design is in `custom-indicators-design.md`.
 
 Status: the worker and its isolation (CI-1), and the `ta` helpers, output kinds, drawing and
-checks (CI-2). Per-chart instances and the menu's sections come in CI-3, the editor in CI-4.
+checks (CI-2), and per-chart indicator lists kept on the server with the menu's Built-in and Your files sections (CI-3). The editor in the browser comes in CI-4.
 
 ## Where to start
 

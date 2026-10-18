@@ -6,13 +6,16 @@ import math
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, StrictBool, StrictInt, field_validator
 
+from openchart.drawing_rules import shape_error
 from openchart.market.sessions import trading_clock
 from openchart.server import Server
-from openchart.store.drawings import TYPES, Drawing, DrawingStore
+from openchart.store.drawings import Drawing, DrawingStore
 
-DrawingType = Literal["hline", "trendline", "ray", "extended"]
+DrawingType = Literal[
+    "hline", "trendline", "ray", "extended", "vline", "text", "rect", "fib", "measure", "channel"
+]
 
 
 class Point(BaseModel):
@@ -31,6 +34,10 @@ class Style(BaseModel):
     color: str | None = Field(None, pattern=r"^#[0-9a-fA-F]{6}$")
     width: int | None = Field(None, ge=1, le=4)
     dash: Literal["solid", "dashed", "dotted"] | None = None
+    fill: StrictInt | None = Field(None, ge=0, le=100)  # opacity %, rect and channel
+    extend: StrictBool | None = None  # channel: rays to the right; fib: levels to the edge
+    locked: StrictBool | None = None  # the chart will not move or delete it (the API still can)
+    hidden: StrictBool | None = None  # not drawn
 
     def values(self) -> dict[str, Any]:
         return self.model_dump(exclude_none=True)
@@ -51,17 +58,14 @@ class DrawingUpdate(BaseModel):
     clear_label: bool = False
 
 
-def check_points(type_: str, points: list[Point], clock=None) -> list[dict[str, float]]:
-    need = TYPES[type_]
-    if len(points) != need:
-        raise HTTPException(400, f"a {type_} needs {need} point{'s' if need > 1 else ''}")
-    if need == 2:
-        same = points[0].t == points[1].t or (
-            clock is not None and clock(points[0].t) == clock(points[1].t)
-        )
-        if same:
-            raise HTTPException(400, "the two points need trading time between them")
-    return [{"t": pt.t, "p": pt.p} for pt in points]
+def check_shape(
+    type_: str, points: list[Point], clock=None, label: str | None = None
+) -> list[dict[str, float]]:
+    pts = [{"t": pt.t, "p": pt.p} for pt in points]
+    error = shape_error(type_, pts, clock, label)
+    if error:
+        raise HTTPException(400, error)
+    return pts
 
 
 def drawing_routes(server: Server) -> APIRouter:
@@ -87,7 +91,7 @@ def drawing_routes(server: Server) -> APIRouter:
         if row is None:
             raise HTTPException(404, f"unknown instrument {body.instrument!r}")
         closures = await server.store.closures(server.source, body.instrument)
-        points = check_points(body.type, body.points, trading_clock(row.hours, closures))
+        points = check_shape(body.type, body.points, trading_clock(row.hours, closures), body.label)
         drawing = await store().create(
             body.instrument, body.type, points, body.style.values(), body.label
         )
@@ -99,11 +103,20 @@ def drawing_routes(server: Server) -> APIRouter:
         if current is None:
             raise HTTPException(404, "no such drawing")
         points = None
-        if body.points is not None:
+        label = current.label if body.label is None else body.label
+        if body.clear_label:
+            label = None
+        # A label-only change is checked only where the label is part of the shape: the
+        # stored anchors may have lost their trading time to a closure learned since.
+        text_changed = current.type == "text" and (body.clear_label or body.label is not None)
+        if body.points is not None or text_changed:
             row = await server.store.instrument(server.source, current.instrument)
             closures = await server.store.closures(server.source, current.instrument)
             clock = trading_clock(row.hours, closures) if row else None
-            points = check_points(current.type, body.points, clock)
+            if body.points is not None:
+                points = check_shape(current.type, body.points, clock, label)
+            else:
+                check_shape(current.type, [Point(**p) for p in current.points], clock, label)
         drawing = await store().update(
             drawing_id,
             points=points,

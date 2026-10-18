@@ -820,18 +820,6 @@ the old key goes once every enabled chart has a list, and a toast says the old l
   cannot be drawn; the picker keeps saying so. A toast appears for every change another browser makes
   (4 seconds); it is cheap to remove if it is too much.
 
-## CI-4: the API contract, before the code (2026-10-17)
-
-`docs/api.md`, "Your indicator definitions": the write endpoints of design section 4, written first so the editor (Session A) can be built against them. Choices made here, for review:
-
-- **Templates:** `blank` plus the four tested examples of docs/custom-indicators.md, shipped in the package; New takes a template id and an optional title.
-- **Import never overwrites:** an existing id is a `409` with a `suggested` free id; without an id it is made from the file name.
-- **Save never creates** (`404`; New and Import create), keeps the last 10 versions in `.history/<id>/`, and takes an optional `base_version` so two tabs (or the editor and a text editor) cannot overwrite each other silently: `409` with the stored version.
-- **Restore is a save** (undoable); Rename edits the single `TITLE = "..."` line or answers `409` "edit TITLE in the code" (design 1.1).
-- **Preview stores and counts nothing:** no file, no history, no quarantine count, no save-time checks; same query and bars as the values route.
-- **Sources:** 256 KB as UTF-8, NUL and lone surrogates refused, a leading BOM dropped, line endings kept; writes atomic (temporary file and rename) and serialized per id; plain files only, never through a link.
-- **`indicators_changed`** gains `{id, op}` (compatible: pages that ignore the fields still refetch).
-
 ## Hardening after the security review (2026-10-17)
 
 The owner approved the plan in `docs/security-review-custom-indicators.md` ("After the review"): S1, S2, S3, S5, Session A's findings 1 to 3 of CI-2 (b)-(d), the non-atomic delete and the empty import are fixed; S4, S6, S7, S8, S9 and the change stamp are documented. Tests first: 27 failed against main before the code (each on its own assertion); three passed already and the mutation check shows they bite (the database-failure delete, which today's order happened to survive, and two guards: no rerun for a few more bars, times in range still accepted).
@@ -845,3 +833,67 @@ The owner approved the plan in `docs/security-review-custom-indicators.md` ("Aft
 - **The Settings dialog** showing the editing state and reason read-only is left to the frontend session (Session A): the catalog's `editing` already carries `{allowed, setting, reason}` with the command to run.
 - **Mutation check** (`tools/mutate_hardening.py`, 27 mutants: the gate's three rules, the deep header caught, the reader's bad-frame end, the quarantine rule in four ways, the worker kept after a bad frame, the whole-number and overflow checks, each of the six bounds, both id patterns, the rerun rule in four ways, the delete's three undo paths, the empty import): **25 killed, 2 equivalent**: the built-in registry's pattern (only files shipped in the package reach it, and no name there can hold a newline on Windows) and a rerun while the short check is still pending (a request answered meanwhile has its own result). Some kills are reported by the runner under a log line that starts with `ERROR` instead of the test's name; the verdict is the exit code, so they are kills.
 - **Found later, in the full run of the stacked CI-5 branch (test first, red on Windows every time):** on Windows a file another thread or process has open cannot be renamed (WinError 32, Python opens files without `FILE_SHARE_DELETE`), so a catalog read of `<id>.py` at the moment of a delete made the delete a spurious 409 "could not move the file". The delete's moves now go through `files.move`, which retries for up to a second while Windows reports the file in use (and fails at once for anything else, and on Linux and macOS), in a thread so the event loop does not wait. CI-4's saves use the same helper.
+
+
+## CI-4: the API contract, before the code (2026-10-17)
+
+`docs/api.md`, "Your indicator definitions": the write endpoints of design section 4, written first so the editor (Session A) can be built against them. Choices made here, for review:
+
+- **Templates:** `blank` plus the four tested examples of docs/custom-indicators.md, shipped in the package; New takes a template id and an optional title.
+- **Import never overwrites:** an existing id is a `409` with a `suggested` free id; without an id it is made from the file name.
+- **Save never creates** (`404`; New and Import create), keeps the last 10 versions in `.history/<id>/`, and takes an optional `base_version` so two tabs (or the editor and a text editor) cannot overwrite each other silently: `409` with the stored version.
+- **Restore is a save** (undoable); Rename edits the single `TITLE = "..."` line or answers `409` "edit TITLE in the code" (design 1.1).
+- **Preview stores and counts nothing:** no file, no history, no quarantine count, no save-time checks; same query and bars as the values route.
+- **Sources:** 256 KB as UTF-8, NUL and lone surrogates refused, a leading BOM dropped, line endings kept; writes atomic (temporary file and rename) and serialized per id; plain files only, never through a link.
+- **`indicators_changed`** gains `{id, op}` (compatible: pages that ignore the fields still refetch).
+
+## CI-4 backend: the editor's endpoints (2026-10-17)
+
+The contract of #37, implemented (`api/routes_definitions.py`, `indicators/_files.py`, `indicators/templates/`). Built on the hardening branch (#40), not on main: request ids need its `protocol` failure kind, and the two would otherwise have duplicated and conflicted in `runner.py`; the PR says "depends on #40" and also carries #37's docs. Tests first (`tests/test_definitions_api.py`, `tests/test_request_ids.py`): 102 failed before the code.
+
+- **Hostile-input pass**, each a test: ids with `..`, `/`, `\`, capitals, a trailing newline or space, a leading digit or `_`, `.py`, 41 characters, empty, and **Windows device names** (`con`, `nul`, `com1` ...: refused everywhere, since on Windows `con.py` is the console; found by this pass, not in the contract); versions with `..`; 256 KB exactly (taken) and one byte more, also 256 K characters that are more bytes as UTF-8 (413); NUL, a lone surrogate (400); a BOM (dropped) and CRLF (kept); a folder named `x.py`, a symbolic link (Linux CI; this PC needs a privilege), **a hard link** (no privilege needed on NTFS: refused, found by this pass), a `.history` junction and a `.history` file (409, nothing written); a hand-written Latin-1 file (409, not rewritten); a failed rename (the old file stays, no temporary file, no history version); 8 concurrent saves (whole files, 8 distinct versions), 4 concurrent saves from one base (one through), 4 concurrent News of one id (one created); nothing written outside the folder.
+- **New never overwrites,** also against a writer outside the server: the file is published with a rename that fails when the name exists (`os.rename` on Windows, `os.link` then unlink on POSIX), not `os.replace`.
+- **A failed save leaves no version:** the current file is kept in the history first; if the rename then fails, that version is removed again.
+- **Preview** goes to the runner directly (describe, warmup, compute, the server's own check of the answer), never through `CustomIndicators`: nothing is stored or counted. It shares the values route's bar reading and answer shaping (`read_bars`, `shape`), so its bars are the chart's.
+- **After every write the catalog reads the file again** (`CustomIndicators.forget`), whatever its time and size say: this closes Session A's finding 4 (same-size edits) for saves made in the editor.
+- **Request ids (S6):** see the security review's CI-4 section. Answers carry `rid`; probes and arming too.
+- **The delete's broadcast** carries `{id, op: "delete"}` like the others.
+- **Not done here:** an `API_VERSION` bump (it is 2 since #38, Session A's server-side lists; the frontend session decides when its editor needs another), the Settings display of the gate (frontend).
+- **Review of this change (finding 1, test first):** a delete did not wait for a save of the same file, so a save paused between keeping its history version and writing the file wrote it again after the delete had moved it (the test held the save there and showed the file back). Every write of `<id>.py`, the delete included, now holds the file's own lock (`CustomIndicators.file_lock`); the delete takes the charts' lock first, the editor's endpoints only the file lock, so no two locks are ever taken in the other order.
+- **Mutation check** (`tools/mutate_definitions.py`, 36 mutants: ids and device names, the import's id, BOM, NUL, size in bytes, links, junctions, hard links, plain files, the history folder, New never overwriting, `base_version`, the history kept, ten versions, the atomic write, a failed save's version, version order, the TITLE rules, `(copy)`, the gate on four kinds of routes, serialized saves, Preview's check of the answer, request ids three ways): **34 killed, 2 equivalent** (the history-inside check, which a link check before it already covers; and reading the file again after a write, which NTFS's changed time already forces). Two mutants needed repair first: "BOM kept" left an indentation error (it was "killed by an error", which proves nothing) and "New overwrites" no longer matched the reformatted code; both then killed by their tests.
+
+## CI-4 frontend: the editor (2026-10-17, draft, depends on #37)
+
+Plan: `docs/ci4-frontend-plan.md` (#39). Built against the contract's text with a mock server (`frontend/src/editor/mockServer.ts`, written from `docs/api.md`, not from the client); **not yet run against Session B's backend**, which was not on GitHub.
+
+- **CodeMirror 6** (Python mode) is in as exact-pinned MIT dependencies, its own chunk (368 KB, 124 KB gzip), fetched on the first Edit, New or Import and never at page start. If the chunk does not load, a plain `<textarea>` with the same Save and Run is used and the status line says so. `packaging/third_party_licenses.py` lists its packages, and a test fails when a runtime package of the page is missing from that list.
+- **The server's file is the truth.** The editor opens on it; a draft in `localStorage` (per id, with the version it started from) is offered only while the stored version is that one, then "Restore draft" or "Discard". Closing or leaving with unsaved text asks first.
+- **Saves carry `base_version`.** A file changed elsewhere is a conflict the user settles ("Reload it" or "Keep mine and save", which sends no `base_version`; the replaced text goes into the history). A deleted file keeps the buffer and offers "Save as <id>.py" through Import, which never overwrites.
+- **Run** draws a dashed "Preview:" instance that is never on the chart's list, never saved to a layout, not refreshed live; it is fetched again with the text that was run when the chart's bars change. Only the newest Run counts; an older answer or error that arrives late is dropped. The first Run asks twice (the first answer gives the schema).
+- **Everything the server or the code says** (titles, messages, tracebacks) is set as text only. The only links are "line N" buttons that move the cursor, and only for lines that exist.
+- **Limits checked before any request:** ids `[a-z][a-z0-9_]{0,39}`, 256 KB as UTF-8 bytes, NUL and lone surrogates, titles of 1 to 60 characters on one line, imports only `.py` files.
+- **Editing off:** the picker and panel show the server's reason once; New, Import, Edit, Rename, Duplicate and Export are locked (focusable, with the reason as tooltip); the panel is read-only. A 403 after the page thought editing was on turns it off the same way.
+- **Docking:** on a desktop the panel takes the watchlist's column while open; on a phone it fills the screen, with a button that folds it to a bar so the preview can be seen.
+- **After a save**, `indicators_changed {id, op}` re-reads the catalog, tells the open editor, and `ChartSync.refreshStatuses` re-reads the chart's list: a file that now fails (or loads again) shows at the same revision (the follow-up noted in #38).
+- **Checked:** unit tests (rules, errors, drafts, forms, the session against the mock, picker actions, API client against the mock, `refreshStatuses`); a mutation check of those modules (67 mutants of the rules, errors, drafts, forms, session, picker model, preview plan, API paths and `refreshStatuses`: 64 killed at first, the 3 that survived got tests and are killed); a browser pass on a scratch server with the fake broker, both themes (31 of 31 checks each), a phone width and the text-box fallback. Not done: a run against Session B's real backend, and the unit-less parts of the panel's DOM (covered by the browser pass only).
+- **For Session B:** (1) a chart save that still holds an instance whose definition is gone is a 400 in CI-3; saving should tolerate it (keep it with status `missing`) or drop it and say which; (2) every page of a preview sends the whole source again; a source id in the request would avoid that; (3) CI-3's delete broadcasts `indicators_changed` without `id`, which the editor handles by re-reading its file.
+
+## CI-5 backend: the values cache, the forming bar, the read cap (2026-10-17)
+
+Design 3.8. Built on the CI-4 branch (it changes the values route CI-4 reshaped); the PR says which it depends on. Tests first (`tests/test_values_cache.py`): 12 failed before the code; 3 passed as guards (a code change, rewritten bars and a failure must not be answered from a cache).
+
+- **The key leaves nothing out that values depend on, and needs no clearing:** kind, id, version (a custom file's hash), the inputs **without the Style tab's** (colour and width), `info`, the number of bars asked for, and a SHA-1 of the bars computed on (warmup included). A code change, or a repair or refill rewriting bars, is a new key; an old entry is never asked for again and leaves by the size bound (about 100 MB of values, least recently used first). **Decided here:** style inputs are left out on the assumption that a script draws with them and does not compute with them; a script that computes with a colour would be answered with values computed for another colour. Documented in docs/api.md.
+- **One computation for every tab:** a request whose key is being computed waits for that computation (tested with four requests held by the fake worker's gate: one job).
+- **The forming bar:** a window that ends on the forming bar (`/api/candles`' `forming` flag) is computed at most once a second per window (same first and last bar, same inputs) and answered in between with the last result, so the newest tick can be up to a second late there; a new bar is a new window and is computed at once. This is the design's "once a second at most, shared by every tab"; the browser's two-bar refresh already sends only `warmup + 2` bars.
+- **S4:** see the security review's CI-5 section.
+- **Measured** (`tools/measure_values.py`, real worker with the restricted token on this PC, 30 days of synthetic minutes, 5m bars, 20 runs per script for SMA cross, RSI with bands and the Bollinger fill, through the test client, the machine otherwise idle):
+
+  | Measure | Target | Measured | |
+  |---|---|---|---|
+  | compute in the worker (the exchange), median | 20 ms | 5.7 ms (max 55) | met |
+  | worker start | 2 s | 1.4 s (2.4 s with the machine busy) | met when idle |
+  | request, 5,000 bars, p95 | 60 ms | 233 ms (247 ms from the cache) | **missed** |
+  | forming-bar tail, median | 15 ms | 44 ms | **missed** |
+  | worker memory, peak | 80-120 MB idle | 56 MB peak | below |
+
+  **The two misses are the bars, not the indicator:** `/api/candles` alone takes 107 ms (p95) for the same 5,000 5m bars and 14.5 ms for 2, and a request answered from the values cache costs as much as one computed (a profile shows the time in reading and aggregating 25,000 minutes into 5,000 bars, and in the test client's thread hops). Caching values cannot reach these targets; caching the recent bars of minute-based timeframes (as the 4h/D/W cache does for complete bars) is the next step, not done here. The test client adds overhead a real browser request through uvicorn does not have; not measured separately.

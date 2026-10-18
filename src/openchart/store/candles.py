@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import AsyncIterator, Callable, Iterable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
 import aiosqlite
@@ -81,16 +82,45 @@ class InstrumentRow:
     hours: TradingHours | None
 
 
+WriteListener = Callable[[str, str, int | None, int], None]
+
+
 class CandleStore:
     def __init__(self, conn: aiosqlite.Connection):
         self.conn = conn
-        # Bumped on every M1/H1 write, before it is queued. The cache compares it to
-        # detect that the data it was computing from changed underneath it.
+        # The version of a series' candles: bumped on every M1/H1 write before it is queued
+        # and again once it is committed (or failed), by `_writing`. The 4h/D/W cache and
+        # the bar cache compare it to detect that data they read changed underneath them.
         self._epoch: dict[tuple[str, str], int] = defaultdict(int)
         self._series: dict[tuple[str, str], Series] = {}
+        self._listeners: list[WriteListener] = []
 
     def epoch(self, source: str, instrument: str) -> int:
         return self._epoch[(source, instrument)]
+
+    def on_write(self, listener: WriteListener) -> None:
+        """Call `listener(source, instrument, oldest, epoch)` on every bump: `oldest` is the
+        oldest time the write touches (None: any, e.g. a purge), `epoch` the new value."""
+        self._listeners.append(listener)
+
+    def _bump(self, source: str, instrument: str, oldest: int | None) -> None:
+        key = (source, instrument)
+        self._epoch[key] += 1
+        for listener in self._listeners:
+            listener(source, instrument, oldest, self._epoch[key])
+
+    @asynccontextmanager
+    async def _writing(
+        self, source: str, instrument: str, oldest: int | None
+    ) -> AsyncIterator[None]:
+        """Every write of candle rows runs inside this: the epoch moves before the first
+        statement is queued (a read under way will not be kept) and after the commit or
+        failure (a read that saw the rows half written will not be kept either)."""
+        self._bump(source, instrument, oldest)
+        try:
+            yield
+        finally:
+            self._bump(source, instrument, oldest)
 
     # Series (one per source and instrument)
 
@@ -150,11 +180,11 @@ class CandleStore:
                 inexact += 1
             rows.append((series.id, c.ts, *ints, c.volume))
         self._check_exact(source, instrument, scale, inexact)
-        self._epoch[(source, instrument)] += 1
-        await self.conn.executemany(_upsert_sql(TABLES[granularity]), rows)
         stamps = [r[1] for r in rows]
-        await self._invalidate_cache(source, instrument, min(stamps), max(stamps))
-        await self.conn.commit()
+        async with self._writing(source, instrument, min(stamps)):
+            await self.conn.executemany(_upsert_sql(TABLES[granularity]), rows)
+            await self._invalidate_cache(source, instrument, min(stamps), max(stamps))
+            await self.conn.commit()
         return len(rows)
 
     async def upsert_m1(self, source: str, instrument: str, candles: Iterable[Candle]) -> int:
@@ -599,20 +629,20 @@ class CandleStore:
         closures). Rows deleted per table."""
         counts: dict[str, int] = {}
         series = await self.series(source, instrument)
-        for table in ("candles_m1", "candles_h1", "candles_cache"):
-            if series is None:
-                counts[table] = 0
-                continue
-            cur = await self.conn.execute(f"DELETE FROM {table} WHERE series=?", (series.id,))
-            counts[table] = cur.rowcount
-        for table in ("series", "cache_dirty", "closures", "instruments"):
-            cur = await self.conn.execute(
-                f"DELETE FROM {table} WHERE source=? AND instrument=?", (source, instrument)
-            )
-            counts[table] = cur.rowcount
-        await self.conn.commit()
-        self._series.pop((source, instrument), None)
-        self._epoch[(source, instrument)] += 1
+        async with self._writing(source, instrument, None):
+            for table in ("candles_m1", "candles_h1", "candles_cache"):
+                if series is None:
+                    counts[table] = 0
+                    continue
+                cur = await self.conn.execute(f"DELETE FROM {table} WHERE series=?", (series.id,))
+                counts[table] = cur.rowcount
+            for table in ("series", "cache_dirty", "closures", "instruments"):
+                cur = await self.conn.execute(
+                    f"DELETE FROM {table} WHERE source=? AND instrument=?", (source, instrument)
+                )
+                counts[table] = cur.rowcount
+            await self.conn.commit()
+            self._series.pop((source, instrument), None)
         return counts
 
     async def instrument(self, source: str, instrument: str) -> InstrumentRow | None:

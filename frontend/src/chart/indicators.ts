@@ -70,6 +70,7 @@ import {
 import { BackgroundPrimitive, FillPrimitive } from "./indicatorPrimitives";
 import { warmupNotice } from "./notice";
 import { reconcileParams } from "./params";
+import { dashPlans, previewLabel } from "./previewPlan";
 import { nextRefresh, versionChanged } from "./refresh";
 import type { ChartView } from "./view";
 
@@ -133,7 +134,22 @@ interface Active {
   lastTry: number;
   /** Set while a full load is under way, so a refresh does not start another over it. */
   loading?: object;
+  /** The preview of a Run: drawn dashed, never in the chart's list, never saved, never refreshed live. */
+  preview?: boolean;
+  /** Where a preview gets its values (the unsaved source, sent again for each page). */
+  fetchPage?: PreviewFetch;
 }
+
+/** Values of the unsaved source for a page of the chart's bars. */
+export type PreviewFetch = (q: {
+  instrument: string;
+  timeframe: string;
+  price: "mid" | "bid" | "ask";
+  params: IndicatorParams;
+  from: number;
+  to: number;
+  limit: number;
+}) => Promise<IndicatorValues>;
 
 const NO_FILL = { time: [], upper: new Float64Array(0), lower: new Float64Array(0) };
 
@@ -166,7 +182,7 @@ export class IndicatorLayer {
 
   /** The list as it is, every instance. */
   entries(): IndicatorEntry[] {
-    return this.active.map((a) => structuredClone(a.entry));
+    return this.active.filter((a) => !a.preview).map((a) => structuredClone(a.entry));
   }
 
   /**
@@ -175,12 +191,12 @@ export class IndicatorLayer {
    * cannot run is kept: the server keeps its values as given.
    */
   entriesToSave(): IndicatorEntry[] {
-    return this.active.filter((a) => !a.gone).map((a) => structuredClone(a.entry));
+    return this.active.filter((a) => !a.gone && !a.preview).map((a) => structuredClone(a.entry));
   }
 
   /** The ids `entriesToSave` leaves out. */
   missingIds(): string[] {
-    return this.active.filter((a) => a.gone).map((a) => a.entry.id);
+    return this.active.filter((a) => a.gone && !a.preview).map((a) => a.entry.id);
   }
 
   /** Replace every indicator with these. Values are fetched now, or with `reload` false when the chart is about to load anyway. */
@@ -197,7 +213,9 @@ export class IndicatorLayer {
    * (nothing is dropped: the next save writes the list back whole).
    */
   setInstances(list: Instance[], reload = true): void {
-    for (const a of [...this.active]) this.dispose(a);
+    // A preview is not part of the list: it stays while the list is replaced.
+    const kept = this.active.filter((a) => a.preview);
+    for (const a of this.active.filter((x) => !x.preview)) this.dispose(a);
     this.active = [];
     for (const { entry, state, reset } of list) {
       const def = this.catalog.get(entry.id);
@@ -206,8 +224,41 @@ export class IndicatorLayer {
       if (!def || ghost) this.create(stub(entry), structuredClone(entry), { ghost: ghost ?? "missing", reset, gone: state === "missing" });
       else this.create(def, { ...newEntry(def), ...entry, params: reconcileParams(def, entry.params) }, { ghost: null, reset, gone: false });
     }
+    this.active.push(...kept); // after the list's own, so the panes stay in the list's order
     this.layoutPanes();
     if (reload) this.reloadAll();
+  }
+
+  // The preview of a Run (CI-4)
+
+  /**
+   * Draw the unsaved source as a dashed "preview" instance, replacing the last one. `def` is the
+   * schema the source declares; `fetchPage` asks the server for its values on the chart's bars
+   * (again after a change of timeframe, instrument or price). Nothing is saved and `onChange`
+   * is not called: a preview is never on the chart's list.
+   */
+  setPreview(def: IndicatorDef, fetchPage: PreviewFetch): void {
+    // A Run again keeps the inputs you set on the preview's legend row (those the new code still has).
+    const before = this.active.find((x) => x.preview)?.entry.params;
+    this.clearPreview();
+    const entry = { ...newEntry(def), uid: "preview", kind: "custom" as const };
+    if (before) entry.params = reconcileParams(def, before);
+    const a = this.create(def, entry, { ghost: null, reset: [], gone: false, preview: true });
+    a.fetchPage = fetchPage;
+    this.layoutPanes();
+    void this.load(a);
+  }
+
+  clearPreview(): void {
+    const a = this.active.find((x) => x.preview);
+    if (!a) return;
+    this.dispose(a);
+    this.active = this.active.filter((x) => x !== a);
+    this.layoutPanes();
+  }
+
+  hasPreview(): boolean {
+    return this.active.some((a) => a.preview);
   }
 
   /** The list was saved: what had been reset is stored now. */
@@ -233,7 +284,7 @@ export class IndicatorLayer {
     this.dispose(a);
     this.active = this.active.filter((x) => x !== a);
     this.layoutPanes();
-    this.onChange();
+    if (!a.preview) this.onChange();
   }
 
   /**
@@ -266,7 +317,7 @@ export class IndicatorLayer {
     this.style(a);
     this.renderRow(a);
     if (refetch) void this.load(a);
-    if (save) this.onChange();
+    if (save && !a.preview) this.onChange();
   }
 
   /** Show the values of the bar at server time `t` in the legend (undefined: the last bar). */
@@ -280,7 +331,7 @@ export class IndicatorLayer {
   private create(
     def: IndicatorDef,
     entry: IndicatorEntry,
-    note: { ghost: GhostState | null; reset: string[]; gone: boolean } = { ghost: null, reset: [], gone: false },
+    note: { ghost: GhostState | null; reset: string[]; gone: boolean; preview?: boolean } = { ghost: null, reset: [], gone: false },
   ): Active {
     const a: Active = {
       uid: this.nextUid++,
@@ -301,10 +352,11 @@ export class IndicatorLayer {
       gone: note.gone,
       reset: note.reset,
       lastTry: 0,
+      preview: note.preview,
     };
     const chart = this.view.chart;
     const pane = def.overlay ? 0 : 1 + this.active.filter((x) => !x.def.overlay).length;
-    for (const plan of seriesPlan(def, entry)) {
+    for (const plan of this.plans(a)) {
       const kind = plan.kind === "histogram" ? HistogramSeries : plan.kind === "area" ? AreaSeries : LineSeries;
       a.series.set(plan.name, chart.addSeries(kind, plan.create as never, pane));
       a.values.set(plan.name, new Map());
@@ -396,10 +448,16 @@ export class IndicatorLayer {
 
   /** Colours, widths, styles and visibility from the entry, for every output kind. */
   private style(a: Active): void {
-    for (const plan of seriesPlan(a.def, a.entry)) a.series.get(plan.name)!.applyOptions(plan.options as never);
+    for (const plan of this.plans(a)) a.series.get(plan.name)!.applyOptions(plan.options as never);
     this.paintMarkers(a);
     this.paintLevels(a);
     this.paintBands(a, false);
+  }
+
+  /** What each value series is made of: a preview's are dashed. */
+  private plans(a: Active) {
+    const plans = seriesPlan(a.def, a.entry);
+    return a.preview ? dashPlans(plans) : plans;
   }
 
   private find(uid: number): Active | undefined {
@@ -511,6 +569,12 @@ export class IndicatorLayer {
     return { instrument: ctx.instrument.instrument, timeframe: ctx.timeframe.name, price: ctx.price, params: a.entry.params };
   }
 
+  /** A page of values: from the server's definition, or for a preview from the unsaved source. */
+  private fetchValues(a: Active, q: NonNullable<ReturnType<IndicatorLayer["query"]>>, from: number, to: number): Promise<IndicatorValues> {
+    if (a.fetchPage) return a.fetchPage({ ...q, from, to, limit: PAGE });
+    return indicatorsApi.values(a.def.id, { ...q, from, to, limit: PAGE });
+  }
+
   /** Nothing to draw: no data in any series, no hits, no levels. */
   private clear(a: Active): void {
     for (const s of this.allSeries(a)) s.setData([]);
@@ -551,7 +615,7 @@ export class IndicatorLayer {
     try {
       let from = span.first;
       for (;;) {
-        const page = await indicatorsApi.values(a.def.id, { ...q, from, to: span.last + 1, limit: PAGE });
+        const page = await this.fetchValues(a, q, from, span.last + 1);
         if (gen !== a.generation) return;
         for (const [name, values] of Object.entries(page.values)) {
           const m = got.get(name);
@@ -590,7 +654,7 @@ export class IndicatorLayer {
    * every few seconds.
    */
   private async loadTail(a: Active): Promise<void> {
-    if (a.ghost) return;
+    if (a.ghost || a.preview) return; // a preview is a snapshot: it is drawn again by Run, or when the chart's bars change
     const span = this.view.span();
     const q = this.query(a);
     if (!span || !q || a.loading) return;
@@ -664,7 +728,7 @@ export class IndicatorLayer {
 
   private renderRow(a: Active): void {
     if (a.ghost) return this.renderGhost(a);
-    const label = indicatorLabel(a.def, a.entry.params);
+    const label = a.preview ? previewLabel(indicatorLabel(a.def, a.entry.params)) : indicatorLabel(a.def, a.entry.params);
     const eye = button({
       icon: a.entry.visible ? "eye" : "eyeOff",
       title: a.entry.visible ? "Hide" : "Show",
@@ -699,7 +763,7 @@ export class IndicatorLayer {
         return el;
       }),
     );
-    a.row.className = `legend-row${a.entry.visible ? "" : " off"}${a.error ? " error" : ""}`;
+    a.row.className = `legend-row${a.entry.visible ? "" : " off"}${a.error ? " error" : ""}${a.preview ? " preview" : ""}`;
     a.row.replaceChildren(
       h("span", { class: "legend-row-name", "data-tip": a.def.title }, label),
       values,
