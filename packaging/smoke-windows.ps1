@@ -15,7 +15,7 @@
     checked by tools\ci\service-reinstall-test.ps1 and the D7 (a) tests.
 
 .EXAMPLE
-    .\packaging\smoke-windows.ps1 -ServerDir dist\OpenChart-Server-0.1.0-windows
+    .\packaging\smoke-windows.ps1 -ServerDir dist\OpenChart-Server-0.2.0-windows
 #>
 param(
     [Parameter(Mandatory)] [string]$ServerDir,

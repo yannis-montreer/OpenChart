@@ -2,7 +2,7 @@
 
 Self-hosted charting and alerting server for forex and metals. It runs 24/7 on your own PC, pulls prices from your own broker account, and pushes alerts on drawn lines (including sloped trendlines) to your phone, even when no chart is open.
 
-> **Status:** version 0.1.0, a pre-release: usable for charting and alerts with an OANDA account (gold, currency pairs and other OANDA instruments); still young. See [What works](#what-works).
+> **Status:** version 0.2.0, a pre-release: usable for charting and alerts with an OANDA account (gold, currency pairs and other OANDA instruments); still young. See [What works](#what-works).
 
 ![OpenChart: gold, 1 hour, an EMA and a trendline with an alert](docs/images/chart.png)
 
@@ -45,7 +45,9 @@ In `C:\OpenChart`, double-click **`install-service.cmd`** and accept the adminis
 - opens port 8000 in the Windows Firewall for Tailscale addresses only (`100.64.0.0/10`),
 - warns if the PC is set to sleep, and shows the two `powercfg` commands that stop it (a sleeping PC sends no alerts; they arrive late when it wakes).
 
-It ends with "Running" and the addresses to use. To change the port or the data folder, run `install-service.ps1 -Port 8080 -DataDir D:\OpenChart` instead (`Get-Help .\install-service.ps1 -Full` lists the options).
+It also sets up the indicator sandbox. It ends with "Running" and the addresses to use. To change the port or the data folder, run `install-service.ps1 -Port 8080 -DataDir D:\OpenChart` instead (`Get-Help .\install-service.ps1 -Full` lists the options).
+
+**Writing your own indicators:** the editor in the browser needs this service install (or Docker compose), because only they can isolate your code from your tokens and data. It is off until you switch it on, on this PC: `C:\OpenChart\openchart\openchart.exe settings set indicator-editing on --data-dir C:\ProgramData\OpenChart\data`. A source install runs custom indicator files in a weaker mode and keeps the editor off by design; the setting cannot change that. Details: [`docs/custom-indicators.md`](docs/custom-indicators.md).
 
 ### 4. Set up OpenChart (2 minutes)
 
@@ -180,6 +182,11 @@ NSSM 2.24 is at https://nssm.cc/download (or `winget install NSSM.NSSM`). Stop a
 | M7 Indicators, chart types, layouts | done (the first set of built-in indicators came later, #47) |
 | M8 Packaging and deployment | done |
 | M9 Second instrument (EURUSD) | done |
+| Custom indicators: isolated worker, `ta` library, output kinds, per-chart lists, browser editor | done (0.2.0) |
+| Built-in indicators: SMA, RSI, MACD, Bollinger, ATR, Stochastic, tick volume | done (0.2.0) |
+| More drawing tools: vertical line, rectangle, channel, Fibonacci, text, measure | done (0.2.0) |
+| Storage: tick and minute retention, purge, bar cache | done (0.2.0) |
+| 5-second candles, bar replay, indicator alerts | not started |
 
 ## Development setup
 
