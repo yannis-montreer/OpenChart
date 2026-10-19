@@ -27,3 +27,10 @@ minutes. So it is a rare, non-deterministic hang, not a slow runner.
   before it, a hang within the first 50.
 - **Next:** find why the discard callback did not remove the finished task (a test-only
   concern until the dispatcher's tasks matter elsewhere).
+- **A second, unrelated flake (CI of this PR, Windows 3.13):** `test_retention.py::test_the_server_purges_at_start_and_logs_each_deletion`
+  failed once with `assert 2 == 1`. The seeded minutes are dense up to the limit, the start-up
+  run and the test's `run_retention(time.time())` are seconds apart, and a minute boundary between
+  them makes the second run delete one more minute and log it. The second call now uses the time
+  taken before the server started (never later than the first run's), so nothing is left to
+  delete by construction. Other tests that call `run_retention` with `time.time()` after a
+  start-up run could race the same way; none has failed so far.
