@@ -15,5 +15,7 @@ def test_the_suite_runs_with_a_timeout(pytestconfig):
 
 def test_pytest_timeout_is_a_dev_dependency():
     pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
-    dev = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["optional-dependencies"]["dev"]
+    dev = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["optional-dependencies"][
+        "dev"
+    ]
     assert any(d.startswith("pytest-timeout") for d in dev)
