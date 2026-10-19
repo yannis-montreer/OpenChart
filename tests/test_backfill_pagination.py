@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 from openchart.config import OandaConfig
+from openchart.market import backfill as backfill_module
 from openchart.market.backfill import backfill
 from openchart.providers.oanda import MAX_CANDLES_PER_REQUEST, OandaProvider
 from openchart.store.candles import CandleStore
@@ -31,19 +32,29 @@ def make_provider(server: CandleServer) -> OandaProvider:
     return OandaProvider(config, transport=httpx.MockTransport(server), request_delay=0)
 
 
-def recent_stamps(n: int) -> list[int]:
-    now = int(time.time()) // 60 * 60
+def world(n: int, at: float | None = None) -> tuple[list[int], datetime, CandleServer]:
+    """The stored-to-be candles, an `end` half a minute into the forming candle, and a server
+    whose clock is that `end`. Nothing here reads the clock again, so the result does not
+    depend on the second a run starts in (see the parametrized test below)."""
+    stamps = recent_stamps(n, at)
+    end = datetime.fromtimestamp(stamps[-1] + 30, UTC)
+    return stamps, end, CandleServer(stamps, incomplete_last=True, now=end.timestamp())
+
+
+def recent_stamps(n: int, at: float | None = None) -> list[int]:
+    now = int(time.time() if at is None else at) // 60 * 60
     return [now - 60 * (n - 1 - i) for i in range(n)]  # last one is the forming candle
 
 
-async def test_single_run_reaches_latest_complete_candle_then_rerun_adds_nothing(store):
-    stamps = recent_stamps(N)
-    server = CandleServer(stamps, incomplete_last=True)
+async def single_run_scenario(store, at: float | None = None) -> None:
+    stamps, end, server = world(N, at)
     provider = make_provider(server)
     start = datetime.fromtimestamp(stamps[0], UTC)
     events: list[tuple[int, int, str]] = []
 
-    result = await backfill(provider, store, "XAU_USD", start, progress=lambda *e: events.append(e))
+    result = await backfill(
+        provider, store, "XAU_USD", start, end, progress=lambda *e: events.append(e)
+    )
 
     assert len(server.requests) > 3
     assert all(int(r.url.params["count"]) == MAX_CANDLES_PER_REQUEST for r in server.requests)
@@ -55,7 +66,9 @@ async def test_single_run_reaches_latest_complete_candle_then_rerun_adds_nothing
 
     server.requests.clear()
     events.clear()
-    again = await backfill(provider, store, "XAU_USD", start, progress=lambda *e: events.append(e))
+    again = await backfill(
+        provider, store, "XAU_USD", start, end, progress=lambda *e: events.append(e)
+    )
     await provider.aclose()
     assert again.written == 0
     assert await store.count("oanda", "XAU_USD") == N - 1
@@ -63,12 +76,32 @@ async def test_single_run_reaches_latest_complete_candle_then_rerun_adds_nothing
     assert events == []
 
 
+async def test_single_run_reaches_latest_complete_candle_then_rerun_adds_nothing(store):
+    await single_run_scenario(store)
+
+
+# The test clock (tests/clock.py) starts on an exact minute, so a run early in the process,
+# or a real clock at hh:mm:00, is in the first second of the forming candle's minute. These
+# moments must give the same result as any other second.
+@pytest.mark.parametrize("second", [0.0, 0.2, 0.9, 1.0, 30.0, 59.9])
+async def test_the_result_does_not_depend_on_the_second_of_the_minute(store, monkeypatch, second):
+    at = 1_791_990_000 + second  # a minute boundary plus `second`
+    monkeypatch.setattr(time, "time", lambda: at)
+
+    class Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.fromtimestamp(at, tz)
+
+    monkeypatch.setattr(backfill_module, "datetime", Frozen)
+    await single_run_scenario(store, at)
+
+
 async def test_earlier_start_is_reported_as_searching_back(store):
-    stamps = recent_stamps(N)
-    server = CandleServer(stamps, incomplete_last=True)
+    stamps, end, server = world(N)
     provider = make_provider(server)
     first = datetime.fromtimestamp(stamps[0], UTC)
-    await backfill(provider, store, "XAU_USD", first)
+    await backfill(provider, store, "XAU_USD", first, end)
 
     # A later run whose start falls before the first stored candle (as when
     # "2 years ago" lands on a weekend) searches backwards. Its progress must not
@@ -76,7 +109,7 @@ async def test_earlier_start_is_reported_as_searching_back(store):
     earlier = first - timedelta(days=1)
     events: list[tuple[int, int, str]] = []
     result = await backfill(
-        provider, store, "XAU_USD", earlier, progress=lambda *e: events.append(e)
+        provider, store, "XAU_USD", earlier, end, progress=lambda *e: events.append(e)
     )
     await provider.aclose()
     assert result.written == 0
