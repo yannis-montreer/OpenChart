@@ -192,10 +192,21 @@ def tick(c, t, price):
     c.portal.call(c.server.feed.handle_tick, Tick("XAU_USD", t, price - 0.1, price + 0.1))
 
 
-def test_the_forming_bar_is_recomputed_at_most_once_a_second(vc):
+def test_the_forming_bar_is_recomputed_at_most_once_a_second(vc, monkeypatch):
+    """Time here is one fake clock: the cache's seconds and the readers' wall clock move
+    together, and nothing else (a slow or busy PC, the minute the tests started in) changes
+    the number of computes."""
+    import types
+
     write(vc.folder, "mine.py", "PLAIN\n")
     clock = [1000.0]
     vc.server.values_cache.clock = lambda: clock[0]
+    wall = types.SimpleNamespace(time=lambda: NOW + 40 + (clock[0] - 1000.0))
+    for module in ("series", "feed"):
+        monkeypatch.setattr(
+            f"openchart.market.{module}.time",
+            types.SimpleNamespace(time=wall.time, monotonic=time.monotonic, sleep=time.sleep),
+        )
     tick(vc, NOW + 30, 2000.0)
     first = values(vc, "mine", limit=2)
     tick(vc, NOW + 31, 2001.0)  # the forming bar moved
