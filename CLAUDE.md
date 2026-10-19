@@ -49,7 +49,7 @@ image. Python 3.11 and 3.13 are both tested.
 ## Conventions
 
 - Commit messages end with `Co-Authored-By: <the model that wrote the change> <noreply@anthropic.com>` (its real name and version, not a fixed one); PR descriptions with the Claude Code line.
-- Write decisions and findings into `docs/decisions.md` as part of the change.
+- Don't append to docs/decisions.md or docs/roadmap.md in a feature branch: write docs/decisions-<topic>.md and put the roadmap line in the PR description; the owner folds them in.
 - New migrations take the next free number at merge time.
 - Tests go with every fix, written to fail without it.
 - On this Windows PC, shell heredocs mangle backslashes: edit files with the editor tools, not `sed` or inline Python with backslashes.

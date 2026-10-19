@@ -897,3 +897,16 @@ Design 3.8. Built on the CI-4 branch (it changes the values route CI-4 reshaped)
   | worker memory, peak | 80-120 MB idle | 56 MB peak | below |
 
   **The two misses are the bars, not the indicator:** `/api/candles` alone takes 107 ms (p95) for the same 5,000 5m bars and 14.5 ms for 2, and a request answered from the values cache costs as much as one computed (a profile shows the time in reading and aggregating 25,000 minutes into 5,000 bars, and in the test client's thread hops). Caching values cannot reach these targets; caching the recent bars of minute-based timeframes (as the 4h/D/W cache does for complete bars) is the next step, not done here. The test client adds overhead a real browser request through uvicorn does not have; not measured separately.
+
+## Decision files of 2026-10-17 to 2026-10-19 (index)
+
+Written as separate files, one per piece of work, so branches did not collide on this file.
+They stay where they are; this is the pointer to each (folded in by the release 0.2.0 branch).
+
+- [`decisions-bar-cache.md`](decisions-bar-cache.md): the bar cache for the read path (#49): what is cached, the version counter, the measured gain.
+- [`decisions-drawing-tools.md`](decisions-drawing-tools.md): vertical line, rectangle, channel, Fibonacci, text and measure; undo, lock, hide and the list panel; what alerts on them would need (#48).
+- [`decisions-builtin-indicators.md`](decisions-builtin-indicators.md): SMA, RSI, MACD, Bollinger, ATR, Stochastic and tick volume (#47).
+- [`decisions-retention.md`](decisions-retention.md): tick retention, minute history per instrument (migration 0009), purge with VACUUM, log limits, the day of grace on the first start (#50).
+- [`decisions-mutation-tools.md`](decisions-mutation-tools.md): repairs to the mutation tools and two concurrent-write tests (#52).
+
+Release 0.2.0 (this branch): version 0.2.0 in `__version__`, the viewer, `frontend/package.json` and its lock file; release notes `docs/release-notes/v0.2.0.md`. The migration chain it ships is 0008 (#33) and 0009 (#50), nothing newer. The editor stays off on a source install by design (the setting cannot override missing isolation), so the notes and the README say the editor needs the service install or Docker compose. `CLAUDE.md` now says feature branches write `docs/decisions-<topic>.md` instead of appending here.

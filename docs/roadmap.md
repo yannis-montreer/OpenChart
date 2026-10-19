@@ -1,7 +1,7 @@
 # Roadmap
 
 What is merged, what is parked on a branch, and what comes next. Decisions behind each
-item are in `docs/decisions.md` (and the `docs/decisions-*.md` files named below). Updated 2026-10-18, to main at #50.
+item are in `docs/decisions.md` (and the `docs/decisions-*.md` files named below). Updated 2026-10-19, to main at #52 (release 0.2.0 prepared in a draft PR).
 
 ## Merged into main
 
@@ -38,8 +38,10 @@ item are in `docs/decisions.md` (and the `docs/decisions-*.md` files named below
 | More drawing tools: vertical line, rectangle, channel, Fibonacci, text, measure (`docs/decisions-drawing-tools.md`) | #48 |
 | Built-in indicators: SMA, RSI, MACD, Bollinger, ATR, Stochastic, tick volume (`docs/decisions-builtin-indicators.md`) | #47 |
 | Storage step 2: tick retention, minute history per instrument (migration 0009), purge with VACUUM, log limits (`docs/decisions-retention.md`) | #50 |
+| Docs up to date with main (roadmap, README, CI design note) | #51 |
+| Mutation tools repaired, two concurrent-write tests, forming-bar test on one fake clock (`docs/decisions-mutation-tools.md`) | #52 |
 
-**v0.1.0 is released as a pre-release** (owner, 2026-10-15).
+**v0.1.0 is released as a pre-release** (owner, 2026-10-15). **v0.2.0** is prepared (version, release notes, README) in a draft PR; the owner merges it, then tags `v0.2.0` and publishes the draft release.
 
 ## Parked on branches (not merged)
 
@@ -65,9 +67,9 @@ In the owner's order. Each item is one branch from main and stops for review.
 
 ## Housekeeping
 
-- **Merged branches still present locally:** `data-folder-lock`, `fixes-after-m8`, `m0-scaffolding` to `m9-second-instrument`, `oanda-request-errors`, `storage-1-candle-format`, `release-0.1.0`, `handoff` and `custom-indicators`.
-  - Delete them locally and on GitHub when convenient.
-  - Remove their worktrees with `git worktree remove` (see `LOCAL-NOTES.md`).
+- **Merged branches still present:** locally `docs-after-verify` and `mutation-tools-fix` (each with a worktree); on GitHub most of the milestone, CI and fix branches of #1 to #52.
+  - Delete them when convenient; the exact commands were given with the release 0.2.0 PR.
+  - Not merged, keep: `storage-review` (parked, below). `tmp-pr46` is a local-only merge commit of an old session; the owner decides.
 - **Note on the lock file:** `server.lock` stays in the data folder by design; the lock on it is what counts. So "is the server stopped?" means:
   - nothing listening on the port;
   - no `openchart run` process;

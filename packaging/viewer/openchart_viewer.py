@@ -25,7 +25,7 @@ import webbrowser
 from pathlib import Path
 
 APP = "OpenChart Viewer"
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 DEFAULT_SERVER = "http://localhost:8000"
 WEBVIEW2_DOWNLOAD = "https://developer.microsoft.com/microsoft-edge/webview2/"
 WEBVIEW2_RUNTIME_KEY = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"

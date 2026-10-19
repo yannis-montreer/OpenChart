@@ -23,7 +23,7 @@
     uninstall the proof list is all zeros.
 
 .EXAMPLE
-    .\tools\ci\service-reinstall-test.ps1 -Release dist\OpenChart-Server-0.1.0-windows -Nssm nssm\nssm-2.24\win64\nssm.exe -Work $env:RUNNER_TEMP
+    .\tools\ci\service-reinstall-test.ps1 -Release dist\OpenChart-Server-0.2.0-windows -Nssm nssm\nssm-2.24\win64\nssm.exe -Work $env:RUNNER_TEMP
 #>
 param(
     [Parameter(Mandatory)] [string]$Release,   # the unzipped server folder (install-service.ps1, openchart\)
