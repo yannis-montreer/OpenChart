@@ -173,8 +173,10 @@ class Dispatcher:
 
     async def drain(self) -> None:
         """Wait for the messages in flight (tests)."""
-        while self.tasks:
-            await asyncio.gather(*list(self.tasks), return_exceptions=True)
+        # Only tasks still running: one that is done but not yet (or never) discarded would
+        # keep `while self.tasks` true and this loop spinning for ever.
+        while pending := [t for t in self.tasks if not t.done()]:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def close(self) -> None:
         for task in list(self.tasks):

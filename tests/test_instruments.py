@@ -15,6 +15,7 @@ from openchart.market.instruments import FX_HOURS, METAL_HOURS
 from openchart.market.sessions import TradingClock, TradingHours
 from openchart.providers.base import Tick
 from openchart.providers.fake import FakeProvider, aggregate_candles, synthetic_m1
+from tests.bounded import call
 from tests.conftest import CANDLES, EURO, GOLD, NOW, ODD, ODD_HOURS
 from tests.test_alerts_api import settle, with_telegram
 
@@ -82,7 +83,7 @@ def level(instrument: str, price: float) -> dict:
 
 def push(client, instrument: str, t: float, bid: float, spread: float) -> None:
     tick = Tick(instrument, t, bid, bid + spread)
-    client.portal.call(client.server.feed.handle_tick, tick)
+    call(client, client.server.feed.handle_tick, tick)
 
 
 def test_eurusd_is_added_from_settings_with_its_own_metadata(market):

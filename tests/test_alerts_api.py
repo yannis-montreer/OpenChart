@@ -11,19 +11,20 @@ from openchart.alerts.notify import Dispatcher, NotifierUnavailable
 from openchart.alerts.watchdog import FeedView, Watchdog
 from openchart.providers.base import OHLC, Candle, Tick
 from openchart.store.alerts import AlertEvent
+from tests.bounded import call
 from tests.ws import receive_until
 
 TELEGRAM_TOKEN = "123456:telegram-SECRET-token"
 
 
 def push(client, t: float, price: float) -> None:
-    client.portal.call(client.server.feed.handle_tick, Tick("XAU_USD", t, price - 0.1, price + 0.1))
+    call(client, client.server.feed.handle_tick, Tick("XAU_USD", t, price - 0.1, price + 0.1))
 
 
 def settle(client, rounds: int = 3) -> None:
     """Let the server's background tasks (fires, delivery) run."""
     for _ in range(rounds):
-        client.portal.call(client.server.alerts.dispatcher.drain)
+        call(client, client.server.alerts.dispatcher.drain)
         time.sleep(0.05)
 
 
