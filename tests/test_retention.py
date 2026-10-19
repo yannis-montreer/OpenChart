@@ -338,10 +338,14 @@ def run_server(harness):
 
 def test_the_server_purges_at_start_and_logs_each_deletion(seeded, caplog):
     harness, now, days = seeded
+    # The second run uses a time before the server's own: with `time.time()` a minute
+    # boundary between the two runs moves the limit by one more seeded minute, which is
+    # deleted and logged again (seen once in the Windows 3.13 job of PR #54).
+    started = time.time()
     with caplog.at_level(logging.INFO), run_server(harness) as c:
         assert any(t.get_name() == "retention" for t in c.server._tasks)
         wait_for_log(caplog, "retention: XAU_USD minutes")
-        again = c.portal.call(c.server.run_retention, time.time())
+        again = c.portal.call(c.server.run_retention, started)
     stamps = asyncio.run(m1_stamps(harness.config))
     old = [ts for ts in stamps if ts < now - 3 * DAY]
     assert old and min(old) + 60 > now - 731 * DAY  # older ones went, younger ones stayed
