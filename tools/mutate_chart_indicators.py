@@ -173,8 +173,8 @@ MUTANTS = [
     one(
         "the import refuses old values",
         RC,
-        "checked(body.indicators, strict=False)",
-        "checked(body.indicators, strict=True)",
+        "charts.checked(entries, strict=False)",
+        "charts.checked(entries, strict=True)",
     ),
     one(
         "no chart_indicators_changed",
@@ -228,16 +228,17 @@ MUTANTS = [
     one(
         "usage without the editing gate",
         RX,
-        "        await require_editing(request, server.settings, server.isolation)\n"
-        "        definition_file(indicator_id)\n",
-        "        definition_file(indicator_id)\n",
+        "async def get_usage(indicator_id: str, request: Request) -> dict[str, Any]:\n"
+        "        await require_editing(request, server.settings, server.isolation)\n",
+        "async def get_usage(indicator_id: str, request: Request) -> dict[str, Any]:\n",
     ),
     one(
         "delete without the editing gate",
         RX,
         "        await require_editing(request, server.settings, server.isolation)\n"
-        "        path = definition_file(indicator_id)\n",
-        "        path = definition_file(indicator_id)\n",
+        "        definition_file(indicator_id)\n"
+        "        # The charts' lock",
+        "        definition_file(indicator_id)\n        # The charts' lock",
     ),
     one(
         "an id with a trailing newline",
@@ -273,7 +274,12 @@ MUTANTS = [
         'layout.state["indicators"] = [e for e in entries if not uses(e, indicator_id)]',
         'layout.state["indicators"] = entries',
     ),
-    one("the history stays", RX, 'os.replace(history, target / "history")', "pass"),
+    one(
+        "the history stays",
+        RX,
+        '[(history, target / "history")] if history is not None else []',
+        "[]",
+    ),
     one(
         "the .deleted check is skipped",
         RX,
@@ -281,22 +287,28 @@ MUTANTS = [
         "False",
     ),
     (
-        "instances removed before the move is prepared",
+        "instances removed before the files move",
         RX,
         [
             (
-                "            target, history = target_folder(indicator_id)\n"
-                '            if found["in_use"]:\n'
-                "                await remove_instances(indicator_id, found)\n",
+                '            try:\n                if found["in_use"]:\n'
+                "                    await remove_instances(indicator_id, found)\n",
+                "            try:\n                pass\n",
+            ),
+            (
+                "            try:\n                await asyncio.to_thread(move_all)\n",
                 '            if found["in_use"]:\n'
                 "                await remove_instances(indicator_id, found)\n"
-                "            target, history = target_folder(indicator_id)\n",
-            )
+                "            try:\n                await asyncio.to_thread(move_all)\n",
+            ),
         ],
         False,
     ),
     one(
-        "no indicators_changed", RX, 'server.hub.broadcast({"type": "indicators_changed"})', "pass"
+        "no indicators_changed",
+        RX,
+        'server.hub.broadcast({"type": "indicators_changed", "id": indicator_id, "op": "delete"})',
+        "pass",
     ),
     one(
         "no layouts_changed on delete",

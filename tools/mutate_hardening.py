@@ -129,14 +129,14 @@ MUTANTS = [
         "no undo when the database step fails",
         RX,
         "            except BaseException:\n"
-        "                put_back(moved, target)\n"
+        "                await asyncio.to_thread(put_back, moved, target)\n"
         "                raise\n",
         "            except BaseException:\n                raise\n",
     ),
     one(
         "no undo when the history cannot move",
         RX,
-        "                put_back(moved, target)\n                what =",
+        "                await asyncio.to_thread(put_back, moved, target)\n                what =",
         "                what =",
     ),
     one(

@@ -609,21 +609,27 @@ def test_revision_and_switches_take_only_their_own_types(cc, body):
     assert chart(cc)["revision"] == 0
 
 
-def slow_chart_writes(cc, monkeypatch):
-    """Every chart write pauses 1 s inside the lock; `inside` is set when one is there."""
+def pause_delete_in_usage(monkeypatch):
+    """The first read of the saved layouts (a delete's where-used, made inside the lock,
+    before anything moves) answers, then waits 1 s with its answer; `inside` is set while
+    it waits. A write that gets past the lock now is not in that answer."""
     import threading
 
-    from openchart.store import chart_indicators as store_module
+    from openchart.store import layouts as store_module
 
     inside = threading.Event()
-    replace = store_module.ChartIndicatorStore.replace
+    real = store_module.LayoutStore.list
+    first = []
 
-    async def slow(self, *args, **kwargs):
-        inside.set()
-        await asyncio.sleep(1.0)
-        return await replace(self, *args, **kwargs)
+    async def slow(self):
+        got = await real(self)
+        if not first:
+            first.append(1)
+            inside.set()
+            await asyncio.sleep(1.0)
+        return got
 
-    monkeypatch.setattr(store_module.ChartIndicatorStore, "replace", slow)
+    monkeypatch.setattr(store_module.LayoutStore, "list", slow)
     return inside
 
 
@@ -638,11 +644,13 @@ def in_thread(fn):
 
 def test_a_layout_saved_during_a_delete_does_not_keep_the_deleted_definition(cc, monkeypatch):
     """Review finding 1: layout writes did not take the charts' lock, so a layout saved
-    while a delete was removing instances kept one of the definition it deleted."""
+    while a delete had counted where the definition is used kept one of the definition it
+    deleted. (The delete moves the file before it removes instances, so the save must be
+    held back from the count on, not only from the removal.)"""
     allow_editing(cc)
     write(cc.folder, "mine.py", "PLAIN\n")
     ok(put(cc, [{"id": "mine"}]))
-    inside = slow_chart_writes(cc, monkeypatch)
+    inside = pause_delete_in_usage(monkeypatch)
     thread, out = in_thread(lambda: cc.delete("/api/custom-indicators/mine?confirm=true"))
     assert inside.wait(10)
     layout = {"instrument": "EUR_USD", "indicators": [{"id": "mine"}, {"id": "ema"}]}
@@ -659,17 +667,42 @@ def test_a_layout_saved_during_a_delete_does_not_keep_the_deleted_definition(cc,
 
 def test_two_deletes_at_once_move_the_file_once(cc, monkeypatch):
     """Review finding 2: the file was looked up before the lock, so a second delete that
-    waited for the first failed on the missing file (500) and left an empty folder."""
+    waited for the first failed on the missing file (500) and left an empty folder. The
+    second one gets past the first look while the file is still there (the first is held
+    in its count, before it moves anything) and must look again under the lock."""
     allow_editing(cc)
     write(cc.folder, "mine.py", "PLAIN\n")
     ok(put(cc, [{"id": "mine"}]))
-    inside = slow_chart_writes(cc, monkeypatch)
+    inside = pause_delete_in_usage(monkeypatch)
     thread, out = in_thread(lambda: cc.delete("/api/custom-indicators/mine?confirm=true"))
     assert inside.wait(10)
     second = cc.delete("/api/custom-indicators/mine?confirm=true")
     thread.join(10)
     assert sorted([out["r"].status_code, second.status_code]) == [200, 404]
     assert len(list((cc.folder / ".deleted").iterdir())) == 1
+
+
+def test_a_delete_whose_files_cannot_move_never_touches_the_charts(cc, monkeypatch):
+    """The files move first and the instances only after: a move that fails (409) leaves
+    the chart's revision where it was. Removing the instances first and putting them back
+    would give the same list but a moved revision (and two change messages)."""
+    allow_editing(cc)
+    write(cc.folder, "mine.py", "PLAIN\n")
+    ok(put(cc, [{"id": "mine"}, {"id": "ema"}]))
+    before = chart(cc)["revision"]
+    from openchart.api import routes_custom_indicators as module
+
+    def refuse(src, dst):
+        raise PermissionError("the file is open in another program")
+
+    monkeypatch.setattr(module.os, "replace", refuse)
+    r = cc.delete("/api/custom-indicators/mine?confirm=true")
+    monkeypatch.undo()
+    assert r.status_code == 409
+    assert (cc.folder / "mine.py").is_file()
+    after = chart(cc)
+    assert after["revision"] == before
+    assert [i["id"] for i in after["indicators"]] == ["mine", "ema"]
 
 
 NAN_ENTRY = '{"id": "ema", "params": {"length": NaN}}'

@@ -93,7 +93,10 @@ MUTANTS = [
     ),
     # The store's version counter, as the values cache sees it through the bar cache
     one(
-        "the version counter never moves", S, "        self._epoch[key] += 1\n", "        return\n"
+        "the version counter never moves",
+        S,
+        "        self._epoch[key] += 1\n        for listener in self._listeners:\n",
+        "        return\n        for listener in self._listeners:\n",
     ),
 ]
 

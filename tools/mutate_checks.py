@@ -164,8 +164,8 @@ MUTANTS: list[tuple[str, str, list[tuple[str, str]], bool]] = [
         U,
         [
             (
-                "if key in d.checks or len(d.checks) >= CHECK_SETTINGS",
-                "if len(d.checks) >= CHECK_SETTINGS",
+                "        if key in d.checks:\n            return d.checks[key]\n",
+                "        if False:\n            return d.checks[key]\n",
             )
         ],
         False,
@@ -214,12 +214,14 @@ MUTANTS: list[tuple[str, str, list[tuple[str, str]], bool]] = [
         R,
         [
             (
-                "            t = self.clock()\n            try:\n                got, out",
-                "            try:\n                got, out",
+                "            t = self.clock()\n            # No other script",
+                "            # No other script",
             ),
             (
-                "            live = await self._ensure()\n",
-                "            t = self.clock()\n            live = await self._ensure()\n",
+                "            live = await self._ensure()\n            head = dict(",
+                "            t = self.clock()\n"
+                "            live = await self._ensure()\n"
+                "            head = dict(",
             ),
         ],
         False,
@@ -283,7 +285,16 @@ def pytest(copy: Path, *, first_failure: bool) -> subprocess.CompletedProcess[st
     if first_failure:
         argv.insert(4, "-x")
     env = dict(os.environ, PYTHONPATH=str(copy))
-    return subprocess.run(argv, cwd=ROOT, env=env, capture_output=True, text=True, timeout=900)
+    return subprocess.run(
+        argv,
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=900,
+    )
 
 
 def main(names: list[str]) -> int:
