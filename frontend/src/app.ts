@@ -28,6 +28,7 @@ import { ChartSync } from "./chart/chartSync";
 import { IndicatorLayer } from "./chart/indicators";
 import { CHART_TYPES, ChartView, type ChartContext } from "./chart/view";
 import { DrawingController, type AlertPlace, type Tool } from "./drawings/controller";
+import { chooseInstrument, visibleInstruments } from "./instruments";
 import { isLineType } from "./drawings/shapes";
 import { DrawingsPanel } from "./drawings/listPanel";
 import { dropLegacyIndicators, loadPrefs, readLegacyIndicators, resolveTimezone, savePrefs, type Prefs } from "./prefs";
@@ -94,7 +95,10 @@ const CHART_TYPE_ICONS: Record<ChartType, IconName> = {
 export class App {
   private prefs: Prefs = loadPrefs();
   private meta!: Meta;
+  /** What the chart offers (enabled only); `everything` also has the removed ones, whose
+   * decimals the alerts and drawings kept for them still need. */
   private instruments: Instrument[] = [];
+  private everything: Instrument[] = [];
   private instrument?: Instrument;
   private status?: Status;
   private serverOffset = 0; // server clock minus local clock, seconds
@@ -134,7 +138,8 @@ export class App {
     this.build();
     let defaultLayout: Layout | undefined;
     try {
-      [this.meta, this.instruments] = await Promise.all([api.meta(), api.instruments()]);
+      [this.meta, this.everything] = await Promise.all([api.meta(), api.instruments()]);
+      this.instruments = visibleInstruments(this.everything);
       const [catalog, layouts] = await Promise.all([
         indicatorsApi.catalog().catch(() => this.catalog),
         this.layoutMenu.load().catch(() => []),
@@ -162,10 +167,7 @@ export class App {
     this.chart.setChartType(this.prefs.chartType);
     this.renderChartType();
     this.showPanel();
-    this.instrument =
-      this.instruments.find((i) => i.instrument === this.prefs.instrument) ??
-      this.instruments.find((i) => i.enabled) ??
-      this.instruments[0];
+    this.instrument = chooseInstrument(this.instruments, this.prefs.instrument ?? undefined);
     if (!this.meta.timeframes.some((t) => t.name === this.prefs.timeframe)) this.prefs.timeframe = "15m";
     this.renderTimeframes();
     this.renderSymbol();
@@ -281,7 +283,7 @@ export class App {
         legacy: () => readLegacyIndicators(),
         dropLegacy: () => dropLegacyIndicators(),
         titleOf: (id) => this.indicators.definitions().find((d) => d.id === id)?.name ?? id,
-        enabled: () => this.instruments.filter((i) => i.enabled).map((i) => ({ source: i.source, instrument: i.instrument })),
+        enabled: () => this.instruments.map((i) => ({ source: i.source, instrument: i.instrument })),
       },
     );
     this.indicators.onChange = () => this.sync.changed();
@@ -381,7 +383,7 @@ export class App {
     panel.append(this.els.wlBox, this.alertsPanel.el);
     this.alertsPanel.onEdit = (a) => void this.editAlert(a);
     this.alertsPanel.onChange = () => this.drawings.alertsChanged();
-    this.alertsPanel.decimals = (name) => this.instruments.find((i) => i.instrument === name)?.decimals ?? 5;
+    this.alertsPanel.decimals = (name) => this.everything.find((i) => i.instrument === name)?.decimals ?? 5;
     this.els.panelBtn = button({ icon: "list", title: "Watchlist", onClick: () => this.togglePanel("watchlist") });
     this.els.alertsBtn = button({ icon: "bell", title: "Alerts and their log", onClick: () => this.togglePanel("alerts") });
     this.showPanel();
@@ -1067,7 +1069,7 @@ export class App {
   }
 
   private async editAlert(alert: Alert): Promise<void> {
-    const inst = this.instruments.find((i) => i.instrument === alert.instrument);
+    const inst = this.everything.find((i) => i.instrument === alert.instrument);
     let drawing: Drawing | undefined;
     if (alert.drawing_id) {
       drawing = this.drawings.get(alert.drawing_id);
@@ -1097,7 +1099,7 @@ export class App {
   private alertFired(alert: Alert, event: AlertEvent): void {
     this.alertsPanel.triggered(alert, event);
     if (!alert.notify.includes("app")) return;
-    const inst = this.instruments.find((i) => i.instrument === alert.instrument);
+    const inst = this.everything.find((i) => i.instrument === alert.instrument);
     const d = inst?.decimals ?? 5;
     const fmt = (x: number | null) => (x === null ? "–" : x.toFixed(d));
     toast({

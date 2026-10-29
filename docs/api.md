@@ -43,7 +43,7 @@ Before setup, the two test routes and `/api/setup/defaults` also work without a 
 | `GET /api/health` | `{"status": "ok"}` |
 | `GET /api/version` | `{"version", "api_version"}` (2 since the indicator lists live on the server) |
 | `GET /api/status` | feed state: `provider`, `provider_state` (`connecting`, `connected`, `reconnecting`, `stopped`, `not_configured`, `no_instruments`), `reconnects`, `error`, and per instrument `last_tick_age` (seconds) and `history` (backfill state) |
-| `GET /api/instruments` | stored instruments with `decimals`, `pip_size`, `display_name`, trading `hours`, and learned `closures` (`[[start, end], ...]`, holidays and early closes; SPEC section 9) |
+| `GET /api/instruments` | stored instruments, removed ones too (`enabled: false`; clients show only enabled ones, Settings lists the rest under Removed; a removed row also has `stored`: `bytes` (estimate), `candles`, `closures`, `tick_files`, `tick_bytes`, `drawings`, `alerts`, `active_alerts`; `null` on enabled rows), with `decimals`, `pip_size`, `display_name`, trading `hours`, and learned `closures` (`[[start, end], ...]`, holidays and early closes; SPEC section 9) |
 | `GET /api/candles` | see below |
 
 ### `GET /api/candles`
