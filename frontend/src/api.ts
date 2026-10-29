@@ -50,6 +50,19 @@ export interface Instrument {
   m1_depth?: string;
   m1_depth_default?: boolean;
   m1_from?: number;
+  /** Only on removed instruments: what is stored for them (the size is an estimate). */
+  stored?: StoredData | null;
+}
+
+export interface StoredData {
+  bytes: number;
+  candles: number;
+  closures: number;
+  tick_files: number;
+  tick_bytes: number;
+  drawings: number;
+  alerts: number;
+  active_alerts: number;
 }
 
 /** An instrument's history download (newest first: hourly, then minute candles). */

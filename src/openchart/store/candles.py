@@ -405,6 +405,21 @@ class CandleStore:
             timeframe,
         )
 
+    async def row_counts(self, source: str, instrument: str) -> tuple[int, int, int, int]:
+        """(M1, H1, cached bars of this instrument, candle rows of every instrument)."""
+        series = await self.series(source, instrument)
+        own = [0, 0, 0]
+        if series is not None:
+            for i, table in enumerate(("candles_m1", "candles_h1", "candles_cache")):
+                own[i] = (
+                    await self._scalar(f"SELECT COUNT(*) FROM {table} WHERE series=?", series.id)
+                    or 0
+                )
+        total = 0
+        for table in ("candles_m1", "candles_h1", "candles_cache"):
+            total += await self._scalar(f"SELECT COUNT(*) FROM {table}") or 0
+        return own[0], own[1], own[2], total
+
     async def cache_count(self, source: str, instrument: str, timeframe: str) -> int:
         series = await self.series(source, instrument)
         if series is None:

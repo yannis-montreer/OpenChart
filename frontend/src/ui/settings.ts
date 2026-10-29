@@ -1,6 +1,7 @@
 /** Settings dialog (SPEC section 8.3). Each section saves on its own. */
 
 import { account, api, type Settings } from "../api";
+import { removedInstruments, removedLine, visibleInstruments } from "../instruments";
 import { isDownloading, lineText } from "./download";
 import { field, primary, resultLine, secondary, secretInput, segmented, textInput, toggleSwitch, withBusy } from "./forms";
 import { button, h, icon, type IconName } from "./dom";
@@ -275,6 +276,7 @@ export class SettingsDialog {
 
   private instruments(): Node[] {
     const list = h("div", { class: "inst-list" });
+    const removed = h("div", { class: "inst-list" });
     const results = h("div", { class: "inst-list" });
     const result = resultLine();
     const search = textInput({ placeholder: "Search, e.g. EUR, gold, NAS…" });
@@ -283,7 +285,7 @@ export class SettingsDialog {
     let anyDownloading = false;
     const renderMine = async () => {
       const [all, status] = await Promise.all([api.instruments(), api.status().catch(() => undefined)]);
-      const rows = all.filter((i) => i.enabled);
+      const rows = visibleInstruments(all);
       anyDownloading = rows.some((i) => isDownloading(status?.instruments?.[i.instrument]?.history));
       const downloading = (name: string) => {
         const history = status?.instruments?.[name]?.history;
@@ -327,6 +329,33 @@ export class SettingsDialog {
             h("div", { class: "name" }, h("b", {}, i.instrument), h("small", {}, i.display_name), reach, downloading(i.instrument)),
             depth,
             rows.length > 1 ? remove : null,
+          );
+        }),
+      );
+      const gone = removedInstruments(all);
+      removed.replaceChildren(
+        ...(gone.length ? [h("hr", { class: "section-sep" }), h("h3", {}, "Removed")] : []),
+        ...gone.map((i) => {
+          const back = h("button", { class: "btn btn-secondary", type: "button" }, "Add back");
+          back.addEventListener("click", () =>
+            withBusy(back, async () => {
+              result.busy(`Adding ${i.instrument} back…`);
+              try {
+                await account.addInstrument(i.instrument);
+                this.instrumentsChanged = true;
+                result.ok(`${i.instrument} is back. Its stored history was kept; the gap since it was removed downloads in the background.`);
+                await renderMine();
+                await runSearch();
+              } catch (err) {
+                result.fail(errorText(err));
+              }
+            }),
+          );
+          return h(
+            "div",
+            { class: "inst-row" },
+            h("div", { class: "name" }, h("b", {}, i.instrument), h("small", {}, removedLine(i))),
+            back,
           );
         }),
       );
@@ -381,6 +410,7 @@ export class SettingsDialog {
       h("h3", {}, "Your instruments"),
       list,
       result.el,
+      removed,
       h("hr", { class: "section-sep" }),
       h("h3", {}, "Add an instrument"),
       field("Search your OANDA account", search),
