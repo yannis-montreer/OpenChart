@@ -25,6 +25,21 @@ class Stored:
     def candles(self) -> int:
         return self.m1 + self.h1 + self.cached
 
+    def to_json(self) -> dict[str, int]:
+        return {
+            "bytes": self.bytes,
+            "candles": self.candles,
+            "m1": self.m1,
+            "h1": self.h1,
+            "cached": self.cached,
+            "closures": self.closures,
+            "tick_files": self.tick_files,
+            "tick_bytes": self.tick_bytes,
+            "drawings": self.drawings,
+            "alerts": self.alerts,
+            "active_alerts": self.active_alerts,
+        }
+
 
 def tick_folder_size(folder: Path) -> tuple[int, int]:
     """(files, bytes) under a tick folder; (0, 0) when there is none."""

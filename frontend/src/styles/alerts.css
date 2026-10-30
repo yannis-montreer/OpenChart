@@ -164,6 +164,28 @@
 .confirm-backdrop {
   z-index: 48;
 }
+/* Settings, Removed, "Delete data…" */
+.modal.delete-dialog {
+  width: min(460px, 100%);
+}
+.delete-dialog .confirm-text {
+  padding-bottom: 8px;
+}
+.delete-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 0 20px 16px;
+  overflow-y: auto;
+}
+.delete-list {
+  margin: 0;
+  padding-left: 18px;
+  line-height: 1.5;
+}
+.delete-both[hidden] {
+  display: none;
+}
 .alert-dialog .result:empty,
 .confirm-dialog .result:empty {
   display: none;

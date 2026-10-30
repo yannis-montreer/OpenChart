@@ -14,7 +14,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from openchart import retention
+from openchart import purge, retention
 from openchart.alerts.service import AlertService
 from openchart.api.auth import Auth
 from openchart.api.hub import Hub
@@ -45,6 +45,7 @@ from openchart.settings import (
 )
 from openchart.store.candles import CandleStore
 from openchart.store.sqlite import Database
+from openchart.store.stored import Stored, stored_summary
 from openchart.store.ticks import TickWriter
 
 log = logging.getLogger(__name__)
@@ -89,6 +90,7 @@ class Server:
         self._feed_task: asyncio.Task[None] | None = None
         self._tasks: list[asyncio.Task[Any]] = []
         self._reconfigure_lock = asyncio.Lock()
+        self.instrument_locks = purge.InstrumentLocks()
         self.telegram_transport = None  # tests replace the HTTP transport
         self.indicators = Registry()  # built-in: they run here (D5)
         self.custom = CustomIndicators(self.indicators_dir)  # yours: they run in the worker
@@ -237,7 +239,8 @@ class Server:
         for p in plans:
             if not p.minutes:
                 continue
-            deleted = await self.store.purge_m1_before(self.source, p.instrument, p.cutoff)
+            async with self.instrument_locks.hold(p.instrument, "the daily retention"):
+                deleted = await self.store.purge_m1_before(self.source, p.instrument, p.cutoff)
             log.info(
                 "retention: %s minutes before %s UTC deleted: %d (%s to %s; kept %s)",
                 p.instrument,
@@ -329,6 +332,100 @@ class Server:
                     self._feed_task = asyncio.create_task(self._run_feed(self.feed), name="feed")
             await self.alerts.refresh_clocks()
             self.hub.broadcast_status()
+
+    # Deleting a removed instrument's data (Settings, Removed; docs/decisions-instrument-delete.md)
+
+    def _refuse_delete(self, row, *, holding: bool = False) -> None:
+        """Raise `DeleteRefused` unless nothing in the server is working on this instrument
+        (`holding`: the caller holds its lock, for the delete)."""
+        name = row.instrument
+        if row.enabled:
+            raise purge.DeleteRefused(
+                409, f"{name} is enabled: remove it first (Settings, Instruments)."
+            )
+        feed = self.feed
+        if feed is not None and name in feed.downloading:
+            raise purge.DeleteRefused(
+                409, f"{name}'s history is still downloading: try again once it has stopped."
+            )
+        if feed is not None and name in feed.instruments:
+            raise purge.DeleteRefused(409, f"The price feed still serves {name}: try again.")
+        holder = None if holding else self.instrument_locks.busy(name)
+        if holder is not None:
+            raise purge.DeleteRefused(409, f"{name} is busy ({holder}): try again in a moment.")
+
+    async def _removed_row(self, instrument: str):
+        row = await self.store.instrument(self.source, instrument)
+        if row is None:
+            raise purge.DeleteRefused(404, f"No instrument {instrument}.")
+        self._refuse_delete(row)
+        return row
+
+    async def delete_preview(self, instrument: str) -> tuple[Stored, str]:
+        """What a delete would remove, and the token the delete must carry."""
+        await self._removed_row(instrument)
+        ticks = self.config.ticks_dir
+        stored = await stored_summary(self.store, ticks, self.source, instrument)
+        return stored, await purge.fingerprint(self.store, ticks, self.source, instrument)
+
+    async def delete_instrument(
+        self, instrument: str, token: str, *, confirm: str, drawings_and_alerts: bool
+    ) -> purge.Purged:
+        """Delete a removed instrument and what is stored for it, then VACUUM.
+
+        Refused (`DeleteRefused`) unless `confirm` is its name, the instrument is removed,
+        nothing holds it (download, repair, add-back, retention, another delete), `token`
+        is the one a preview gives now, and, when it has drawings or alerts, they are
+        named. Throughout, the instrument's lock keeps adding it back, its minute history,
+        the alert catch-up's repair and retention away; the feed cannot be rebuilt; and
+        the cache computes none of its bars."""
+        if confirm != instrument:
+            raise purge.DeleteRefused(400, f"Type {instrument} to confirm.")
+        await self._removed_row(instrument)  # refuses a held lock instead of waiting on it
+        source, ticks = self.source, self.config.ticks_dir
+        async with (
+            self.instrument_locks.hold(instrument, "being deleted"),
+            self._reconfigure_lock,
+            self.cache.holding(source, instrument),
+        ):
+            row = await self.store.instrument(source, instrument)
+            if row is None:
+                raise purge.DeleteRefused(404, f"No instrument {instrument}.")
+            self._refuse_delete(row, holding=True)
+            if token != await purge.fingerprint(self.store, ticks, source, instrument):
+                raise purge.DeleteRefused(
+                    409,
+                    f"What is stored for {instrument} changed since the preview: look at it "
+                    "again before deleting.",
+                )
+            if not drawings_and_alerts:
+                stored = await stored_summary(self.store, ticks, source, instrument)
+                if stored.drawings or stored.alerts:
+                    raise purge.DeleteRefused(
+                        409,
+                        f"{instrument} has {stored.drawings} drawing(s) and {stored.alerts} "
+                        "alert(s): tick the box to delete them too.",
+                    )
+            purged = await purge.delete_instrument(
+                self.store,
+                ticks,
+                self.config.db_path,
+                source,
+                instrument,
+                drawings_and_alerts=drawings_and_alerts,
+            )
+            self.alerts.instrument_deleted(instrument, purged.drawings, purged.alerts)
+        log.info(
+            "deleted %s: %s; %d drawing(s), %d alert(s)%s",
+            instrument,
+            ", ".join(f"{t} {n}" for t, n in purged.rows.items()),
+            len(purged.drawings),
+            len(purged.alerts),
+            f"; VACUUM {purged.vacuum.before / 1e6:.1f} MB to {purged.vacuum.after / 1e6:.1f} MB"
+            if purged.vacuum
+            else f"; not compacted ({purged.vacuum_error})",
+        )
+        return purged
 
     async def _stop_feed(self) -> None:
         if self._feed_task is not None:

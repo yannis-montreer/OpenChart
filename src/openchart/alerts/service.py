@@ -131,6 +131,22 @@ class AlertService:
             await self.store.delete(alert.id)
             self.removed(alert)
 
+    def instrument_deleted(
+        self, instrument: str, drawings: list[Drawing], alerts: list[Alert]
+    ) -> None:
+        """An instrument's data was deleted (`Server.delete_instrument`): its deleted lines
+        and alerts leave the engine and the pages, and so do its clock and any catch-up
+        still waiting for it (there is nothing left to replay)."""
+        for alert in alerts:
+            self.removed(alert)
+        for drawing in drawings:
+            self.engine.drawing_removed(drawing.id)
+            self.server.hub.broadcast(
+                {"type": "drawing_changed", "op": "delete", "drawing": drawing.to_json()}
+            )
+        self.engine.gaps.pop(instrument, None)
+        self.engine.clocks.pop(instrument, None)
+
     def broadcast(self, op: str, alert: Alert) -> None:
         self.server.hub.broadcast({"type": "alert_changed", "op": op, "alert": alert.to_json()})
 
@@ -249,11 +265,18 @@ class AlertService:
     async def catch_up(self, instrument: str) -> int:
         gap = self.engine.gaps[instrument]
         feed = self.server.feed
-        if feed is not None:
-            try:  # the missed minutes must be stored before they can be replayed
-                await feed.repair_instrument(instrument)
-            except Exception as exc:
-                log.warning("repairing %s before the alert catch-up failed: %s", instrument, exc)
+        # Only an instrument the feed serves: a removed one is not downloaded into again
+        # (and may be being deleted). Under its lock, so a delete refuses meanwhile.
+        if feed is not None and instrument in feed.instruments:
+            async with self.server.instrument_locks.hold(
+                instrument, "repair before the alert catch-up"
+            ):
+                try:  # the missed minutes must be stored before they can be replayed
+                    await feed.repair_instrument(instrument)
+                except Exception as exc:
+                    log.warning(
+                        "repairing %s before the alert catch-up failed: %s", instrument, exc
+                    )
         start, end = self.engine.catch_up_range(instrument) or (0, 0)
         candles = (
             await self.server.store.read_m1(self.server.source, instrument, start, end)

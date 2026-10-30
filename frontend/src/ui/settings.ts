@@ -2,6 +2,7 @@
 
 import { account, api, type Settings } from "../api";
 import { removedInstruments, removedLine, visibleInstruments } from "../instruments";
+import { deleteInstrumentDialog } from "./deleteInstrument";
 import { isDownloading, lineText } from "./download";
 import { field, primary, resultLine, secondary, secretInput, segmented, textInput, toggleSwitch, withBusy } from "./forms";
 import { button, h, icon, type IconName } from "./dom";
@@ -351,11 +352,23 @@ export class SettingsDialog {
               }
             }),
           );
+          const erase = h("button", { class: "btn btn-danger", type: "button" }, "Delete data…");
+          erase.addEventListener("click", () =>
+            withBusy(erase, async () => {
+              const done = await deleteInstrumentDialog(i.instrument);
+              if (!done) return;
+              this.instrumentsChanged = true;
+              result.ok(done.text);
+              await renderMine();
+              await runSearch();
+            }),
+          );
           return h(
             "div",
             { class: "inst-row" },
             h("div", { class: "name" }, h("b", {}, i.instrument), h("small", {}, removedLine(i))),
             back,
+            erase,
           );
         }),
       );

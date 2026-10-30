@@ -420,6 +420,21 @@ class CandleStore:
             total += await self._scalar(f"SELECT COUNT(*) FROM {table}") or 0
         return own[0], own[1], own[2], total
 
+    async def extent(
+        self, source: str, instrument: str
+    ) -> list[tuple[int, int | None, int | None]]:
+        """(rows, oldest, newest) of M1, H1 and the cached bars: a change in what is stored
+        that a delete's preview token must notice (`openchart.purge.fingerprint`)."""
+        series = await self.series(source, instrument)
+        if series is None:
+            return []
+        out = []
+        for table in ("candles_m1", "candles_h1", "candles_cache"):
+            sql = f"SELECT COUNT(*), MIN(ts), MAX(ts) FROM {table} WHERE series=?"
+            async with self.conn.execute(sql, (series.id,)) as cur:
+                out.append(tuple(await cur.fetchone()))
+        return out
+
     async def cache_count(self, source: str, instrument: str, timeframe: str) -> int:
         series = await self.series(source, instrument)
         if series is None:

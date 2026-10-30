@@ -1,7 +1,18 @@
 import { describe, expect, it } from "vitest";
 
-import type { Instrument } from "./api";
-import { chooseInstrument, removedInstruments, removedLine, sizeText, visibleInstruments } from "./instruments";
+import type { DeletePreview, Instrument } from "./api";
+import {
+  canDelete,
+  chooseInstrument,
+  deletedText,
+  deleteLines,
+  deleteSize,
+  drawingsAndAlerts,
+  removedInstruments,
+  removedLine,
+  sizeText,
+  visibleInstruments,
+} from "./instruments";
 
 const row = (instrument: string, enabled: boolean): Instrument => ({
   instrument,
@@ -50,5 +61,61 @@ describe("the Removed section", () => {
 
   it("writes sizes in units", () => {
     expect([0, 900, 2048, 5_000_000, 3 * 1024 ** 3].map(sizeText)).toEqual(["0 B", "900 B", "2.0 KB", "4.8 MB", "3.0 GB"]);
+  });
+});
+
+describe("Delete data… on a removed instrument", () => {
+  const stored = {
+    bytes: 13_000_000,
+    candles: 1_201_000,
+    m1: 1_000_000,
+    h1: 200_000,
+    cached: 1_000,
+    closures: 12,
+    tick_files: 3,
+    tick_bytes: 2048,
+    drawings: 1,
+    alerts: 2,
+    active_alerts: 1,
+  };
+  const preview = (over: Partial<typeof stored> = {}): DeletePreview => ({
+    instrument: "EUR_DKK",
+    stored: { ...stored, ...over },
+    needs_drawings_and_alerts: (over.drawings ?? stored.drawings) + (over.alerts ?? stored.alerts) > 0,
+    token: "t",
+  });
+
+  it("lists what goes, with the size, and what stays unless ticked", () => {
+    expect(deleteLines(preview(), false)).toEqual([
+      "1,000,000 minute and 200,000 hourly candles, 1,000 cached bars",
+      "12 market closures",
+      "3 tick files (2.0 KB)",
+      "Kept unless the box below is ticked: 1 drawing and 2 alerts",
+    ]);
+    expect(deleteLines(preview(), true).slice(-1)).toEqual(["1 drawing and 2 alerts, and their alert log"]);
+    expect(deleteSize(preview())).toBe("about 12.4 MB");
+    expect([drawingsAndAlerts(1, 0), drawingsAndAlerts(0, 3), drawingsAndAlerts(2, 1)]).toEqual(["1 drawing", "3 alerts", "2 drawings and 1 alert"]);
+  });
+
+  it("leaves out what there is none of", () => {
+    expect(deleteLines(preview({ closures: 0, tick_files: 0, tick_bytes: 0, drawings: 0, alerts: 0 }), false)).toEqual([
+      "1,000,000 minute and 200,000 hourly candles, 1,000 cached bars",
+    ]);
+  });
+
+  it("needs the exact name typed, and the box when there are drawings or alerts", () => {
+    expect(canDelete(preview(), "EUR_DKK", true)).toBe(true);
+    expect(canDelete(preview(), "EUR_DKK", false)).toBe(false);
+    expect(canDelete(preview({ drawings: 0, alerts: 0 }), "EUR_DKK", false)).toBe(true);
+    for (const typed of ["", "eur_dkk", "EUR_DKK ", "EUR_DK", " EUR_DKK"]) expect(canDelete(preview(), typed, true)).toBe(false);
+  });
+
+  it("says what was deleted and how much the database shrank", () => {
+    const done = { ok: true as const, deleted: {}, drawings: 1, alerts: 2, tick_error: null, vacuum: { before: 50e6, after: 30e6, seconds: 1.2 }, vacuum_error: null };
+    expect(deletedText("EUR_DKK", done)).toBe("EUR_DKK deleted, with 1 drawing and 2 alerts. The database went from 47.7 MB to 28.6 MB.");
+    expect(deletedText("EUR_DKK", { ...done, drawings: 0, alerts: 0, vacuum: null, vacuum_error: "busy" })).toBe(
+      "EUR_DKK deleted. The database was not compacted (busy); SQLite reuses the space.",
+    );
+    expect(deletedText("EUR_DKK", { ...done, drawings: 0, alerts: 0, tick_error: "PermissionError" })).toContain("Some tick files could not be deleted");
   });
 });

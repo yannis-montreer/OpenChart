@@ -19,6 +19,7 @@ from openchart.api.auth import SESSION_COOKIE, SESSION_SECONDS, PasswordError, c
 from openchart.config import OandaConfig
 from openchart.market.instruments import instrument_hours
 from openchart.providers.base import InstrumentInfo, ProviderError
+from openchart.purge import DeleteRefused
 from openchart.retention import DEFAULT_TICK_RETENTION, TICK_RETENTION, change_m1_depth
 from openchart.server import Server
 from openchart.settings import TICK_RETENTION_KEY, EncryptedFileSecrets, describe_secret
@@ -81,6 +82,12 @@ class InstrumentBody(BaseModel):
 
 class DepthBody(BaseModel):
     m1_depth: M1Depth
+
+
+class DeleteBody(BaseModel):
+    token: str = Field(max_length=128)  # from the preview
+    confirm: str = Field(max_length=64)  # the instrument's name, typed
+    drawings_and_alerts: bool = False
 
 
 def client_host(request: Request) -> str:
@@ -394,34 +401,77 @@ def account_routes(server: Server) -> APIRouter:
     @router.post("/instruments")
     async def add_instrument(body: InstrumentBody) -> dict[str, Any]:
         oanda = (await server.effective_config()).oanda
-        info = await enable_instrument(
-            body.instrument.strip().upper(), await oanda_instruments(oanda)
-        )
-        if body.m1_depth is not None:
-            await change_m1_depth(
-                server.store, server.source, info.instrument, body.m1_depth, time.time()
-            )
-        await server.reconfigure()  # the feed backfills new instruments when it starts
+        name = body.instrument.strip().upper()
+        # Under the instrument's lock, as every change of what is stored for it: a delete
+        # of its data is refused meanwhile, and an add waits for one under way.
+        async with server.instrument_locks.hold(name, "being added"):
+            info = await enable_instrument(name, await oanda_instruments(oanda))
+            if body.m1_depth is not None:
+                await change_m1_depth(
+                    server.store, server.source, info.instrument, body.m1_depth, time.time()
+                )
+            await server.reconfigure()  # the feed backfills new instruments when it starts
         return {"ok": True, "instrument": info.instrument}
 
     @router.put("/instruments/{instrument}/m1-depth")
     async def set_m1_depth(instrument: str, body: DepthBody) -> dict[str, Any]:
         """How far back minutes are kept. Longer: the missing minutes are downloaded, newest
         first. Shorter: the older minutes are deleted by the next daily run."""
-        if await server.store.instrument(server.source, instrument) is None:
-            raise HTTPException(404, f"unknown instrument {instrument!r}")
-        download = await change_m1_depth(
-            server.store, server.source, instrument, body.m1_depth, time.time()
-        )
-        if download:
-            await server.reconfigure()  # the feed resumes the download to the new limit
+        async with server.instrument_locks.hold(instrument, "its minute history changing"):
+            if await server.store.instrument(server.source, instrument) is None:
+                raise HTTPException(404, f"unknown instrument {instrument!r}")
+            download = await change_m1_depth(
+                server.store, server.source, instrument, body.m1_depth, time.time()
+            )
+            if download:
+                await server.reconfigure()  # the feed resumes the download to the new limit
         return {"ok": True, "m1_depth": body.m1_depth, "downloading": download}
 
     @router.delete("/instruments/{instrument}")
     async def remove_instrument(instrument: str) -> dict[str, Any]:
-        if not await server.store.set_instrument_enabled(server.source, instrument, False):
-            raise HTTPException(404, f"unknown instrument {instrument!r}")
-        await server.reconfigure()
+        async with server.instrument_locks.hold(instrument, "being removed"):
+            if not await server.store.set_instrument_enabled(server.source, instrument, False):
+                raise HTTPException(404, f"unknown instrument {instrument!r}")
+            await server.reconfigure()
         return {"ok": True}
+
+    @router.get("/instruments/{instrument}/delete-preview")
+    async def delete_preview(instrument: str) -> dict[str, Any]:
+        """What "Delete data..." on a removed instrument would delete, and the token the
+        delete must carry (docs/api.md, docs/decisions-instrument-delete.md)."""
+        try:
+            stored, token = await server.delete_preview(instrument)
+        except DeleteRefused as exc:
+            raise HTTPException(exc.status, str(exc)) from None
+        return {
+            "instrument": instrument,
+            "stored": stored.to_json(),
+            "needs_drawings_and_alerts": bool(stored.drawings or stored.alerts),
+            "token": token,
+        }
+
+    @router.post("/instruments/{instrument}/delete")
+    async def delete_instrument(instrument: str, body: DeleteBody) -> dict[str, Any]:
+        try:
+            purged = await server.delete_instrument(
+                instrument,
+                body.token,
+                confirm=body.confirm,
+                drawings_and_alerts=body.drawings_and_alerts,
+            )
+        except DeleteRefused as exc:
+            raise HTTPException(exc.status, str(exc)) from None
+        v = purged.vacuum
+        return {
+            "ok": True,
+            "deleted": purged.rows,
+            "drawings": len(purged.drawings),
+            "alerts": len(purged.alerts),
+            "tick_error": purged.tick_error,
+            "vacuum": {"before": v.before, "after": v.after, "seconds": round(v.seconds, 3)}
+            if v
+            else None,
+            "vacuum_error": purged.vacuum_error,
+        }
 
     return router
