@@ -16,10 +16,15 @@ the same function the browser draws with), or a fixed level.
   observations (the computer slept, the feed was down, the server was stopped) opens a
   gap: live ticks are kept aside, the server repairs the stored history and `catch_up`
   replays the M1 candles of the missed period through the same checks (those fires are
-  marked `late`), then the kept ticks, and the engine is live again.
+  marked `late`), then the kept ticks, and the engine is live again. The replay skips,
+  for each alert, the minutes up to the one it last observed (`seen_through`): after a
+  crash its saved state can be newer than the saved `last_eval`.
 
 The engine is synchronous and does no I/O: fires go to `fires` (an asyncio queue) and
-the server persists, broadcasts and delivers them.
+the server persists, broadcasts and delivers them. Each fire carries the alert's state
+as it was right after it (`Fire.state`), and stays in `unsaved` until the server has
+written it: until then the server saves neither that alert's newer state nor a
+`last_eval` past the fire's minute, so a crash can never lose it.
 """
 
 from __future__ import annotations
@@ -28,7 +33,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from openchart.alerts.geometry import Clock, line_price
 from openchart.market.sessions import bar_bounds
@@ -67,6 +72,9 @@ class Fire:
     line_value: float | None
     cross: str  # up | down
     late: str | None = None  # wake | reconnect | restart
+    state: AlertState | None = None  # the alert's state right after this fire
+    fire_count: int = 0  # and its counters
+    last_fired_at: int | None = None
 
 
 class AlertEngine:
@@ -87,6 +95,8 @@ class AlertEngine:
         self.next_reason = "restart"
         self.last_eval: dict[str, float] = {}  # instrument -> time of the last observation
         self.fires: asyncio.Queue[Fire] = asyncio.Queue()
+        self.unsaved: list[Fire] = []  # fires the server has not written yet
+        self.replay_from: dict[str, int] = {}  # during a catch-up: alert -> first minute to replay
         self.dirty: set[str] = set()  # alerts whose state changed since the last save
         self.changed: list[Alert] = []  # status changes (expired) for the server to save
 
@@ -167,6 +177,9 @@ class AlertEngine:
                 continue
             if alert.expires_at is not None and t >= alert.expires_at:
                 continue
+            if late is not None and t < self.replay_from.get(alert.id, t):
+                continue  # a replayed minute this alert observed before the gap
+            alert.state.seen_through = t
             price = prices[alert.trigger_price]
             if alert.trigger_mode == "touch":
                 self._check(alert, t, price, late)
@@ -242,7 +255,27 @@ class AlertEngine:
         alert.fire_count += 1
         if alert.frequency == "once":
             alert.status = "triggered"
-        self.fires.put_nowait(Fire(alert, t, price, value, cross, late))
+        fire = Fire(
+            alert, t, price, value, cross, late, replace(st), alert.fire_count, alert.last_fired_at
+        )
+        self.unsaved.append(fire)
+        self.fires.put_nowait(fire)
+
+    def saved(self, fire: Fire) -> None:
+        """The server wrote `fire`: its alert's newer state may be saved again (`dirty`)."""
+        self.unsaved = [f for f in self.unsaved if f is not fire]
+        self.dirty.add(fire.alert.id)
+
+    def holding(self) -> tuple[set[str], dict[str, float]]:
+        """What a regular save must leave out while fires wait to be written: those alerts'
+        states, and, per instrument, a `last_eval` before the first waiting fire's minute
+        (so a restart replays that minute)."""
+        alerts = {f.alert.id for f in self.unsaved}
+        before: dict[str, float] = {}
+        for f in self.unsaved:
+            cap = int(f.ts) // 60 * 60 - 1
+            before[f.alert.instrument] = min(before.get(f.alert.instrument, cap), cap)
+        return alerts, before
 
     # Catch-up after a pause
 
@@ -272,14 +305,24 @@ class AlertEngine:
         if gap is None:
             return 0
         before = self.fires.qsize()
-        for c in candles:
-            bullish = c.mid.c >= c.mid.o
-            order = ("o", "l", "h", "c") if bullish else ("o", "h", "l", "c")
-            for k, field in enumerate(order):
-                t = c.ts + (0, 20, 40, 59)[k]
-                self.observe(
-                    instrument, t, getattr(c.bid, field), getattr(c.ask, field), gap.reason
-                )
+        # An alert whose saved state is newer than the saved `last_eval` (a crash between
+        # the two saves) starts after the minute it last observed, not before it again.
+        self.replay_from = {
+            a.id: int(a.state.seen_through) // 60 * 60 + 60
+            for a in self.alerts.values()
+            if a.instrument == instrument and a.state.seen_through is not None
+        }
+        try:
+            for c in candles:
+                bullish = c.mid.c >= c.mid.o
+                order = ("o", "l", "h", "c") if bullish else ("o", "h", "l", "c")
+                for k, field in enumerate(order):
+                    t = c.ts + (0, 20, 40, 59)[k]
+                    self.observe(
+                        instrument, t, getattr(c.bid, field), getattr(c.ask, field), gap.reason
+                    )
+        finally:
+            self.replay_from = {}
         late = self.fires.qsize() - before
         for tick in gap.ticks:
             self.observe(instrument, tick.ts, tick.bid, tick.ask)

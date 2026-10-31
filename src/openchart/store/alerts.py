@@ -15,6 +15,8 @@ from typing import Any
 
 import aiosqlite
 
+from openchart.store.sqlite import atomic
+
 TYPES = ("line_cross", "level_cross")
 DIRECTIONS = ("cross", "up", "down")
 PRICES = ("bid", "ask", "mid")
@@ -34,6 +36,7 @@ class AlertState:
     bar_end: int | None = None
     bar_price: float | None = None  # candle_close: last price seen in that bar
     fired_bar: int | None = None  # once_per_bar: start of the bar it last fired in
+    seen_through: float | None = None  # time of the last observation (a catch-up skips it)
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -292,6 +295,53 @@ class AlertStore:
         )
         await self.conn.commit()
         event.id = cur.lastrowid or 0
+        return event
+
+    async def record_fire(
+        self,
+        event: AlertEvent,
+        alert: Alert,
+        state: AlertState,
+        fire_count: int,
+        last_fired_at: int | None,
+    ) -> AlertEvent:
+        """A fire: its event and the alert's state right after it, both or neither
+        (docs/decisions-alert-fire-atomic.md). The status is the alert's now."""
+
+        def write(db) -> int:
+            cur = db.execute(
+                "INSERT INTO alert_events (alert_id, ts, price, line_value, cross, message,"
+                " late, detected_at, delivered, attempts, error)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    event.alert_id,
+                    event.ts,
+                    event.price,
+                    event.line_value,
+                    event.cross,
+                    event.message,
+                    event.late,
+                    event.detected_at,
+                    int(event.delivered),
+                    event.attempts,
+                    event.error,
+                ),
+            )
+            db.execute(
+                "UPDATE alerts SET status=?, enabled=?, fire_count=?, last_fired_at=?,"
+                " state_json=? WHERE id=?",
+                (
+                    alert.status,
+                    int(alert.active),
+                    fire_count,
+                    last_fired_at,
+                    json.dumps(state.to_json()),
+                    alert.id,
+                ),
+            )
+            return cur.lastrowid or 0
+
+        event.id = await atomic(self.conn, write)
         return event
 
     async def events(self, limit: int = 100, alert_id: str | None = None) -> list[AlertEvent]:
