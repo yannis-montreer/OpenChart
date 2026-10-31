@@ -178,8 +178,13 @@ class AlertService:
         event.message = text
         telegram = "telegram" in alert.notify
         event.delivered = not telegram  # nothing to send
-        event = await self.store.add_event(event)
-        await self.store.save(alert, touch=False)
+        # The event and the state right after the fire in one step: a crash leaves both
+        # or neither (then the catch-up after the restart finds the cross again).
+        state = fire.state if fire.state is not None else alert.state
+        event = await self.store.record_fire(
+            event, alert, state, fire.fire_count, fire.last_fired_at
+        )
+        self.engine.saved(fire)
         log.info(
             "alert %s fired: %s %s at %s%s",
             alert.id,
@@ -338,9 +343,15 @@ class AlertService:
             self.dispatcher.system(message)
 
     async def save_state(self) -> None:
-        dirty = [self.engine.alerts[i] for i in self.engine.dirty if i in self.engine.alerts]
-        self.engine.dirty.clear()
+        """The regular save. Fires not written yet hold back their alerts' states and the
+        `last_eval` of their instrument (`AlertEngine.holding`), so that a crash before
+        they are written leaves a state from before them, and a restart replays them."""
+        held, before = self.engine.holding()
+        engine = self.engine
+        dirty = [engine.alerts[i] for i in engine.dirty if i in engine.alerts and i not in held]
+        engine.dirty &= held
         if dirty:
             await self.store.save_states(dirty)
-        if self.engine.last_eval:
-            await self.server.settings.set(LAST_EVAL_KEY, self.engine.last_eval)
+        if engine.last_eval:
+            last = {k: min(v, before.get(k, v)) for k, v in engine.last_eval.items()}
+            await self.server.settings.set(LAST_EVAL_KEY, last)

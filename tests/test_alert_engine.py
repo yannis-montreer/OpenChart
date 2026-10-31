@@ -64,6 +64,24 @@ def test_level_cross_up_and_down():
     assert got[0].line_value == 100.0 and got[0].late is None
 
 
+def test_each_fire_carries_the_state_right_after_it_and_waits_to_be_saved():
+    """Two fires queued before the server writes either: each one's own state and counters,
+    not the alert's latest (docs/decisions-alert-fire-atomic.md)."""
+    e = engine(alert(frequency="repeating"))
+    up, down = walk(e, [99, 100.5, 99.5, 98])
+    assert (up.state.s_prev, up.fire_count, up.last_fired_at) == (0.5, 1, int(T0 + 1))
+    assert (down.state.s_prev, down.fire_count) == (-0.5, 2)
+    assert e.alerts["a1"].state.s_prev == -2.0
+    assert e.unsaved == [up, down]
+    assert e.holding() == ({"a1"}, {"XAU_USD": int(T0 + 1) // 60 * 60 - 1})
+    e.dirty.clear()
+    e.saved(up)
+    assert e.holding() == ({"a1"}, {"XAU_USD": int(T0 + 2) // 60 * 60 - 1})
+    e.saved(down)
+    assert e.unsaved == [] and e.holding() == (set(), {})
+    assert e.dirty == {"a1"}  # the latest state is saved by the next regular save
+
+
 @pytest.mark.parametrize(("direction", "expected"), [("up", ["up"]), ("down", ["down"])])
 def test_direction_is_respected(direction, expected):
     e = engine(alert(direction=direction, frequency="repeating"))
