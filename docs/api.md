@@ -23,6 +23,8 @@ Requests that change something (`POST`, `PUT`, `DELETE`) and websocket connectio
 | `GET /api/instruments/available?q=` | instruments of the broker account, matching `q` |
 | `POST /api/instruments` | `{instrument}`: enable it; its history downloads in the background |
 | `DELETE /api/instruments/{instrument}` | disable it (stored history is kept) |
+| `GET /api/instruments/{instrument}/delete-preview` | a removed instrument: what a delete would remove → `{instrument, stored: {bytes, candles, m1, h1, cached, closures, tick_files, tick_bytes, drawings, alerts, active_alerts}, needs_drawings_and_alerts, token}`. Deletes nothing. `404` unknown; `409` enabled, still downloading or in the feed, or busy (an add-back, a minute-history change, the repair before an alert catch-up, retention, another delete) |
+| `POST /api/instruments/{instrument}/delete` | `{token, confirm, drawings_and_alerts?}`: deletes the instrument, its candles, cached bars, closures and tick files (and, with `drawings_and_alerts`, its drawings, alerts and alert log), then compacts the database. `confirm` must be the instrument's name (`400`). `409` for the preview's refusals, for drawings or alerts not named, and when `token` is not the one a preview gives now (something was stored or changed since). → `{ok, deleted: {table: rows}, drawings, alerts, tick_error, vacuum: {before, after, seconds} \| null, vacuum_error}`. See `docs/decisions-instrument-delete.md` |
 
 Before setup, the two test routes and `/api/setup/defaults` also work without a session, for the wizard (same setup-code rule, sent as the `X-Setup-Code` header).
 

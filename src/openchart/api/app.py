@@ -96,22 +96,6 @@ _NOT_BUILT = """<!doctype html><meta charset="utf-8"><title>OpenChart</title>
 <code>npm run build</code>, then reload. The API is at <a href="/docs">/docs</a>.</p>"""
 
 
-def _stored_json(s) -> dict[str, int]:
-    return {
-        "bytes": s.bytes,
-        "candles": s.candles,
-        "m1": s.m1,
-        "h1": s.h1,
-        "cached": s.cached,
-        "closures": s.closures,
-        "tick_files": s.tick_files,
-        "tick_bytes": s.tick_bytes,
-        "drawings": s.drawings,
-        "alerts": s.alerts,
-        "active_alerts": s.active_alerts,
-    }
-
-
 def create_app(server: Server) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -223,7 +207,7 @@ def create_app(server: Server) -> FastAPI:
                 "m1_depth": retention.m1_depth_choice(r.m1_depth, years),
                 "m1_depth_default": r.m1_depth is None,
                 "m1_from": retention.cutoff(now, retention.m1_depth_days(r.m1_depth, years)),
-                "stored": _stored_json(stored[r.instrument]) if r.instrument in stored else None,
+                "stored": stored[r.instrument].to_json() if r.instrument in stored else None,
             }
             for r in rows
         ]

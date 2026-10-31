@@ -16,7 +16,8 @@ import asyncio
 import logging
 import time
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import AsyncExitStack, asynccontextmanager
 
 from openchart.market.aggregate import resample_full
 from openchart.market.sessions import bar_bounds, bar_start
@@ -38,6 +39,15 @@ class CandleCache:
         self.store = store
         self.clock = clock
         self._locks: dict[tuple[str, str, str], asyncio.Lock] = defaultdict(asyncio.Lock)
+
+    @asynccontextmanager
+    async def holding(self, source: str, instrument: str) -> AsyncIterator[None]:
+        """Every cached timeframe's lock of one instrument: no bar of it is computed or
+        written meanwhile (a delete: `write_cache` would otherwise make its series anew)."""
+        async with AsyncExitStack() as stack:
+            for name in CACHED_TIMEFRAMES:
+                await stack.enter_async_context(self._locks[(source, instrument, name)])
+            yield
 
     async def extend_all(self, source: str, instrument: str) -> int:
         written = 0

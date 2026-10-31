@@ -63,6 +63,28 @@ export interface StoredData {
   drawings: number;
   alerts: number;
   active_alerts: number;
+  m1?: number;
+  h1?: number;
+  cached?: number;
+}
+
+/** What "Delete data…" would delete, and the token the delete must carry (a newer state refuses it). */
+export interface DeletePreview {
+  instrument: string;
+  stored: StoredData;
+  /** It has drawings or alerts: the delete needs `drawings_and_alerts`. */
+  needs_drawings_and_alerts: boolean;
+  token: string;
+}
+
+export interface DeletedInstrument {
+  ok: true;
+  deleted: Record<string, number>;
+  drawings: number;
+  alerts: number;
+  tick_error: string | null;
+  vacuum: { before: number; after: number; seconds: number } | null;
+  vacuum_error: string | null;
 }
 
 /** An instrument's history download (newest first: hourly, then minute candles). */
@@ -252,6 +274,11 @@ export const account = {
     ),
   removeInstrument: (instrument: string) =>
     request<{ ok: true }>("DELETE", `api/instruments/${encodeURIComponent(instrument)}`),
+  deletePreview: (instrument: string) => get<DeletePreview>(`api/instruments/${encodeURIComponent(instrument)}/delete-preview`),
+  deleteInstrument: (instrument: string, token: string, confirm: string, drawings_and_alerts: boolean) =>
+    request<DeletedInstrument>("POST", `api/instruments/${encodeURIComponent(instrument)}/delete`, {
+      body: { token, confirm, drawings_and_alerts },
+    }),
 };
 
 // Drawings

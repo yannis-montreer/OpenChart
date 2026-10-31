@@ -7,7 +7,6 @@ import asyncio
 import json
 import logging
 import os
-import shutil
 import sqlite3
 import sys
 import time
@@ -17,7 +16,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from openchart import __version__, retention
+from openchart import __version__, purge, retention
 from openchart.config import Config, ConfigError, load_config
 from openchart.lock import DataFolderInUse, DataFolderLock, exclusive
 from openchart.market.backfill import (
@@ -313,43 +312,37 @@ async def _cmd_purge(config: Config, args: argparse.Namespace) -> int:
         if not args.yes:
             print("Nothing deleted. Run again with --yes to delete.")
             return 0
-        await ctx.store.purge_instrument(source, name)
-        if args.drawings_and_alerts:
-            await conn.execute(
-                "DELETE FROM alert_events WHERE alert_id IN"
-                " (SELECT id FROM alerts WHERE instrument=?)",
-                (name,),
-            )
-            await conn.execute("DELETE FROM alerts WHERE instrument=?", (name,))
-            await conn.execute("DELETE FROM drawings WHERE instrument=?", (name,))
-            await conn.commit()
-        if ticks.exists():
-            shutil.rmtree(ticks)
-        print(f"Deleted. Add {name} again in Settings, Instruments to download it afresh.")
+        deleted = f"Deleted. Add {name} again in Settings, Instruments to download it afresh."
+        # The same deletion as the server's Settings, Removed, "Delete data..." (`purge`).
+        # VACUUM needs the database to itself, which this command has (the server is stopped).
+        purged = await purge.delete_instrument(
+            ctx.store,
+            config.ticks_dir,
+            config.db_path,
+            source,
+            name,
+            drawings_and_alerts=args.drawings_and_alerts,
+            vacuum=not args.no_vacuum,
+            before_vacuum=lambda size: print(
+                f"{deleted}\nCompacting the database (VACUUM), {size / 1e6:.1f} MB ...",
+                flush=True,
+            ),
+        )
+        if purged.tick_error:
+            print(f"Some tick files could not be deleted ({purged.tick_error}): {ticks}")
         if args.no_vacuum:
+            print(deleted)
             print(
                 "The database file was not compacted (--no-vacuum): SQLite reuses the freed"
                 " space for new rows."
             )
             return 0
-        # SQLite keeps freed pages in the file; VACUUM gives them back to the disk. It
-        # needs the database to itself, which `purge` already has (the server is stopped).
-        before = _db_size(config.db_path)
-        print(f"Compacting the database (VACUUM), {before / 1e6:.1f} MB ...", flush=True)
-        started = time.monotonic()
-        await conn.execute("VACUUM")
-        await conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        after = _db_size(config.db_path)
-        print(
-            f"VACUUM: {before / 1e6:.1f} MB to {after / 1e6:.1f} MB"
-            f" in {time.monotonic() - started:.1f} s."
-        )
+        if purged.vacuum is None:
+            print(f"VACUUM failed ({purged.vacuum_error}): SQLite reuses the freed space.")
+            return 1
+        v = purged.vacuum
+        print(f"VACUUM: {v.before / 1e6:.1f} MB to {v.after / 1e6:.1f} MB in {v.seconds:.1f} s.")
     return 0
-
-
-def _db_size(path: Path) -> int:
-    """The database with its write-ahead log, as the disk sees it."""
-    return sum(p.stat().st_size for p in (path, Path(f"{path}-wal")) if p.exists())
 
 
 async def _cmd_retention(config: Config, args: argparse.Namespace) -> int:
