@@ -90,6 +90,10 @@ class Server:
         self._feed_task: asyncio.Task[None] | None = None
         self._tasks: list[asyncio.Task[Any]] = []
         self._reconfigure_lock = asyncio.Lock()
+        # Every write to charts' indicators (`api.chart_indicators.ChartIndicators.lock`),
+        # and the delete of an instrument's data, which deletes its chart's. The delete
+        # takes it last; nothing that holds it waits for the instrument, feed or cache locks.
+        self.charts_lock = asyncio.Lock()
         self.instrument_locks = purge.InstrumentLocks()
         self.telegram_transport = None  # tests replace the HTTP transport
         self.indicators = Registry()  # built-in: they run here (D5)
@@ -387,6 +391,7 @@ class Server:
             self.instrument_locks.hold(instrument, "being deleted"),
             self._reconfigure_lock,
             self.cache.holding(source, instrument),
+            self.charts_lock,  # no chart write between the token's check and the delete
         ):
             row = await self.store.instrument(source, instrument)
             if row is None:

@@ -377,6 +377,8 @@ def test_nothing_outside_the_instrument_changes(removed):
     assert level.status_code == 200, level.text
     _, euro_alert = line_and_alert(client)
     tick_file(client, G, data=b"gold ticks")
+    put_indicators(client, G, {"id": "ema", "uid": "g1"}, {"id": "rsi", "uid": "g2"})
+    put_indicators(client, E, {"id": "ema", "uid": "g1"})  # the same uid on the other chart
     assert client.put("/api/settings", json={"timezone": "Europe/Paris"}).status_code == 200
     layout = client.post("/api/layouts", json={"name": "Gold", "layout": {"instrument": G}})
     assert layout.status_code in (200, 201), layout.text
@@ -389,8 +391,10 @@ def test_nothing_outside_the_instrument_changes(removed):
     before = call(client, _everything, server, E, sid, ids)
     assert before["candles_m1"] and before["drawings"] and before["alerts"] and before["files"]
     assert before["alert_events"]
+    assert before["chart_indicators"] and before["chart_indicator_revisions"]
 
     assert delete(client, preview(client)["token"], both=True).status_code == 200
+    assert call(client, _chart_rows, server, E) == (0, 0)
     after = call(client, _everything, server, E, sid, ids)
     for table in before:
         assert after[table] == before[table], table
@@ -517,3 +521,111 @@ def test_the_command_uses_the_shared_deletion(tmp_path, monkeypatch, capsys):
     assert seen == [True, False]
     out = capsys.readouterr().out
     assert "VACUUM" in out and "not compacted" in out
+
+
+# The chart's indicators (docs/decisions-instrument-delete-indicators.md)
+
+
+def put_indicators(client, name: str, *entries: dict) -> dict:
+    r = client.put(f"/api/charts/fake/{name}/indicators", json={"indicators": list(entries)})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+async def _chart_rows(server, name: str) -> tuple[int, int]:
+    """(instances, revision rows) stored for `name`'s chart."""
+    conn = server.store.conn
+    out = []
+    for table in ("chart_indicators", "chart_indicator_revisions"):
+        sql = f"SELECT COUNT(*) FROM {table} WHERE source='fake' AND instrument=?"
+        out.append((await conn.execute_fetchall(sql, (name,)))[0][0])
+    return out[0], out[1]
+
+
+def test_the_preview_counts_the_charts_indicators_and_its_token_sees_them(removed):
+    client = removed
+    token = preview(client)["token"]
+    put_indicators(client, E, {"id": "ema", "params": {"length": 21}, "uid": "e1"})
+    p = preview(client)
+    assert p["stored"]["indicators"] == 1
+    assert p["needs_drawings_and_alerts"] is False  # they always go with the data
+    assert p["token"] != token
+    for change in (
+        {"id": "ema", "params": {"length": 50}, "uid": "e1"},  # other values
+        {"id": "ema", "params": {"length": 50}, "uid": "e2"},  # another instance
+    ):
+        token = preview(client)["token"]
+        put_indicators(client, E, change)
+        assert preview(client)["token"] != token, change
+    token = preview(client)["token"]
+    put_indicators(client, E, {"id": "ema", "params": {"length": 50}, "uid": "e2"})  # the same list
+    assert preview(client)["token"] != token  # a new revision: the token moves on with it
+
+
+def test_the_delete_removes_the_charts_indicators_and_its_revision(removed):
+    client = removed
+    put_indicators(client, E, {"id": "ema", "uid": "e1"}, {"id": "sma", "uid": "e2"})
+    put_indicators(client, G, {"id": "ema", "uid": "g1"})
+    assert call(client, _chart_rows, client.server, E) == (2, 1)
+    r = delete(client, preview(client)["token"])
+    assert r.status_code == 200, r.text
+    assert r.json()["deleted"]["chart_indicators"] == 2
+    assert r.json()["deleted"]["chart_indicator_revisions"] == 1
+    assert call(client, _chart_rows, client.server, E) == (0, 0)
+    assert call(client, _chart_rows, client.server, G) == (1, 1)
+    add(client, E)  # added back: a chart without indicators, at revision 0
+    chart = client.get(f"/api/charts/fake/{E}/indicators").json()
+    assert (chart["revision"], chart["indicators"]) == (0, [])
+
+
+def test_indicator_alerts_are_alerts_of_the_instrument(removed):
+    """As the indicator alerts design says (docs/designs/indicator-alerts.md, section 5):
+    counted with the alerts, named before the delete, deleted with the instrument."""
+    from openchart.store.alerts import Alert
+
+    client = removed
+    server = client.server
+    put_indicators(client, E, {"id": "ema", "uid": "e1"})
+    put_indicators(client, G, {"id": "ema", "uid": "g1"})
+    made = {}
+    for name, uid in ((E, "e1"), (G, "g1")):
+        alert = Alert(id="", instrument=name, type="indicator", trigger_mode="candle_close")
+        made[name] = call(client, server.alerts.store.create, alert)
+
+        async def condition(alert_id=made[name].id, uid=uid):
+            await server.store.conn.execute(
+                "UPDATE alerts SET condition_json=? WHERE id=?",
+                (f'{{"uid": "{uid}", "output": "ema"}}', alert_id),
+            )
+            await server.store.conn.commit()
+
+        call(client, condition)
+    p = preview(client)
+    assert (p["stored"]["alerts"], p["stored"]["indicators"]) == (1, 1)
+    assert p["needs_drawings_and_alerts"] is True
+    r = delete(client, p["token"])
+    assert r.status_code == 409 and "1 alert(s)" in r.json()["detail"]
+    assert call(client, _chart_rows, server, E) == (1, 1)  # nothing deleted
+    r = delete(client, preview(client)["token"], both=True)
+    assert r.status_code == 200 and r.json()["alerts"] == 1
+    assert call(client, server.alerts.store.get, made[E].id) is None
+    assert call(client, server.alerts.store.get, made[G].id) is not None
+    assert call(client, _chart_rows, server, G) == (1, 1)
+
+
+def test_no_chart_write_comes_between_the_token_and_the_delete(removed, monkeypatch):
+    """The charts' lock is held from the token's check to the end: a chart write waits, so
+    the delete never removes indicators its preview did not show."""
+    client = removed
+    server = client.server
+    put_indicators(client, E, {"id": "ema", "uid": "e1"})
+    seen = []
+    real = purge.compact
+
+    async def spy(conn, path):
+        seen.append(server.charts_lock.locked())
+        return await real(conn, path)
+
+    monkeypatch.setattr(purge, "compact", spy)
+    assert delete(client, preview(client)["token"]).status_code == 200
+    assert seen == [True] and not server.charts_lock.locked()

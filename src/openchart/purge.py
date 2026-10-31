@@ -74,11 +74,18 @@ async def delete_instrument(
     vacuum: bool = True,
     before_vacuum: Callable[[int], None] | None = None,
 ) -> Purged:
-    """Delete the instrument's row, candles, cached bars, closures and tick files; with
-    `drawings_and_alerts` also its drawings, its alerts and their log. Then VACUUM unless
-    `vacuum` is False (`before_vacuum(size)` is called first: the command prints)."""
+    """Delete the instrument's row, candles, cached bars, closures, tick files and its
+    chart's indicators (and their revision); with `drawings_and_alerts` also its drawings,
+    its alerts and their log. Then VACUUM unless `vacuum` is False (`before_vacuum(size)`
+    is called first: the command prints)."""
     conn = store.conn
     purged = Purged(rows=await store.purge_instrument(source, instrument))
+    for table in ("chart_indicators", "chart_indicator_revisions"):
+        cur = await conn.execute(
+            f"DELETE FROM {table} WHERE source=? AND instrument=?", (source, instrument)
+        )
+        purged.rows[table] = cur.rowcount
+    await conn.commit()
     if drawings_and_alerts:
         purged.alerts = await AlertStore(conn).list(instrument)
         purged.drawings = await DrawingStore(conn).list(instrument)
@@ -159,6 +166,17 @@ async def fingerprint(store: CandleStore, ticks_dir: Path, source: str, instrume
             instrument,
         ),
         "candles": await store.extent(source, instrument),
+        "indicators": await rows(
+            "SELECT position, uid, kind, indicator, params, visible, price_labels, legend_values"
+            " FROM chart_indicators WHERE source=? AND instrument=? ORDER BY position",
+            source,
+            instrument,
+        ),
+        "indicator_revision": await rows(
+            "SELECT revision FROM chart_indicator_revisions WHERE source=? AND instrument=?",
+            source,
+            instrument,
+        ),
     }
     parts["ticks"] = await asyncio.to_thread(_tick_files, ticks_dir / source / instrument)
     text = json.dumps([source, instrument, parts], sort_keys=True, default=str)
