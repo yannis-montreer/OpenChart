@@ -27,7 +27,6 @@ list yet", a PUT's revision, a delete's usage) cannot interleave with another.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import math
 import secrets
@@ -144,7 +143,7 @@ def unkeepable(indicator_id: str, params: dict[str, Any]) -> str | None:
 class ChartIndicators:
     def __init__(self, server: Server):
         self.server = server
-        self.lock = asyncio.Lock()
+        self.lock = server.charts_lock  # shared with the delete of an instrument's data
 
     def store(self) -> ChartIndicatorStore:
         return ChartIndicatorStore(self.server.db.conn)

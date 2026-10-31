@@ -343,3 +343,8 @@ Decisions and rules: `docs/decisions-retention.md`. Nothing newer than a limit i
 - `GET /api/instruments`: each row also has `m1_depth` (`"3m"`, `"1y"` or `"2y"`), `m1_depth_default` (true when it is the install's default, 2 years or `OPENCHART_BACKFILL_YEARS`) and `m1_from` (UTC epoch seconds: minutes that end at or before it are deleted by the next daily run).
 - `POST /api/instruments` accepts an optional `m1_depth`.
 - `PUT /api/instruments/{instrument}/m1-depth` with `{"m1_depth": "1y"}`: 404 for an unknown instrument, 422 for another value. Answers `{"ok": true, "m1_depth": "1y", "downloading": false}`; `downloading` is true when the new depth reaches further back than the finished download did, in which case the feed restarts and downloads the missing minutes, newest first. A shorter depth deletes nothing at once.
+
+## Delete data: the chart's indicators
+
+- `GET /api/instruments/{instrument}/delete-preview`: `stored` also has `indicators`, the instances on the instrument's chart. They always go with the data and do not set `needs_drawings_and_alerts`; the `token` changes when the chart's list is written.
+- `POST /api/instruments/{instrument}/delete`: `deleted` also counts `chart_indicators` and `chart_indicator_revisions`. Added back afterwards, the chart has no indicators (revision 0).

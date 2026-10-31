@@ -160,6 +160,65 @@ MUTANTS = [
     ),
     one("--no-vacuum ignored", M, "vacuum=not args.no_vacuum,", "vacuum=True,"),
     one("the command never compacts", M, "vacuum=not args.no_vacuum,", "vacuum=False,"),
+    # The chart's indicators (docs/decisions-instrument-delete-indicators.md)
+    one(
+        "the chart's indicators kept",
+        P,
+        'for table in ("chart_indicators", "chart_indicator_revisions"):',
+        "for table in ():",
+    ),
+    one(
+        "the chart's revision kept",
+        P,
+        'for table in ("chart_indicators", "chart_indicator_revisions"):',
+        'for table in ("chart_indicators",):',
+    ),
+    one(
+        "every chart's indicators deleted",
+        P,
+        'f"DELETE FROM {table} WHERE source=? AND instrument=?", (source, instrument)',
+        'f"DELETE FROM {table} WHERE source=? OR instrument=?", (source, instrument)',
+    ),
+    one(
+        "the preview does not count them",
+        "openchart/store/stored.py",
+        "        indicators=await one(\n",
+        "        indicators=0 * await one(\n",
+    ),
+    (
+        "token blind to the chart's indicators",
+        P,
+        [
+            ('        "indicators": await rows(\n', '        "indicators": 0 and await rows(\n'),
+            (
+                '        "indicator_revision": await rows(\n',
+                '        "indicator_revision": 0 and await rows(\n',
+            ),
+        ],
+        False,
+    ),
+    # The instances alone are redundant: every write to a chart moves its revision on.
+    # Equivalent (it survives by design); the revision alone is not (a write of the same
+    # list changes only the revision).
+    one(
+        "token blind to the instances alone",
+        P,
+        '        "indicators": await rows(\n',
+        '        "indicators": 0 and await rows(\n',
+        equivalent=True,
+    ),
+    one(
+        "token blind to the revision alone",
+        P,
+        '        "indicator_revision": await rows(\n',
+        '        "indicator_revision": 0 and await rows(\n',
+    ),
+    one(
+        "the delete does not hold the charts' lock",
+        V,
+        "            self.charts_lock,  # no chart write",
+        "            # self.charts_lock,  # no chart write",
+    ),
 ]
 
 if __name__ == "__main__":

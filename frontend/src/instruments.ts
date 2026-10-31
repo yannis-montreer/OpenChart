@@ -52,6 +52,7 @@ export function deleteLines(p: DeletePreview, both: boolean): string[] {
   const lines = [`${n(s.m1 ?? 0)} minute and ${n(s.h1 ?? 0)} hourly candles, ${count(s.cached ?? 0, "cached bar")}`];
   if (s.closures) lines.push(count(s.closures, "market closure"));
   if (s.tick_files) lines.push(`${count(s.tick_files, "tick file")} (${sizeText(s.tick_bytes)})`);
+  if (s.indicators) lines.push(`${count(s.indicators, "indicator")} on its chart`);
   const named = drawingsAndAlerts(s.drawings, s.alerts);
   if (named) lines.push(both ? `${named}${s.alerts ? ", and their alert log" : ""}` : `Kept unless the box below is ticked: ${named}`);
   return lines;

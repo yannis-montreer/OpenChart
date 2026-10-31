@@ -20,6 +20,7 @@ class Stored:
     tick_bytes: int
     #: Candle rows' share of the database file (see `stored_summary`) plus the tick files.
     bytes: int
+    indicators: int = 0  # instances on the instrument's chart (they go with its data)
 
     @property
     def candles(self) -> int:
@@ -35,6 +36,7 @@ class Stored:
             "closures": self.closures,
             "tick_files": self.tick_files,
             "tick_bytes": self.tick_bytes,
+            "indicators": self.indicators,
             "drawings": self.drawings,
             "alerts": self.alerts,
             "active_alerts": self.active_alerts,
@@ -87,4 +89,9 @@ async def stored_summary(
         tick_files=files,
         tick_bytes=tick_bytes,
         bytes=candle_bytes + tick_bytes,
+        indicators=await one(
+            "SELECT COUNT(*) FROM chart_indicators WHERE source=? AND instrument=?",
+            source,
+            instrument,
+        ),
     )

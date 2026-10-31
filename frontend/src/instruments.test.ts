@@ -77,6 +77,7 @@ describe("Delete data… on a removed instrument", () => {
     drawings: 1,
     alerts: 2,
     active_alerts: 1,
+    indicators: 0,
   };
   const preview = (over: Partial<typeof stored> = {}): DeletePreview => ({
     instrument: "EUR_DKK",
@@ -94,6 +95,8 @@ describe("Delete data… on a removed instrument", () => {
     ]);
     expect(deleteLines(preview(), true).slice(-1)).toEqual(["1 drawing and 2 alerts, and their alert log"]);
     expect(deleteSize(preview())).toBe("about 12.4 MB");
+    expect(deleteLines(preview({ indicators: 2 }), false)[3]).toBe("2 indicators on its chart");
+    expect(deleteLines(preview({ indicators: 1 }), true)[3]).toBe("1 indicator on its chart");
     expect([drawingsAndAlerts(1, 0), drawingsAndAlerts(0, 3), drawingsAndAlerts(2, 1)]).toEqual(["1 drawing", "3 alerts", "2 drawings and 1 alert"]);
   });
 

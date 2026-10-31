@@ -63,6 +63,8 @@ export interface StoredData {
   drawings: number;
   alerts: number;
   active_alerts: number;
+  /** Indicators on its chart: they always go with the data. */
+  indicators?: number;
   m1?: number;
   h1?: number;
   cached?: number;
