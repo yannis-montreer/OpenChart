@@ -28,8 +28,9 @@ The three tests in `tests/test_alert_fire_atomic.py` show each one on main.
   transaction: another coroutine's commit between them would write the first alone. If
   another coroutine's transaction is already open, the fire becomes part of it and is
   committed with it (or with nothing, after a crash, which the catch-up repairs).
-- **`atomic` uses aiosqlite's private `_execute`** (present since 0.17; we require
-  0.20). The tests fail if it disappears. The alternative, an idempotency key per fire in a
+- **`atomic` uses aiosqlite's private `_execute`** (present since 0.17; the version is
+  pinned exactly, see "Upgrading aiosqlite" in `docs/decisions-indicator-alerts.md`).
+  `tests/test_aiosqlite_contract.py` fails if it disappears or changes. The alternative, an idempotency key per fire in a
   new column, needed a migration and a reconciliation on start; not chosen.
 - **A fire carries the alert's state as it was right after it** (`Fire.state`, counters).
   Two fires of one alert waiting at once each write their own state; the latest is saved
