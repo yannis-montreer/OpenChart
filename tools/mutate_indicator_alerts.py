@@ -41,11 +41,14 @@ MUTANTS = [
         "if st.last_bar is not None and start <= st.last_bar:",
         "if st.last_bar is not None and start < st.last_bar:",
     ),
-    one(
+    (  # both checks: either alone still turns NaN and infinity into no observation
         "NaN or infinity observed",
         E,
-        "    if not (math.isfinite(a) and math.isfinite(b)):\n        return None\n",
-        "",
+        [
+            ("    if not (math.isfinite(a) and math.isfinite(b)):\n        return None\n", ""),
+            ("    return s if math.isfinite(s) else None\n", "    return s\n"),
+        ],
+        False,
     ),
     one(
         "a background fires while it stays on",
@@ -62,8 +65,8 @@ MUTANTS = [
     one(
         "no close grace",
         E,
-        "        forming = bar_bounds(now - CLOSE_GRACE_SECONDS, tf)[0]",
-        "        forming = bar_bounds(now, tf)[0]",
+        "        forming = bar_bounds(now - CLOSE_GRACE_SECONDS, tf)[0]  # bars before it",
+        "        forming = bar_bounds(now, tf)[0]  # bars before it",
     ),
     one(
         "bars without known prices evaluated",
@@ -150,11 +153,16 @@ MUTANTS = [
         'PRIORITIES = ("normal", "low", "alert")',
     ),
     one(
+        # Equivalent: without this branch a quarantined file is still not run and still
+        # reported, since `CustomIndicators.compute` refuses it (ScriptFailed
+        # "Quarantined: ...") and the alert shows that error. The branch only saves the
+        # call and words the error.
         "quarantine not reported",
         V,
         '        if d.status == "quarantined":\n'
         '            return Resolved(None, d.digest, d.status, f"quarantined: {d.reason}")\n',
         "",
+        True,
     ),
 ]
 

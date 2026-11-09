@@ -557,8 +557,11 @@ async def test_nothing_is_evaluated_until_prices_are_known_to_the_bars_end(store
     known = {"until": w.end(1)}
     h.ev.fresh = lambda _i, end: end <= known["until"]
     await h.close(1)
-    await h.close(3)  # the feed is down: bars 2 and 3 wait
+    computes = w.computes
+    await h.close(2)
+    await h.close(3)  # the feed is down: bars 2 and 3 wait, without a computation
     assert alert.istate.last_bar == w.starts[1] and h.fires == []
+    assert w.computes == computes
     known["until"] = w.end(3)  # repaired and replayed by the line engine
     await h.step(w.at_close(3) + 5)
     assert [(f.bar, f.late) for f in h.fires] == [(w.starts[2], "reconnect"), (w.starts[3], None)]
