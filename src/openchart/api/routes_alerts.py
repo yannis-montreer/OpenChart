@@ -194,7 +194,8 @@ def alert_routes(server: Server) -> APIRouter:
         """An edit of an indicator alert. A new condition, timeframe, price type or
         direction, or starting it again, takes a new snapshot of the instance and re-arms
         it: its first evaluation after records the state and never fires."""
-        assert alert.indicator is not None
+        if alert.indicator is None:
+            raise HTTPException(409, "this alert's condition is incomplete: delete it")
         if "level" in body.model_fields_set:
             raise HTTPException(400, "an indicator alert takes no level")
         given = body.indicator

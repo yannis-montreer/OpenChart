@@ -78,8 +78,15 @@ class IndicatorCondition:
         return asdict(self)
 
     @classmethod
-    def from_json(cls, data: dict[str, Any]) -> IndicatorCondition:
-        return cls(**{k: data[k] for k in cls.__dataclass_fields__ if k in data})
+    def from_json(cls, data: Any) -> IndicatorCondition | None:
+        """None for a condition that is not complete (written by hand or by an older
+        version): such an alert is listed and can be deleted, but never evaluated."""
+        if not isinstance(data, dict):
+            return None
+        try:
+            return cls(**{k: data[k] for k in cls.__dataclass_fields__ if k in data})
+        except TypeError:
+            return None
 
 
 @dataclass
