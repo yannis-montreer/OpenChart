@@ -85,9 +85,14 @@ def record_or_compare(name: str, got) -> None:
 def test_line_and_level_alerts_are_unchanged(client, fixed):
     out = {}
     assert client.put("/api/settings", json={"timezone": "UTC"}).status_code == 200
-    hline ={"instrument": "XAU_USD", "type": "hline", "points": [{"t": 1, "p": 2000.0}]}
+    hline = {"instrument": "XAU_USD", "type": "hline", "points": [{"t": 1, "p": 2000.0}]}
     drawing = client.post("/api/drawings", json=hline).json()
-    level = {"instrument": "XAU_USD", "type": "level_cross", "level": 2000.0, "frequency": "repeating"}
+    level = {
+        "instrument": "XAU_USD",
+        "type": "level_cross",
+        "level": 2000.0,
+        "frequency": "repeating",
+    }
     line = {
         "instrument": "XAU_USD",
         "type": "line_cross",

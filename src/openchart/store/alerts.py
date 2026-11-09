@@ -1,8 +1,14 @@
 """Alerts and their event log (SPEC section 9).
 
-An alert watches one instrument: a drawn line (`line_cross`, `drawing_id`) or a price
-level (`level_cross`, `level`). Its evaluation state (the previous signed distance and
-so on) lives in `state_json`, so a restart continues where it stopped.
+An alert watches one instrument: a drawn line (`line_cross`, `drawing_id`), a price
+level (`level_cross`, `level`) or an indicator on its chart (`indicator`: the instance and
+condition in `condition_json`, `IndicatorCondition`). Its evaluation state (the previous
+signed distance and so on) lives in `state_json`, so a restart continues where it stopped:
+`AlertState` for lines and levels, `IndicatorState` for indicators.
+
+Line and level alerts read and write exactly what they did before indicator alerts
+(`tests/test_line_alerts_unchanged.py`): the indicator fields are only in an indicator
+alert's JSON, and are NULL in a line alert's row.
 """
 
 from __future__ import annotations
@@ -17,13 +23,18 @@ import aiosqlite
 
 from openchart.store.sqlite import atomic
 
-TYPES = ("line_cross", "level_cross")
+TYPES = ("line_cross", "level_cross", "indicator")
 DIRECTIONS = ("cross", "up", "down")
 PRICES = ("bid", "ask", "mid")
 MODES = ("touch", "candle_close")
 FREQUENCIES = ("once", "once_per_bar", "repeating")
 STATUSES = ("active", "triggered", "expired", "stopped")
 CHANNELS = ("telegram", "app")
+CONDITIONS = ("cross_value", "cross_output", "signal")
+# Shown on an indicator alert (docs/designs/indicator-alerts.md section 4): the script was
+# found to look ahead, its declared warmup was found short, it was not checked (yet), or
+# its warmup is longer than the bars the server reads.
+WARNINGS = ("lookahead", "warmup_short", "unchecked", "warmup_cut")
 
 
 @dataclass
@@ -48,6 +59,52 @@ class AlertState:
 
 
 @dataclass
+class IndicatorCondition:
+    """What an indicator alert watches: one instance on the chart of its instrument, as it
+    was when the alert was saved, and the condition on its outputs."""
+
+    uid: str  # the instance (chart_indicators.uid)
+    kind: str  # builtin | custom
+    id: str  # the definition's id
+    params: dict[str, Any]  # its value inputs (style inputs dropped)
+    digest: str  # the custom file's hash, or "builtin"
+    output: str
+    condition: str  # cross_value | cross_output | signal
+    other_output: str | None = None  # cross_output
+    value: float | None = None  # cross_value
+    name: str = ""  # the indicator's short name, for messages
+
+    def to_json(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> IndicatorCondition:
+        return cls(**{k: data[k] for k in cls.__dataclass_fields__ if k in data})
+
+
+@dataclass
+class IndicatorState:
+    """What the indicator evaluation remembers between closed bars."""
+
+    last_bar: int | None = None  # start of the last closed bar evaluated
+    prev: float | None = None  # the previous bar's difference (crossings) or 0/1 (background)
+    armed: bool = False  # False: the next evaluation records the state and never fires
+    error: str | None = None  # why it cannot be evaluated now (worker, script), or None
+    error_since: int | None = None  # start of that failure episode
+    warnings: list[str] = field(default_factory=list)
+
+    def to_json(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any] | None) -> IndicatorState:
+        data = data or {}
+        state = cls(**{k: data[k] for k in cls.__dataclass_fields__ if k in data})
+        state.warnings = [w for w in state.warnings or [] if w in WARNINGS]
+        return state
+
+
+@dataclass
 class Alert:
     id: str
     instrument: str
@@ -69,6 +126,10 @@ class Alert:
     last_fired_at: int | None = None
     fire_count: int = 0
     state: AlertState = field(default_factory=AlertState)
+    # Indicator alerts only (None and unused on line and level alerts):
+    indicator: IndicatorCondition | None = None
+    stop_reason: str | None = None
+    istate: IndicatorState = field(default_factory=IndicatorState)
 
     @property
     def active(self) -> bool:
@@ -95,7 +156,30 @@ class Alert:
             "updated_at": self.updated_at,
             "last_fired_at": self.last_fired_at,
             "fire_count": self.fire_count,
+            **(self._indicator_json() if self.type == "indicator" else {}),
         }
+
+    def _indicator_json(self) -> dict[str, Any]:
+        st = self.istate
+        return {
+            "indicator": self.indicator.to_json() if self.indicator else None,
+            "stop_reason": self.stop_reason,
+            "state": {
+                "last_bar": st.last_bar,
+                "armed": st.armed,
+                "error": st.error,
+                "error_since": st.error_since,
+                "warnings": list(st.warnings),
+            },
+        }
+
+    def state_json(self) -> str:
+        if self.type == "indicator":
+            return json.dumps(self.istate.to_json())
+        return json.dumps(self.state.to_json())
+
+    def condition_json(self) -> str | None:
+        return json.dumps(self.indicator.to_json()) if self.indicator is not None else None
 
 
 @dataclass
@@ -112,9 +196,14 @@ class AlertEvent:
     delivered: bool = False
     attempts: int = 0
     error: str | None = None
+    # Indicator alerts only (absent from a line alert's JSON):
+    bar: int | None = None  # start of the closed bar it fired on
+    value: float | None = None
+    other_value: float | None = None
+    correction: dict[str, Any] | None = None  # the broker's candles contradicted it (D5)
 
     def to_json(self) -> dict[str, Any]:
-        return {
+        out = {
             "id": self.id,
             "alert_id": self.alert_id,
             "ts": self.ts,
@@ -128,17 +217,38 @@ class AlertEvent:
             "attempts": self.attempts,
             "error": self.error,
         }
+        if self.bar is not None:
+            out |= {
+                "bar": self.bar,
+                "value": self.value,
+                "other_value": self.other_value,
+                "correction": self.correction,
+            }
+        return out
 
 
 _COLUMNS = (
     "id, instrument, type, direction, trigger_price, trigger_mode, timeframe, frequency,"
     " cooldown_s, drawing_id, level, name, expires_at, notify_json, status, created_at,"
-    " updated_at, last_fired_at, fire_count, state_json"
+    " updated_at, last_fired_at, fire_count, state_json, stop_reason, condition_json"
 )
 
 
 def _alert(r: tuple) -> Alert:
-    return Alert(
+    state = json.loads(r[19]) if r[19] else None
+    if r[2] == "indicator":
+        return Alert(
+            **_common(r),
+            state=AlertState(),
+            indicator=IndicatorCondition.from_json(json.loads(r[21])) if r[21] else None,
+            stop_reason=r[20],
+            istate=IndicatorState.from_json(state),
+        )
+    return Alert(**_common(r), state=AlertState.from_json(state))
+
+
+def _common(r: tuple) -> dict[str, Any]:
+    return dict(
         id=r[0],
         instrument=r[1],
         type=r[2],
@@ -158,13 +268,12 @@ def _alert(r: tuple) -> Alert:
         updated_at=r[16],
         last_fired_at=r[17],
         fire_count=r[18] or 0,
-        state=AlertState.from_json(json.loads(r[19]) if r[19] else None),
     )
 
 
 _EVENT_COLUMNS = (
     "id, alert_id, ts, price, line_value, cross, message, late, detected_at, delivered,"
-    " attempts, error"
+    " attempts, error, bar, value, other_value, correction_json"
 )
 
 
@@ -182,6 +291,10 @@ def _event(r: tuple) -> AlertEvent:
         delivered=bool(r[9]),
         attempts=r[10] or 0,
         error=r[11],
+        bar=r[12],
+        value=r[13],
+        other_value=r[14],
+        correction=json.loads(r[15]) if r[15] else None,
     )
 
 
@@ -210,7 +323,7 @@ class AlertStore:
         alert.created_at = alert.updated_at = now
         await self.conn.execute(
             f"INSERT INTO alerts ({_COLUMNS}, enabled) VALUES"
-            " (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (*self._values(alert), int(alert.active)),
         )
         await self.conn.commit()
@@ -225,7 +338,8 @@ class AlertStore:
             "UPDATE alerts SET instrument=?, type=?, direction=?, trigger_price=?,"
             " trigger_mode=?, timeframe=?, frequency=?, cooldown_s=?, drawing_id=?, level=?,"
             " name=?, expires_at=?, notify_json=?, status=?, created_at=?, updated_at=?,"
-            " last_fired_at=?, fire_count=?, state_json=?, enabled=? WHERE id=?",
+            " last_fired_at=?, fire_count=?, state_json=?, stop_reason=?, condition_json=?,"
+            " enabled=? WHERE id=?",
             (*values[1:], int(alert.active), alert.id),
         )
         await self.conn.commit()
@@ -234,7 +348,7 @@ class AlertStore:
     async def save_states(self, alerts: list[Alert]) -> None:
         await self.conn.executemany(
             "UPDATE alerts SET state_json=? WHERE id=?",
-            [(json.dumps(a.state.to_json()), a.id) for a in alerts],
+            [(a.state_json(), a.id) for a in alerts],
         )
         await self.conn.commit()
 
@@ -247,6 +361,14 @@ class AlertStore:
 
     async def for_drawing(self, drawing_id: str) -> list[Alert]:
         return [a for a in await self.list() if a.drawing_id == drawing_id]
+
+    async def for_instance(self, instrument: str, uid: str) -> list[Alert]:
+        """Indicator alerts on one instance of the instrument's chart."""
+        return [
+            a
+            for a in await self.list(instrument)
+            if a.type == "indicator" and a.indicator is not None and a.indicator.uid == uid
+        ]
 
     @staticmethod
     def _values(a: Alert) -> tuple:
@@ -270,7 +392,9 @@ class AlertStore:
             a.updated_at,
             a.last_fired_at,
             a.fire_count,
-            json.dumps(a.state.to_json()),
+            a.state_json(),
+            a.stop_reason,
+            a.condition_json(),
         )
 
     # Events

@@ -178,6 +178,16 @@ async def fingerprint(store: CandleStore, ticks_dir: Path, source: str, instrume
             instrument,
         ),
     }
+    # Indicator alerts: any edit (its condition, name, why it stopped), even within the
+    # second `updated_at` counts in. Only when there are any, so the token of an instrument
+    # without them is what it was before indicator alerts.
+    indicator_alerts = await rows(
+        "SELECT id, name, condition_json, stop_reason FROM alerts"
+        " WHERE instrument=? AND type='indicator' ORDER BY id",
+        instrument,
+    )
+    if indicator_alerts:
+        parts["indicator_alerts"] = indicator_alerts
     parts["ticks"] = await asyncio.to_thread(_tick_files, ticks_dir / source / instrument)
     text = json.dumps([source, instrument, parts], sort_keys=True, default=str)
     return hashlib.sha256(text.encode()).hexdigest()

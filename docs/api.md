@@ -88,6 +88,20 @@ Errors: `400` unknown timeframe or price, `404` unknown instrument, `422` invali
 - An event: `{id, alert_id, ts, price, line_value, cross, message, late, detected_at, delivered, attempts, error}`. `late` is `wake`, `reconnect` or `restart` when the cross was found from stored history after missed time; `ts` is when it happened, `detected_at` when the server saw it.
 - Deleting a line deletes its alerts; deleting an alert leaves its line.
 
+### Indicator alerts
+
+An alert on one indicator of the instrument's chart (docs/designs/indicator-alerts.md). Same routes, login and same-origin check as the other alerts; `GET /api/alerts?uid=` lists those on one instance.
+
+- `POST /api/alerts` with `type: "indicator"`, a `timeframe` (`1m` or more: no seconds timeframes) and `indicator: {uid, output, condition, other_output?, value?}`:
+  - `uid`: an instance on the chart of `instrument` (`400` if it is not there). `409` when its definition's outputs cannot be read now (your file fails to load, is quarantined, or the worker is not running).
+  - `condition`: `cross_value` (`output` crosses `value`, a finite number), `cross_output` (`output` crosses `other_output`, another output of the same instance, a line, histogram, area or level), `signal` (`output` is a marker that is on the bar, or a background that turns on). Crossings need a line, histogram or area as `output`. A signal takes no `value`, no `other_output`, and no `direction` but `cross`. Anything else is a `400`.
+  - `trigger_mode` is always `candle_close` (closed bars only: `touch` is a `400`); `drawing_id` and `level` are refused (`400`). `direction`, `trigger_price` (the price type the indicator is computed on), `frequency`, `cooldown_s`, `name`, `expires_at`, `notify` are as above.
+- The server fills in the rest of `indicator` from the instance as it is now: `kind`, `id`, `params` (its value inputs; colours and widths are left out), `digest` (your file's hash, or `"builtin"`) and `name` (the indicator's short name).
+- An indicator alert's JSON also has `stop_reason` (why it is stopped: `"stopped by you"`, or the server's reason; `null` while active) and `state: {last_bar, armed, error, error_since, warnings}`: `last_bar` is the start of the last closed bar evaluated, `armed` is false until the first evaluation (which records and never fires), `error` says why it cannot be evaluated now, and `warnings` holds `lookahead`, `warmup_short`, `unchecked` (from your file's save-time checks) and `warmup_cut`. Warnings never stop an alert.
+- `PUT /api/alerts/{id}`: the same fields; `indicator` must keep its `uid` (`400` otherwise). A new condition, timeframe, price type or direction, or `status: "active"` on a stopped alert, checks the instance again and re-arms the alert. `level` and `trigger_mode: "touch"` are a `400`.
+- An indicator alert's event also has `bar` (start of the closed bar), `value`, `other_value` and `correction` (`null`, or the bar's values after the broker's candles replaced it, when they contradict the fire).
+- `GET /api/instruments/{instrument}/delete-preview`: `stored.indicator_alerts` counts the instrument's alerts on indicators (they are part of `alerts`, and the delete removes them with the others).
+
 ## Indicators
 
 | Route | |

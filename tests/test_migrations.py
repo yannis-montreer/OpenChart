@@ -149,3 +149,58 @@ async def test_chart_indicators_migration_on_a_database_from_before_it(tmp_path)
                 "INSERT INTO chart_indicator_revisions (source, instrument, revision, updated_at)"
                 " VALUES ('oanda', 'XAU_USD', 2, 0)"
             )
+
+
+async def test_indicator_alerts_migration_on_a_database_from_before_it(tmp_path):
+    """0010: indicator alerts beside line alerts and their log already stored. On a
+    synthetic database only (never the owner's): the old rows read back unchanged, their
+    new columns are NULL, and the log takes one event per alert and bar."""
+    import sqlite3
+
+    from openchart.store.alerts import AlertStore
+
+    (new,) = [m for m in discover_migrations() if m.name == "indicator_alerts"]
+    path = tmp_path / "t.db"
+    state = '{"s_prev": 1.0, "t_prev": 5, "bar_start": null}'
+    async with aiosqlite.connect(path) as conn:
+        await migrate(conn, [m for m in discover_migrations() if m.version < new.version])
+        await conn.execute(
+            "INSERT INTO alerts (id, instrument, type, direction, trigger_price, trigger_mode,"
+            " timeframe, frequency, cooldown_s, enabled, state_json, created_at, name, level,"
+            " notify_json, status, updated_at, fire_count) VALUES ('a1', 'XAU_USD',"
+            " 'level_cross', 'up', 'bid', 'touch', '1m', 'once', 0, 1, ?, 1, 'Gold', 2000.0,"
+            " '[\"app\"]', 'active', 2, 0)",
+            (state,),
+        )
+        for k in range(2):
+            await conn.execute(
+                "INSERT INTO alert_events (alert_id, ts, price, message, delivered, line_value,"
+                " cross, detected_at) VALUES ('a1', ?, 2001.0, 'm', 1, 2000.0, 'up', ?)",
+                (10 + k, 11 + k),
+            )
+        await conn.commit()
+        async with conn.execute("SELECT * FROM alerts") as cur:
+            old_alert = await cur.fetchall()
+        async with conn.execute("SELECT * FROM alert_events ORDER BY id") as cur:
+            old_events = await cur.fetchall()
+
+        later = [m.version for m in discover_migrations() if m.version >= new.version]
+        assert await migrate(conn) == later
+        async with conn.execute("SELECT * FROM alerts") as cur:
+            (row,) = await cur.fetchall()
+        assert row[: len(old_alert[0])] == old_alert[0] and row[len(old_alert[0]) :] == (None,)
+        async with conn.execute("SELECT * FROM alert_events ORDER BY id") as cur:
+            events = await cur.fetchall()
+        assert [e[: len(old_events[0])] for e in events] == old_events
+        assert all(e[len(old_events[0]) :] == (None, None, None, None) for e in events)
+        (alert,) = await AlertStore(conn).list()
+        assert alert.type == "level_cross" and alert.state.s_prev == 1.0
+        assert alert.indicator is None and alert.stop_reason is None
+
+        # One event per alert and bar; line events (no bar) are never in each other's way.
+        insert = "INSERT INTO alert_events (alert_id, ts, bar) VALUES (?, 1, ?)"
+        await conn.execute(insert, ("i1", 3600))
+        await conn.execute(insert, ("i2", 3600))
+        await conn.execute(insert, ("a1", None))
+        with pytest.raises(sqlite3.IntegrityError):
+            await conn.execute(insert, ("i1", 3600))
