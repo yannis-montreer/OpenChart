@@ -99,6 +99,7 @@ class IndicatorState:
     error: str | None = None  # why it cannot be evaluated now (worker, script), or None
     error_since: int | None = None  # start of that failure episode
     warnings: list[str] = field(default_factory=list)
+    behind: bool = False  # its last bar lags the newest closed one (the watchdog's view)
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -177,6 +178,7 @@ class Alert:
                 "error": st.error,
                 "error_since": st.error_since,
                 "warnings": list(st.warnings),
+                "behind": st.behind,
             },
         }
 
@@ -474,6 +476,85 @@ class AlertStore:
 
         event.id = await atomic(self.conn, write)
         return event
+
+    async def record_indicator_step(
+        self, fires: list[tuple[AlertEvent, Alert]], alerts: list[Alert]
+    ) -> list[AlertEvent | None]:
+        """One evaluation of indicator alerts: their fires' events and every alert's state
+        (and counters and status) right after it, all or nothing (`atomic`). An event
+        already in the log for that alert and bar (a replay after a crash) is not written
+        again: its entry is None, and nothing is sent for it."""
+
+        def write(db) -> list[int | None]:
+            ids: list[int | None] = []
+            for event, _alert in fires:
+                cur = db.execute(
+                    "INSERT OR IGNORE INTO alert_events (alert_id, ts, price, line_value, cross,"
+                    " message, late, detected_at, delivered, attempts, error, bar, value,"
+                    " other_value) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        event.alert_id,
+                        event.ts,
+                        event.price,
+                        event.line_value,
+                        event.cross,
+                        event.message,
+                        event.late,
+                        event.detected_at,
+                        int(event.delivered),
+                        event.attempts,
+                        event.error,
+                        event.bar,
+                        event.value,
+                        event.other_value,
+                    ),
+                )
+                ids.append(cur.lastrowid if cur.rowcount == 1 else None)
+            for alert in alerts:
+                db.execute(
+                    "UPDATE alerts SET status=?, enabled=?, fire_count=?, last_fired_at=?,"
+                    " state_json=?, stop_reason=? WHERE id=?",
+                    (
+                        alert.status,
+                        int(alert.active),
+                        alert.fire_count,
+                        alert.last_fired_at,
+                        alert.state_json(),
+                        alert.stop_reason,
+                        alert.id,
+                    ),
+                )
+            return ids
+
+        ids = await atomic(self.conn, write)
+        out: list[AlertEvent | None] = []
+        for (event, _alert), event_id in zip(fires, ids, strict=True):
+            if event_id is None:
+                out.append(None)
+            else:
+                event.id = event_id
+                out.append(event)
+        return out
+
+    async def recent_indicator_events(self, alert_ids: list[str], since: int) -> list[AlertEvent]:
+        """Fires of these indicator alerts on bars since `since` not yet found contradicted
+        by the broker's candles (D5)."""
+        if not alert_ids:
+            return []
+        marks = ", ".join("?" * len(alert_ids))
+        sql = (
+            f"SELECT {_EVENT_COLUMNS} FROM alert_events WHERE alert_id IN ({marks})"
+            " AND bar IS NOT NULL AND bar >= ? AND correction_json IS NULL ORDER BY id"
+        )
+        async with self.conn.execute(sql, (*alert_ids, since)) as cur:
+            return [_event(r) for r in await cur.fetchall()]
+
+    async def set_correction(self, event_id: int, correction: dict[str, Any]) -> None:
+        await self.conn.execute(
+            "UPDATE alert_events SET correction_json=? WHERE id=?",
+            (json.dumps(correction), event_id),
+        )
+        await self.conn.commit()
 
     async def events(self, limit: int = 100, alert_id: str | None = None) -> list[AlertEvent]:
         sql = (

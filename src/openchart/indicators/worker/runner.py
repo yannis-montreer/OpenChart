@@ -3,8 +3,10 @@
 - **One worker** by default, started in the background; requests queue for it and run one
   at a time. Pipes are read and written in threads, so the event loop (feeds, candles,
   alerts, the watchdog) never waits on the worker.
-- **Two priorities:** a save-time check's job (`priority="low"`) starts only when no job
-  runs and no chart request waits, so a chart waits for at most one check job.
+- **Three priorities** (owner's D1 for indicator alerts): chart requests (`"normal"`),
+  then indicator alerts (`"alert"`), then the save-time checks (`"low"`). A job starts only
+  when no job runs and none of a higher priority waits, so a chart waits for at most one
+  alert or check job, and the checks never delay an alert.
 - **Start priority** (Windows): a worker is created at normal priority, so that it can
   import numpy and pandas when every core is busy, and the server lowers it to below
   normal as soon as its hello arrives, before anything is sent to it. The priority is read
@@ -48,6 +50,7 @@ STDERR_LINES_PER_MINUTE = 30
 RETRY_AFTER_FAILED_START = 10.0  # seconds before trying to start a worker again
 FOLDER_POLL = 0.5  # seconds between two measurements of a worker's own folder (B1)
 NEED_SOURCE = "NeedSource"
+PRIORITIES = ("normal", "alert", "low")  # charts, indicator alerts, save-time checks
 
 
 @dataclass(frozen=True)
@@ -178,11 +181,12 @@ class IndicatorRunner:
         self.ready_at = -1e9  # monotonic time the current worker became ready
         self.last_job_s = 0.0  # the last job's exchange with the worker (no queue, no start)
         self._live: _Live | None = None
-        # The queue: one job at a time. A "low" job (a save-time check) starts only when no
-        # job runs and no "normal" one waits, so a chart waits for at most one check job.
+        # The queue: one job at a time, by priority (PRIORITIES). A job starts only when no
+        # job runs and none of a higher priority waits, so a chart waits for at most one
+        # job of an alert or a check.
         self._turn = asyncio.Condition()
         self._busy = False
-        self._normal_waiting = 0
+        self._waiting = dict.fromkeys(PRIORITIES, 0)
         self._spawning: asyncio.Task[_Live] | None = None
         self._first: asyncio.Future[None] | None = None
         self._failed_at = -1e9
@@ -323,7 +327,9 @@ class IndicatorRunner:
         if self.state == "stopped":
             raise WorkerUnavailable("the indicator worker is stopped")
         arrays = arrays or {}
-        await self._take_turn(priority == "low")
+        if priority not in PRIORITIES:
+            raise ValueError(f"unknown priority {priority!r}")
+        await self._take_turn(priority)
         try:
             return await self._job(header, arrays, script)
         finally:
@@ -331,16 +337,21 @@ class IndicatorRunner:
                 self._busy = False
                 self._turn.notify_all()
 
-    async def _take_turn(self, low: bool) -> None:
+    @property
+    def _normal_waiting(self) -> int:
+        return self._waiting["normal"]
+
+    async def _take_turn(self, priority: str) -> None:
+        """Wait until no job runs and no job of a higher priority waits."""
+        ahead = PRIORITIES[: PRIORITIES.index(priority)]
         async with self._turn:
-            if low:
-                await self._turn.wait_for(lambda: not self._busy and not self._normal_waiting)
-            else:
-                self._normal_waiting += 1
-                try:
-                    await self._turn.wait_for(lambda: not self._busy)
-                finally:
-                    self._normal_waiting -= 1
+            self._waiting[priority] += 1
+            try:
+                await self._turn.wait_for(
+                    lambda: not self._busy and not any(self._waiting[p] for p in ahead)
+                )
+            finally:
+                self._waiting[priority] -= 1
             self._busy = True
 
     async def _job(

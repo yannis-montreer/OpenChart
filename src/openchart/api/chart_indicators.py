@@ -251,9 +251,13 @@ class ChartIndicators:
         instances: list[Instance],
         resets: dict[str, list[str]] | None = None,
     ) -> dict[str, Any]:
-        """Store the chart's list and tell every browser. Call it holding `lock`."""
+        """Store the chart's list and tell every browser and the indicator alerts (an
+        alert on a removed instance stops, one on changed values re-arms). Call it
+        holding `lock`."""
         assert self.lock.locked()
         await self.store().replace(source, instrument, instances)
         body = await self.view(source, instrument, resets)
         self.server.hub.broadcast({"type": "chart_indicators_changed", **body})
+        if self.server.alerts is not None and source == self.server.source:
+            await self.server.alerts.chart_changed(instrument, instances)
         return body
