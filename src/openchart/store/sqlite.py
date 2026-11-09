@@ -22,7 +22,8 @@ async def atomic(conn: aiosqlite.Connection, fn: Callable[[sqlite3.Connection], 
     open: then it is part of that one and is committed with it.
 
     `_execute` is aiosqlite's own way onto its thread (private, in every version since
-    0.17; `tests/test_alert_fire_atomic.py` fails if it goes)."""
+    0.17; `tests/test_aiosqlite_contract.py` fails if it goes or changes, and the version is
+    pinned: see docs/decisions-indicator-alerts.md)."""
 
     def run() -> T:
         db = conn._conn
