@@ -129,10 +129,6 @@ class AlertService:
         self.indicators.touched(alert)
         self.broadcast("delete", alert)
 
-    async def chart_changed(self, instrument: str, instances: list[Any]) -> None:
-        """A chart's indicators were written (`ChartIndicators.replace`)."""
-        await self.indicators.chart_changed(instrument, instances)
-
     def drawing_changed(self, drawing: Drawing) -> None:
         self.engine.drawing_changed(drawing)
 
@@ -338,19 +334,21 @@ class AlertService:
 
     def watch(self) -> None:
         feed = self.server.feed
-        if feed is None:
-            return
-        now = self.now()
-        views = {}
-        for instrument in feed.instruments:
-            clock = self.engine.clocks.get(instrument)
-            market_open = clock is None or clock(now + 60) > clock(now)
-            tick = feed.last_tick.get(instrument)
-            views[instrument] = FeedView(tick.ts if tick else None, market_open)
-        state = feed.stream.state.value + (
-            f" ({self.server.feed_error})" if self.server.feed_error else ""
-        )
-        for message in self.watchdog.check(views, state) + self.indicators.behind():
+        messages = []
+        if feed is not None:
+            now = self.now()
+            views = {}
+            for instrument in feed.instruments:
+                clock = self.engine.clocks.get(instrument)
+                market_open = clock is None or clock(now + 60) > clock(now)
+                tick = feed.last_tick.get(instrument)
+                views[instrument] = FeedView(tick.ts if tick else None, market_open)
+            state = feed.stream.state.value + (
+                f" ({self.server.feed_error})" if self.server.feed_error else ""
+            )
+            messages = self.watchdog.check(views, state) + self.indicators.behind()
+        # Indicator alerts in error are reported even without a feed (never silently).
+        for message in messages + self.indicators.errors():
             log.warning(message)
             self.dispatcher.system(message)
 

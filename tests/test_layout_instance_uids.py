@@ -1,10 +1,11 @@
 """Does applying a layout keep the chart's indicator instances' uids? (indicator alerts design,
 docs/designs/indicator-alerts.md section 5; answer in docs/decisions-layout-instance-uids.md)
 
-An indicator alert will name its instance by (source, instrument, uid). These tests pin what
-`POST /api/layouts/{id}/apply` does today: the chart gets **the layout's** uids. The chart's
-own uid survives only where the layout's copy has the same uid, which is the case when the
-layout was saved from this chart and the instance was there then.
+An indicator alert names its instance by (source, instrument, uid). #61 pinned what
+`POST /api/layouts/{id}/apply` did then: the chart got **the layout's** uids. Since the fix
+proposed there (docs/decisions-indicator-alert-gaps.md), a layout entry first takes the uid
+of a chart instance it matches (the same uid and definition, else the same definition and
+values); only the third test's expectation changed.
 """
 
 from tests.test_chart_indicators import cc, chart, ok, put  # noqa: F401  (the fixture)
@@ -41,11 +42,13 @@ def test_an_instance_added_after_the_layout_was_saved_is_removed_by_apply(cc):  
     assert uids(apply(cc, layout)) == ["a1"]  # a3 is gone (its alert would stop)
 
 
-def test_the_same_indicator_from_another_layout_gets_the_layouts_uid(cc):  # noqa: F811
-    """Same definition, same values, other uid: the chart's instance is replaced."""
+def test_the_same_indicator_from_another_layout_keeps_the_charts_uid(cc):  # noqa: F811
+    """Same definition, same values, other uid: the chart's instance is kept (matched by
+    definition and values; docs/decisions-indicator-alert-gaps.md). Before that fix the
+    layout's uid replaced it (this test asserted ["L1"])."""
     layout = save_layout(cc, "Mine", indicators=[{"id": "ema", "uid": "L1"}])
     put(cc, [{"id": "ema", "uid": "a1"}])
-    assert uids(apply(cc, layout, "XAU_USD")) == ["L1"]
+    assert uids(apply(cc, layout, "XAU_USD")) == ["a1"]
 
 
 def test_a_layout_without_uids_gets_them_once_when_saved(cc):  # noqa: F811

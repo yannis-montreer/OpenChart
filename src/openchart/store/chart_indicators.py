@@ -8,11 +8,14 @@ job (`api/chart_indicators.py`).
 from __future__ import annotations
 
 import json
+import sqlite3
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
 import aiosqlite
+
+from openchart.store.sqlite import atomic
 
 KINDS = ("builtin", "custom")
 
@@ -66,14 +69,25 @@ class ChartIndicatorStore:
         ]
 
     async def replace(self, source: str, instrument: str, instances: list[Instance]) -> int:
-        """The chart's whole list; returns its new revision. The caller has checked the
-        list (unique uids, known kinds), so no statement here can fail on it: a rollback
-        would take other writers' uncommitted rows on this shared connection with it."""
-        revision = await self.revision(source, instrument) + 1
-        await self.conn.execute(
+        """The chart's whole list, in one step; returns its new revision."""
+        return await atomic(self.conn, lambda db: self.write(db, source, instrument, instances))
+
+    @staticmethod
+    def write(
+        db: sqlite3.Connection, source: str, instrument: str, instances: list[Instance]
+    ) -> int:
+        """`replace` on the plain connection, inside a caller's transaction (`atomic`), so a
+        chart can be written together with other rows, all or nothing. The caller has
+        checked the list (unique uids, known kinds)."""
+        row = db.execute(
+            "SELECT revision FROM chart_indicator_revisions WHERE source=? AND instrument=?",
+            (source, instrument),
+        ).fetchone()
+        revision = (int(row[0]) if row else 0) + 1
+        db.execute(
             "DELETE FROM chart_indicators WHERE source=? AND instrument=?", (source, instrument)
         )
-        await self.conn.executemany(
+        db.executemany(
             "INSERT INTO chart_indicators (source, instrument, position, uid, kind, indicator,"
             " params, visible, price_labels, legend_values) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
@@ -92,13 +106,12 @@ class ChartIndicatorStore:
                 for position, i in enumerate(instances)
             ],
         )
-        await self.conn.execute(
+        db.execute(
             "INSERT INTO chart_indicator_revisions (source, instrument, revision, updated_at)"
             " VALUES (?, ?, ?, ?) ON CONFLICT (source, instrument)"
             " DO UPDATE SET revision=excluded.revision, updated_at=excluded.updated_at",
             (source, instrument, revision, int(time.time())),
         )
-        await self.conn.commit()
         return revision
 
     async def charts_using(self, kind: str, indicator: str) -> list[tuple[str, str, int]]:

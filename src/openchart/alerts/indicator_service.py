@@ -18,6 +18,8 @@ import pandas as pd
 from openchart.alerts.engine import CATCH_UP_MIN_SECONDS
 from openchart.alerts.indicator_eval import (
     COLUMNS,
+    STOP_REMOVED,
+    Change,
     GroupKey,
     IndicatorEvaluator,
     Notice,
@@ -28,6 +30,7 @@ from openchart.indicators._base import Indicator, Info
 from openchart.market.series import MAX_LIMIT
 from openchart.market.timeframes import Timeframe, parse_timeframe
 from openchart.store.alerts import Alert, AlertEvent
+from openchart.store.chart_indicators import ChartIndicatorStore
 
 if TYPE_CHECKING:
     from openchart.alerts.service import AlertService
@@ -144,6 +147,7 @@ class IndicatorAlerts:
             wake=lambda: service.freeze is not None or service.engine.next_reason == "wake",
             text=self._text,
             traded=self._traded,
+            instances=self._instances,
         )
         self._task: asyncio.Task[None] | None = None
 
@@ -251,14 +255,21 @@ class IndicatorAlerts:
         if alert.type == "indicator":
             self.evaluator.touched(alert.id)
 
-    async def chart_changed(self, instrument: str, instances: list[Any]) -> None:
-        """The chart of `instrument` was written: alerts on removed instances stop, those
-        whose values or file changed are re-armed (`IndicatorEvaluator.instances_changed`)."""
+    async def plan_chart(
+        self,
+        instrument: str,
+        instances: list[Any],
+        *,
+        removed_reason: str | None = None,
+        removed_text: str | None = None,
+    ) -> list[Change]:
+        """What writing `instances` on the chart of `instrument` would do to its indicator
+        alerts (`IndicatorEvaluator.plan`): written with the chart by `ChartIndicators.commit`."""
         if not any(
             a.type == "indicator" and a.active and a.instrument == instrument
             for a in self.service.engine.alerts.values()
         ):
-            return
+            return []
         from openchart.api.chart_indicators import fit  # the API's fitting, without a cycle
 
         definitions = self.evaluator.definitions
@@ -271,8 +282,30 @@ class IndicatorAlerts:
                 style = {p.name for p in resolved.schema.params if p.group == "style"}
                 params = {k: v for k, v in params.items() if k not in style}
             now_on_chart[i.uid] = (resolved, params)
-        notice = await self.evaluator.instances_changed(instrument, now_on_chart)
-        self.deliver(notice)
+        return self.evaluator.plan(
+            instrument,
+            now_on_chart,
+            removed_reason=removed_reason or STOP_REMOVED,
+            removed_text=removed_text,
+        )
+
+    def stops(self, reasons: dict[str, str], text: str | None) -> list[Change]:
+        """Stop these active indicator alerts (id -> reason) in a chart write: announced
+        in one message per reason with `text`."""
+        out = []
+        for alert_id, reason in reasons.items():
+            alert = self.service.engine.alerts.get(alert_id)
+            if alert is not None and alert.type == "indicator" and alert.active:
+                out.append(Change(alert, stop=reason, removed=text or reason))
+        return out
+
+    async def _instances(self, instrument: str) -> set[str]:
+        store = ChartIndicatorStore(self.server.db.conn)
+        return {i.uid for i in await store.list(self.server.source, instrument)}
 
     def behind(self) -> list[str]:
         return self.evaluator.behind()
+
+    def errors(self) -> list[str]:
+        """Alerts in error no message has named yet (`IndicatorEvaluator.errors`)."""
+        return self.evaluator.errors()

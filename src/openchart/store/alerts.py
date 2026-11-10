@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import secrets
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import MISSING, asdict, dataclass, field
 from typing import Any
 
 import aiosqlite
@@ -80,13 +80,35 @@ class IndicatorCondition:
     @classmethod
     def from_json(cls, data: Any) -> IndicatorCondition | None:
         """None for a condition that is not complete (written by hand or by an older
-        version): such an alert is listed and can be deleted, but never evaluated."""
+        version): such an alert is listed and can be deleted, but never evaluated; the
+        evaluation shows why (`problem`) as its error."""
+        if cls.problem(data) is not None:
+            return None
+        return cls(**{k: data[k] for k in cls.__dataclass_fields__ if k in data})
+
+    @classmethod
+    def problem(cls, data: Any) -> str | None:
+        """Why `data` is not a complete condition, or None."""
+        if data is None:
+            return "no condition is stored"
         if not isinstance(data, dict):
-            return None
-        try:
-            return cls(**{k: data[k] for k in cls.__dataclass_fields__ if k in data})
-        except TypeError:
-            return None
+            return "the stored condition is not an object"
+        required = [
+            k
+            for k, f in cls.__dataclass_fields__.items()
+            if f.default is MISSING and f.default_factory is MISSING
+        ]
+        missing = [k for k in required if k not in data]
+        if missing:
+            return f"the stored condition has no {', '.join(missing)}"
+        wrong = [
+            k
+            for k in ("uid", "kind", "id", "digest", "output", "condition")
+            if not isinstance(data[k], str)
+        ]
+        if wrong or not isinstance(data["params"], dict):
+            return f"the stored condition has wrong types: {', '.join(wrong) or 'params'}"
+        return None
 
 
 @dataclass
@@ -138,6 +160,8 @@ class Alert:
     indicator: IndicatorCondition | None = None
     stop_reason: str | None = None
     istate: IndicatorState = field(default_factory=IndicatorState)
+    # Why the stored condition could not be read (`indicator` is None then); not stored.
+    condition_problem: str | None = None
 
     @property
     def active(self) -> bool:
@@ -210,6 +234,11 @@ class AlertEvent:
     value: float | None = None
     other_value: float | None = None
     correction: dict[str, Any] | None = None  # the broker's candles contradicted it (D5)
+    # What the fire was decided on (docs/decisions-indicator-alert-gaps.md): the evaluated
+    # difference on the bar and the bar before, and the first bar the computation read.
+    observed: float | None = None
+    observed_prev: float | None = None
+    frame_start: int | None = None
 
     def to_json(self) -> dict[str, Any]:
         out = {
@@ -232,6 +261,9 @@ class AlertEvent:
                 "value": self.value,
                 "other_value": self.other_value,
                 "correction": self.correction,
+                "observed": self.observed,
+                "observed_prev": self.observed_prev,
+                "frame_start": self.frame_start,
             }
         return out
 
@@ -246,14 +278,25 @@ _COLUMNS = (
 def _alert(r: tuple) -> Alert:
     state = json.loads(r[19]) if r[19] else None
     if r[2] == "indicator":
+        raw = _loads(r[21])
         return Alert(
             **_common(r),
             state=AlertState(),
-            indicator=IndicatorCondition.from_json(json.loads(r[21])) if r[21] else None,
+            indicator=IndicatorCondition.from_json(raw),
             stop_reason=r[20],
             istate=IndicatorState.from_json(state),
+            condition_problem=IndicatorCondition.problem(raw),
         )
     return Alert(**_common(r), state=AlertState.from_json(state))
+
+
+def _loads(text: str | None) -> Any:
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except ValueError:
+        return "not JSON"
 
 
 def _common(r: tuple) -> dict[str, Any]:
@@ -282,7 +325,8 @@ def _common(r: tuple) -> dict[str, Any]:
 
 _EVENT_COLUMNS = (
     "id, alert_id, ts, price, line_value, cross, message, late, detected_at, delivered,"
-    " attempts, error, bar, value, other_value, correction_json"
+    " attempts, error, bar, value, other_value, correction_json, observed, observed_prev,"
+    " frame_start"
 )
 
 
@@ -304,6 +348,9 @@ def _event(r: tuple) -> AlertEvent:
         value=r[13],
         other_value=r[14],
         correction=json.loads(r[15]) if r[15] else None,
+        observed=r[16],
+        observed_prev=r[17],
+        frame_start=r[18],
     )
 
 
@@ -491,7 +538,8 @@ class AlertStore:
                 cur = db.execute(
                     "INSERT OR IGNORE INTO alert_events (alert_id, ts, price, line_value, cross,"
                     " message, late, detected_at, delivered, attempts, error, bar, value,"
-                    " other_value) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " other_value, observed, observed_prev, frame_start)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         event.alert_id,
                         event.ts,
@@ -507,6 +555,9 @@ class AlertStore:
                         event.bar,
                         event.value,
                         event.other_value,
+                        event.observed,
+                        event.observed_prev,
+                        event.frame_start,
                     ),
                 )
                 ids.append(cur.lastrowid if cur.rowcount == 1 else None)
@@ -535,6 +586,23 @@ class AlertStore:
                 event.id = event_id
                 out.append(event)
         return out
+
+    @staticmethod
+    def write_stop(db: Any, alert_id: str, reason: str) -> None:
+        """Stop one alert with a reason, inside a caller's transaction (`atomic`): only the
+        status and the reason, so a state written meanwhile by an evaluation stays."""
+        db.execute(
+            "UPDATE alerts SET status='stopped', enabled=0, stop_reason=? WHERE id=?",
+            (reason, alert_id),
+        )
+
+    @staticmethod
+    def write_rearm(db: Any, alert_id: str, condition_json: str, state_json: str) -> None:
+        """Write a re-armed alert's condition and state, inside a caller's transaction."""
+        db.execute(
+            "UPDATE alerts SET condition_json=?, state_json=? WHERE id=?",
+            (condition_json, state_json, alert_id),
+        )
 
     async def recent_indicator_events(self, alert_ids: list[str], since: int) -> list[AlertEvent]:
         """Fires of these indicator alerts on bars since `since` not yet found contradicted

@@ -11,6 +11,8 @@ from typing import Any
 
 import aiosqlite
 
+from openchart.store.sqlite import atomic
+
 DEFAULT_KEY = "default_layout"
 
 
@@ -58,13 +60,17 @@ class LayoutStore:
         return layout
 
     async def save(self, layout: Layout) -> Layout:
+        await atomic(self.conn, lambda db: self.write(db, layout))
+        return layout
+
+    @staticmethod
+    def write(db: Any, layout: Layout) -> None:
+        """`save` inside a caller's transaction (`atomic`)."""
         layout.updated_at = int(time.time())
-        await self.conn.execute(
+        db.execute(
             "UPDATE layouts SET name=?, json=?, updated_at=? WHERE id=?",
             (layout.name, json.dumps(layout.state), layout.updated_at, layout.id),
         )
-        await self.conn.commit()
-        return layout
 
     async def delete(self, layout_id: str) -> Layout | None:
         layout = await self.get(layout_id)

@@ -6,9 +6,11 @@ under `/api/custom-indicators` (design section 4): 403 with the reason otherwise
 
 Deleting moves `<id>.py` and its `.history/<id>/` into `.deleted/<id>-<UTC time>/`
 (`<id>.py` and `history/`), so nothing is erased. A definition in use answers 409 with
-where it is used; `?confirm=true` first removes its instances from every chart and
-saved layout (each open page gets the broadcasts), then moves the files. Only custom
-instances go: a built-in with the same id is another indicator.
+where it is used, the indicator alerts on it included; `?confirm=true` (and, when alerts
+use it, every one of them named: `&alerts=<id>&alerts=<id>`) removes its instances from
+every chart and saved layout and stops its active alerts, in one transaction, then moves
+the files; if any step fails, nothing of it stays (docs/decisions-indicator-alert-gaps.md).
+Only custom instances go: a built-in with the same id is another indicator.
 """
 
 from __future__ import annotations
@@ -22,9 +24,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
-from openchart.api.chart_indicators import ChartIndicators
+from openchart.api.chart_indicators import ChartIndicators, ChartWrite
 from openchart.api.editing import require_editing
 from openchart.api.routes_layouts import layouts_message
 from openchart.files import move
@@ -59,11 +61,30 @@ def custom_routes(server: Server, charts: ChartIndicators) -> APIRouter:
             n = sum(uses(e, indicator_id) for e in layout.state.get("indicators") or [])
             if n:
                 layouts.append({"id": layout.id, "name": layout.name, "instances": n})
+        alerts = (
+            [
+                {
+                    "id": a.id,
+                    "name": a.name,
+                    "instrument": a.instrument,
+                    "uid": a.indicator.uid,
+                    "status": a.status,
+                }
+                for a in await server.alerts.store.list()
+                if a.type == "indicator"
+                and a.indicator is not None
+                and a.indicator.kind == "custom"
+                and a.indicator.id == indicator_id
+            ]
+            if server.alerts is not None
+            else []
+        )
         return {
             "id": indicator_id,
-            "in_use": bool(used or layouts),
+            "in_use": bool(used or layouts or alerts),
             "charts": [{"source": s, "instrument": i, "instances": n} for s, i, n in used],
             "layouts": layouts,
+            "alerts": alerts,
         }
 
     async def title(indicator_id: str) -> str:
@@ -71,7 +92,7 @@ def custom_routes(server: Server, charts: ChartIndicators) -> APIRouter:
         return d.indicator.title if d is not None and d.indicator is not None else indicator_id
 
     def where(usage: dict[str, Any], title: str) -> str:
-        charts_, layouts = usage["charts"], usage["layouts"]
+        charts_, layouts, alerts = usage["charts"], usage["layouts"], usage["alerts"]
         parts = []
         if charts_:
             names = ", ".join(c["instrument"] for c in charts_)
@@ -81,7 +102,20 @@ def custom_routes(server: Server, charts: ChartIndicators) -> APIRouter:
             parts.append(
                 f"in {len(layouts)} saved layout{'s' if len(layouts) > 1 else ''} ({names})"
             )
-        return f'"{title}" is {" and ".join(parts)}. Deleting it removes it from all of them.'
+        text = (
+            f'"{title}" is {" and ".join(parts)}. Deleting it removes it from all of them.'
+            if parts
+            else f'"{title}" is on no chart or layout.'
+        )
+        if alerts:
+            many = len(alerts) != 1
+            names = ", ".join(a["name"] or a["id"] for a in alerts)
+            text += (
+                f" {len(alerts)} indicator alert{'s' if many else ''} use{'' if many else 's'}"
+                f" it ({names}): deleting it stops {'them' if many else 'it'} (settings kept)."
+                " Name each of them to confirm (alerts=<id>)."
+            )
+        return text
 
     def target_folder(indicator_id: str) -> tuple[Path, Path | None]:
         """Where the files go, made now, and the history folder to move with them (None
@@ -117,40 +151,33 @@ def custom_routes(server: Server, charts: ChartIndicators) -> APIRouter:
         with contextlib.suppress(OSError):
             target.rmdir()
 
-    async def remove_instances(indicator_id: str, usage: dict[str, Any]) -> None:
-        """Take the definition off every chart and layout using it. Holding `charts.lock`.
-        If a step fails, what was already changed is put back (best effort) before the
-        error goes up, so the caller can move the files back too."""
-        undo: list[Any] = []  # coroutine factories that put a changed chart or layout back
-        store = LayoutStore(server.db.conn)
-        try:
-            for c in usage["charts"]:
-                source, instrument = c["source"], c["instrument"]
-                before = await charts.store().list(source, instrument)
-                kept = [
-                    i for i in before if not (i.kind == "custom" and i.indicator == indicator_id)
-                ]
-                await charts.replace(source, instrument, kept)
-                undo.append(lambda s=source, i=instrument, b=before: charts.replace(s, i, b))
-            for summary in usage["layouts"]:
-                layout = await store.get(summary["id"])
-                if layout is None:
-                    continue
-                entries = layout.state.get("indicators") or []
-                layout.state["indicators"] = [e for e in entries if not uses(e, indicator_id)]
-                await store.save(layout)
-                undo.append(lambda x=layout, e=entries: _put_back(store, x, e))
-        except BaseException:
-            for step in reversed(undo):
-                with contextlib.suppress(Exception):
-                    await step()
-            raise
+    async def remove_instances(indicator_id: str, usage: dict[str, Any], title: str) -> None:
+        """Take the definition off every chart and layout using it and stop its active
+        alerts, in one transaction (`ChartIndicators.commit`): if a step fails, nothing
+        of it stays, and the caller moves the files back. Holding `charts.lock`."""
+        writes = []
+        for c in usage["charts"]:
+            source, instrument = c["source"], c["instrument"]
+            before = await charts.store().list(source, instrument)
+            kept = [i for i in before if not (i.kind == "custom" and i.indicator == indicator_id)]
+            writes.append(ChartWrite(source, instrument, kept))
+        layouts = []
+        for summary in usage["layouts"]:
+            layout = await LayoutStore(server.db.conn).get(summary["id"])
+            if layout is None:
+                continue
+            entries = layout.state.get("indicators") or []
+            layout.state["indicators"] = [e for e in entries if not uses(e, indicator_id)]
+            layouts.append(layout)
+        reason = f'its indicator "{title}" was deleted'
+        await charts.commit(
+            writes,
+            layouts=layouts,
+            stops={a["id"]: reason for a in usage["alerts"] if a["status"] == "active"},
+            stop_text=f'The indicator "{title}" was deleted',
+        )
         if usage["layouts"]:
             server.hub.broadcast(await layouts_message(server))
-
-    async def _put_back(store: LayoutStore, layout: Any, entries: list[Any]) -> None:
-        layout.state["indicators"] = entries
-        await store.save(layout)
 
     @router.get("/{indicator_id}/usage")
     async def get_usage(indicator_id: str, request: Request) -> dict[str, Any]:
@@ -159,15 +186,28 @@ def custom_routes(server: Server, charts: ChartIndicators) -> APIRouter:
         return await usage(indicator_id)
 
     @router.delete("/{indicator_id}")
-    async def delete(indicator_id: str, request: Request, confirm: bool = False) -> dict[str, Any]:
+    async def delete(
+        indicator_id: str,
+        request: Request,
+        confirm: bool = False,
+        alerts: list[str] = Query(default=[]),  # noqa: B008  (FastAPI's way)
+    ) -> dict[str, Any]:
         await require_editing(request, server.settings, server.isolation)
         definition_file(indicator_id)
         # The charts' lock, and the file's own: a save of it in progress finishes first.
         async with charts.lock, server.custom.file_lock(indicator_id):
             path = definition_file(indicator_id)  # again: another delete may have run
             found = await usage(indicator_id)
-            if found["in_use"] and not confirm:
-                message = where(found, await title(indicator_id))
+            named = {a["id"] for a in found["alerts"]}
+            name = await title(indicator_id)
+            if found["in_use"] and (not confirm or set(alerts) != named):
+                message = where(found, name)
+                if confirm and set(alerts) != named:
+                    wrong = sorted(set(alerts) - named)
+                    missing = sorted(named - set(alerts))
+                    message += (f" Not named: {', '.join(missing)}." if missing else "") + (
+                        f" Not on it: {', '.join(wrong)}." if wrong else ""
+                    )
                 raise HTTPException(409, {"message": message, "usage": found})
             target, history = target_folder(indicator_id)
             # All or nothing (Session A's review of #33): the files move first, each move
@@ -192,7 +232,7 @@ def custom_routes(server: Server, charts: ChartIndicators) -> APIRouter:
                 ) from None
             try:
                 if found["in_use"]:
-                    await remove_instances(indicator_id, found)
+                    await remove_instances(indicator_id, found, name)
             except BaseException:
                 await asyncio.to_thread(put_back, moved, target)
                 raise

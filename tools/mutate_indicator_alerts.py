@@ -107,8 +107,8 @@ MUTANTS = [
     one(
         "a removed instance leaves the alert active",
         E,
-        '                alert.status, alert.stop_reason = "stopped", STOP_REMOVED',
-        "                alert.stop_reason = STOP_REMOVED",
+        '                alert.status, alert.stop_reason = "stopped", change.stop',
+        "                alert.stop_reason = change.stop",
     ),
     one(
         "a correction recorded although the fire still holds",

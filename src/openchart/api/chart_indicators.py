@@ -30,16 +30,31 @@ from __future__ import annotations
 import json
 import math
 import secrets
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from fastapi import HTTPException
 from pydantic import BaseModel, Field, StrictBool, StrictFloat, StrictInt, ValidationError
 
+from openchart.alerts.indicator_eval import Change, IndicatorEvaluator
 from openchart.indicators._base import Indicator
 from openchart.store.chart_indicators import ChartIndicatorStore, Instance
+from openchart.store.layouts import Layout, LayoutStore
+from openchart.store.sqlite import atomic
 
 if TYPE_CHECKING:
     from openchart.server import Server
+
+
+@dataclass
+class ChartWrite:
+    """One chart's whole new list (`ChartIndicators.commit`)."""
+
+    source: str
+    instrument: str
+    instances: list[Instance]
+    resets: dict[str, list[str]] | None = None
+
 
 MAX_INDICATORS = 30  # per chart and per layout
 MAX_PARAMS = 64  # values per instance
@@ -254,10 +269,70 @@ class ChartIndicators:
         """Store the chart's list and tell every browser and the indicator alerts (an
         alert on a removed instance stops, one on changed values re-arms). Call it
         holding `lock`."""
+        return (await self.commit([ChartWrite(source, instrument, instances, resets)]))[0]
+
+    async def plan(
+        self,
+        writes: list[ChartWrite],
+        *,
+        removed_reason: str | None = None,
+        removed_text: str | None = None,
+    ) -> list[Change]:
+        """What `writes` would do to the indicator alerts (stop, re-arm), without doing it."""
+        alerts = self.server.alerts
+        if alerts is None:
+            return []
+        changes: list[Change] = []
+        for w in writes:
+            if w.source == self.server.source:
+                changes += await alerts.indicators.plan_chart(
+                    w.instrument,
+                    w.instances,
+                    removed_reason=removed_reason,
+                    removed_text=removed_text,
+                )
+        return changes
+
+    async def commit(
+        self,
+        writes: list[ChartWrite],
+        *,
+        layouts: list[Layout] = (),  # type: ignore[assignment]
+        stops: dict[str, str] | None = None,
+        stop_text: str | None = None,
+        removed_reason: str | None = None,
+        removed_text: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Write charts' lists, `layouts` and what this does to the indicator alerts in one
+        transaction: all of it or nothing (an error leaves every chart, layout and alert
+        as it was, in the database and in memory, and nothing is announced). Then tell
+        every browser and send the messages. `stops` (alert id -> reason) stops more
+        alerts in the same step (a definition's delete), announced together with
+        `stop_text`. Call it holding `lock`."""
         assert self.lock.locked()
-        await self.store().replace(source, instrument, instances)
-        body = await self.view(source, instrument, resets)
-        self.server.hub.broadcast({"type": "chart_indicators_changed", **body})
-        if self.server.alerts is not None and source == self.server.source:
-            await self.server.alerts.chart_changed(instrument, instances)
-        return body
+        changes = await self.plan(writes, removed_reason=removed_reason, removed_text=removed_text)
+        indicators = self.server.alerts.indicators if self.server.alerts is not None else None
+        if stops and indicators is not None:
+            changes = [c for c in changes if c.alert.id not in stops]
+            changes += indicators.stops(stops, stop_text)
+        if indicators is not None:
+            indicators.evaluator.begin(changes)
+
+        def write(db) -> None:
+            for w in writes:
+                ChartIndicatorStore.write(db, w.source, w.instrument, w.instances)
+            for layout in layouts:
+                LayoutStore.write(db, layout)
+            IndicatorEvaluator.write_changes(db, changes)
+
+        await atomic(self.server.db.conn, write)
+        if indicators is not None:  # in memory at once, before anything else can run
+            notice = indicators.evaluator.apply_changes(changes)
+        bodies = []
+        for w in writes:
+            body = await self.view(w.source, w.instrument, w.resets)
+            self.server.hub.broadcast({"type": "chart_indicators_changed", **body})
+            bodies.append(body)
+        if indicators is not None:
+            indicators.deliver(notice)
+        return bodies

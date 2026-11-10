@@ -49,6 +49,7 @@ from openchart.indicators._base import Indicator
 from openchart.market.sessions import bar_bounds
 from openchart.market.timeframes import Timeframe, parse_timeframe
 from openchart.store.alerts import Alert, AlertEvent, AlertStore, IndicatorState
+from openchart.store.sqlite import atomic
 
 log = logging.getLogger(__name__)
 
@@ -61,6 +62,14 @@ CORRECTION_SECONDS = 86_400  # fires this recent are compared with the broker's 
 MAX_WARMUP = 20_000  # bars, as `api/routes_indicators.MAX_WARMUP` (a test keeps them equal)
 COLUMNS = ["ts", "o", "h", "l", "c", "v"]
 STOP_REMOVED = "the indicator was removed from the chart"
+# Output kinds on which a bar exactly on the value is no side (the crossing rule per kind).
+ZERO_IS_NO_SIDE = ("histogram",)
+# Computations start on a fixed grid of this many bars (plus the declared warmup before
+# it), whenever they run: a bar's value is then the same live and in a replay, bit for bit.
+ANCHOR_BARS = 512
+# A broker-corrected bar (D5) is recorded only when its evaluated value moved by more than
+# this (relative), more than two computations of the same bars can differ by.
+CORRECTION_NOISE = 1e-8
 
 
 # The rules -----------------------------------------------------------------------------
@@ -82,28 +91,52 @@ def observation(a: float | None, b: float | None) -> float | None:
     return s if math.isfinite(s) else None
 
 
-def crossing(
-    condition: str, signal_kind: str | None, prev: float | None, s: float | None
-) -> str | None:
+def crossing(condition: str, kind: str | None, prev: float | None, s: float | None) -> str | None:
     """ "up", "down" or "signal" when the bar with observation `s`, after `prev`, meets the
-    condition; else None. Crossings are the line rule (`engine._check`): `prev <= 0 < s`
-    up, `prev >= 0 > s` down. A marker is a signal on every bar it is on; a background
-    when it turns on (it was off on the bar before)."""
+    condition; else None. `kind` is the kind of the alert's output.
+
+    - Lines and areas (and `None`): the line rule (`engine._check`), `prev <= 0 < s` up,
+      `prev >= 0 > s` down, so leaving the value after touching it is a cross.
+    - Histograms: a bar exactly on the value is no side (0 often means "no signal"), so
+      `prev < 0 < s` up and `prev > 0 > s` down, where `prev` is the last bar that had a
+      side (`advance` keeps it over bars on the value): (-1, 0, -1) never fires.
+    - Markers and backgrounds (observations 1 = on, 0 = off, `signal_observation`): a
+      marker is a signal on every bar it is on; a background when it turns on (it was off
+      on the bar before)."""
     if s is None:
         return None
     if condition == "signal":
         if s != 1.0:
             return None
-        if signal_kind == "background":
+        if kind == "background":
             return "signal" if prev == 0.0 else None
         return "signal"
     if prev is None:
+        return None
+    if kind in ZERO_IS_NO_SIDE:
+        if prev < 0 < s:
+            return "up"
+        if prev > 0 > s:
+            return "down"
         return None
     if prev <= 0 < s:
         return "up"
     if prev >= 0 > s:
         return "down"
     return None
+
+
+def keeps_side(condition: str, kind: str | None, prev: float | None, s: float | None) -> bool:
+    """On a histogram a bar exactly on the value leaves `prev` at the last side seen."""
+    return condition != "signal" and kind in ZERO_IS_NO_SIDE and s == 0.0 and prev is not None
+
+
+def signal_observation(x: float | None) -> float | None:
+    """A marker or background on a bar: 1.0 when on (True), 0.0 for any other number (off:
+    0, False, or a value a script should not give, such as -1), None when missing."""
+    if x is None:
+        return None
+    return 1.0 if x == 1.0 else 0.0
 
 
 @dataclass
@@ -116,6 +149,9 @@ class Fire:
     other: float | None
     late: str | None
     event: AlertEvent | None = None
+    observed: float | None = None  # what it was decided on: the bar's observation
+    observed_prev: float | None = None  # and the previous one (`prev`)
+    frame_start: int | None = None  # the first bar of the computation
 
 
 def advance(
@@ -123,13 +159,15 @@ def advance(
     bars: list[tuple[int, int]],
     values: list[tuple[float | None, float | None]],
     *,
-    signal_kind: str | None,
+    kind: str | None,
     newest: int,
     now: float,
     reason: str,
+    frame_start: int | None = None,
 ) -> list[Fire]:
     """Evaluate `alert` on closed `bars` ((start, end), oldest first, ending on the newest
-    closed bar) with each bar's `(output, other)` values. Changes the alert's state and
+    closed bar) with each bar's `(output, other)` values. `kind` is the kind of the
+    alert's output (the crossing rule depends on it). Changes the alert's state and
     counters and returns its fires. Bars up to `last_bar` are skipped: they were
     evaluated. Not armed: the newest bar is recorded, nothing fires."""
     st = alert.istate
@@ -146,12 +184,14 @@ def advance(
         if st.last_bar is not None and start <= st.last_bar:
             continue
         prev = st.prev
-        st.prev, st.last_bar = s, start
+        st.last_bar = start
+        if not keeps_side(cond.condition, kind, prev, s):
+            st.prev = s
         if not alert.active:
             continue  # a `once` alert that fired earlier in this run: state only
         if alert.expires_at is not None and end > alert.expires_at:
             continue
-        cross = crossing(cond.condition, signal_kind, prev, s)
+        cross = crossing(cond.condition, kind, prev, s)
         if cross is None or (alert.direction not in ("cross", cross) and cross != "signal"):
             continue
         if (
@@ -163,7 +203,9 @@ def advance(
         alert.last_fired_at = end
         alert.fire_count += 1
         late = reason if (start != newest or now - end > LATE_AFTER_SECONDS) else None
-        fires.append(Fire(alert, start, end, cross, float(a), _num(b), late))  # type: ignore[arg-type]
+        fires.append(
+            Fire(alert, start, end, cross, float(a), _num(b), late, None, s, prev, frame_start)  # type: ignore[arg-type]
+        )
         if alert.frequency == "once":
             alert.status = "triggered"
     return fires
@@ -171,7 +213,7 @@ def advance(
 
 def _obs(condition: str, a: float | None, b: float | None) -> float | None:
     if condition == "signal":
-        return observation(a, 0.0)
+        return signal_observation(observation(a, 0.0))
     return observation(a, b)
 
 
@@ -184,11 +226,47 @@ def _num(x: Any) -> float | None:
 
 
 def contradicts(
-    cond_kind: str, signal_kind: str | None, prev: float | None, s: float | None, cross: str
+    cond_kind: str, kind: str | None, prev: float | None, s: float | None, cross: str
 ) -> bool:
     """Whether a fire's bar, with values corrected afterwards, no longer meets it."""
-    got = crossing(cond_kind, signal_kind, prev, s)
+    got = crossing(cond_kind, kind, prev, s)
     return got != cross
+
+
+def moved(old: float | None, new: float | None, scale: float) -> bool:
+    """Whether an evaluated value changed by more than computations can differ by."""
+    if old is None or new is None:
+        return old is not new
+    return abs(new - old) > CORRECTION_NOISE * max(1.0, abs(scale))
+
+
+def anchor(t: int, tf: Timeframe) -> int:
+    """The start of the grid cell of ANCHOR_BARS bars that time `t` is in."""
+    span = ANCHOR_BARS * tf.seconds
+    return t - t % span
+
+
+@dataclass
+class Change:
+    """What a chart write (or a definition's delete) does to one indicator alert: stop it
+    with a reason, or re-arm it on new values or a new version. Planned first, written
+    in the same transaction as the chart, applied to the alert in memory after it."""
+
+    alert: Alert
+    stop: str | None = None
+    rearm: tuple[str, dict[str, Any]] | None = None  # (digest, value inputs)
+    # Stopped because its instance went: such stops are announced in one message per
+    # write and reason (this text), not one per alert.
+    removed: str | None = None
+
+    def preview(self) -> dict[str, Any]:
+        cond = self.alert.indicator
+        return {
+            "id": self.alert.id,
+            "name": self.alert.name,
+            "uid": cond.uid if cond else None,
+            "reason": self.stop,
+        }
 
 
 # The group -----------------------------------------------------------------------------
@@ -303,7 +381,12 @@ class IndicatorEvaluator:
         wake: Callable[[], bool] = lambda: False,
         text: Callable[[Alert, AlertEvent], Awaitable[str]] | None = None,
         traded: Callable[[str, int, int], bool] = lambda _i, _s, _e: True,
+        instances: Callable[[str], Awaitable[set[str] | None]] | None = None,
     ):
+        self.instances = instances  # the uids on an instrument's chart now (None: unknown)
+        self.reported: dict[str, str] = {}  # alert id -> the error a message already named
+        self.unfit: dict[str, str] = {}  # alert id -> why its group cannot evaluate it
+        self._gens: dict[str, int] | None = None  # generations when the current run began
         self.text = text
         self.traded = traded
         self.store = store
@@ -338,10 +421,17 @@ class IndicatorEvaluator:
 
     async def step(self, now: float | None = None) -> Notice:
         """Evaluate every group with a closed bar it has not evaluated. Groups of shorter
-        timeframes first (1m before 1h): one bar close is one computation per group."""
+        timeframes first (1m before 1h): one bar close is one computation per group.
+        An active alert whose stored condition is incomplete is put in error (it is never
+        skipped silently)."""
         now = self.now() if now is None else now
         notice = Notice()
         async with self.lock:
+            self._gens = dict(self.generation)
+            for alert in self.alerts():
+                if alert.type == "indicator" and alert.active and alert.indicator is None:
+                    why = f"its condition is incomplete: {alert.condition_problem or 'unreadable'}"
+                    self._mark_error(alert, why, now, notice)
             by_key: dict[GroupKey, list[Alert]] = {}
             for alert in self.active():
                 by_key.setdefault(group_key(alert), []).append(alert)
@@ -355,13 +445,44 @@ class IndicatorEvaluator:
                 group = self.groups.setdefault(key, Group(key))
                 await self._group(group, by_key[key], now, notice)
             await self._save(notice)
+            self._gens = None
         return notice
 
     async def _save(self, notice: Notice) -> None:
-        """Alerts changed outside a fire (an error, a stop, a re-arm), written."""
+        """Alerts changed outside a fire (an error, a stop, a re-arm), written. One edited
+        meanwhile (a chart write stopped it, the API changed it) is left as it is now."""
+        gens = self._gens
         for alert in _unique(notice.save):
+            if gens is not None and self.generation.get(alert.id, 0) != gens.get(alert.id, 0):
+                continue
             await self.store.save(alert, touch=False)
         notice.save.clear()
+
+    async def _fitting(
+        self, key: GroupKey, schema: Indicator, alerts: list[Alert], now: float, notice: Notice
+    ) -> list[Alert]:
+        """The alerts of the group that can be evaluated. The others (their output gone or
+        their condition no longer fitting the definition, their instance no longer on the
+        chart) are put in error with the reason, and left out."""
+        on_chart = await self.instances(key.instrument) if self.instances is not None else None
+        ok = []
+        for alert in alerts:
+            cond = alert.indicator
+            assert cond is not None
+            why = output_exists(schema, cond)
+            if why is not None:
+                why = f"its condition no longer fits the indicator: {why}"
+            elif on_chart is not None and cond.uid not in on_chart:
+                why = (
+                    f"its indicator instance {cond.uid} is no longer on the {key.instrument} chart"
+                )
+            if why is None:
+                ok.append(alert)
+                self.unfit.pop(alert.id, None)
+            else:
+                self.unfit[alert.id] = why
+                self._mark_error(alert, why, now, notice)
+        return ok
 
     async def _group(self, group: Group, alerts: list[Alert], now: float, notice: Notice) -> None:
         key = group.key
@@ -370,17 +491,18 @@ class IndicatorEvaluator:
         if now < group.retry_at:
             return
         newest_possible = self._newest_possible(key.instrument, tf, forming)
+        waiting = [a for a in alerts if a.id not in self.unfit]  # those in error wait a bar
         if newest_possible is None or (
             group.failing is None
             and group.evaluated_through is not None
             and newest_possible <= group.evaluated_through
-            and all(a.istate.armed for a in alerts)
+            and all(a.istate.armed for a in waiting)
         ):
             return  # nothing closed since the last run
         if (
             group.failing is None
             and group.evaluated_through is not None
-            and all(a.istate.armed for a in alerts)
+            and all(a.istate.armed for a in waiting)
             and bar_bounds(newest_possible - 1, tf)[0] <= group.evaluated_through
             and not self.traded(key.instrument, newest_possible, bar_bounds(newest_possible, tf)[1])
         ):
@@ -390,39 +512,56 @@ class IndicatorEvaluator:
         gens = {a.id: self.generation.get(a.id, 0) for a in alerts}
         try:
             resolved = await self.definitions.resolve(key.kind, key.id)
-            if resolved.status == "missing" or resolved.schema is None:
-                why = resolved.reason or resolved.status
-                raise EvaluationFailed(f"{key.id}: {why}")
+            if resolved.status in ("missing", "ok") and resolved.schema is None:
+                why = f" ({resolved.reason})" if resolved.reason else ""
+                raise EvaluationFailed(f"the indicator {key.id} no longer exists{why}")
+            if resolved.schema is None:
+                raise EvaluationFailed(f"{key.id}: {resolved.reason or resolved.status}")
             if key.kind == "custom" and resolved.digest != key.digest:
                 # The file changed since the alerts' snapshot: re-armed or stopped first
                 # (the server's `refresh`), evaluated from their next run on.
                 await self._refresh(alerts, resolved, notice)
                 return
             schema = resolved.schema
+            alerts = await self._fitting(key, schema, alerts, now, notice)
+            if not alerts:
+                group.evaluated_through = newest_possible
+                return
             settings = schema.normalize(json.loads(key.params))
             needed = int(await self.definitions.warmup(key, schema, settings))
             warm = min(max(needed, 0), MAX_WARMUP)
             start = self._first_needed(alerts, forming, tf, notice, key)
-            frame = await self.bars.read(
-                key.instrument, tf, key.price, start, forming, warm + 1, now
-            )
-            frame = self._closed(frame, tf, key.instrument)
-            if frame.empty:
+            # Frames on the anchor grid: each holds the bars of one cell (and the warmup
+            # before it), so a bar's value does not depend on when it is evaluated.
+            span = ANCHOR_BARS * tf.seconds
+            cell = anchor(start if start is not None else newest_possible, tf)
+            frames: list[tuple[int, pd.DataFrame]] = []
+            while cell <= newest_possible:
+                end = min(cell + span, forming)
+                frame = await self.bars.read(
+                    key.instrument, tf, key.price, cell, end, warm + 1, now
+                )
+                frame = self._closed(frame, tf, key.instrument)
+                if not frame.empty and int(frame["ts"].iloc[-1]) >= cell:
+                    frames.append((cell, frame))
+                cell += span
+            if not frames:
                 group.evaluated_through = newest_possible  # no bar yet (a new instrument)
                 return
-            self.computations += 1
-            series = await self.compute(
-                key, schema, settings, frame[COLUMNS].reset_index(drop=True)
-            )
+            results = []
+            for cell, frame in frames:
+                self.computations += 1
+                series = await self.compute(
+                    key, schema, settings, frame[COLUMNS].reset_index(drop=True)
+                )
+                results.append((cell, frame, series))
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # the worker, the script, a result that cannot be used
             self._failed(group, alerts, _why(exc), now, notice)
             return
         warnings = self._warnings(key, settings, needed)
-        starts = [int(t) for t in frame["ts"]]
-        bounds = [(s, bar_bounds(s, tf)[1]) for s in starts]
-        newest = starts[-1]
+        newest = int(frames[-1][1]["ts"].iloc[-1])
         reason = self._reason(group)
         outputs = dict(zip(schema.output_ids(), schema.outputs, strict=True))
         written: list[Alert] = []
@@ -432,25 +571,50 @@ class IndicatorEvaluator:
                 continue  # edited, stopped or deleted meanwhile: its next run
             cond = alert.indicator
             assert cond is not None
+            st = alert.istate
+            before = (st.last_bar, st.prev, st.armed, st.error, list(st.warnings))
+            counters = (alert.fire_count, alert.last_fired_at, alert.status)
+            kind = outputs[cond.output].kind
+            got: list[Fire] = []
             try:
-                values = _values(cond, outputs, settings, series, len(frame))
+                for k, (cell, frame, series) in enumerate(results):
+                    if not st.armed and k != len(results) - 1:
+                        continue  # arming records the newest bar only
+                    values = _values(cond, outputs, settings, series, len(frame))
+                    starts = [int(t) for t in frame["ts"]]
+                    own = [i for i, s in enumerate(starts) if s >= cell]  # not the warmup
+                    got += advance(
+                        alert,
+                        [(starts[i], bar_bounds(starts[i], tf)[1]) for i in own],
+                        [values[i] for i in own],
+                        kind=kind,
+                        newest=newest,
+                        now=now,
+                        reason=reason,
+                        frame_start=starts[0],
+                    )
             except EvaluationFailed as exc:
+                # Nothing of this run counts for it: its state goes back to before it.
+                st.last_bar, st.prev, st.armed = before[0], before[1], before[2]
+                alert.fire_count, alert.last_fired_at, alert.status = counters
                 self._alert_failed(alert, str(exc), now, notice)
                 continue
-            st = alert.istate
-            changed = st.error is not None or st.warnings != warnings
-            st.error = st.error_since = None
-            st.warnings = list(warnings)
-            before = (st.last_bar, st.prev, st.armed)
-            kind = outputs[cond.output].kind if cond.condition == "signal" else None
-            got = advance(
-                alert, bounds, values, signal_kind=kind, newest=newest, now=now, reason=reason
-            )
             fires += got
-            if got or changed or before != (st.last_bar, st.prev, st.armed):
+            st.error = st.error_since = None
+            self.reported.pop(alert.id, None)
+            st.warnings = list(warnings)
+            if got or before != (st.last_bar, st.prev, st.armed, st.error, st.warnings):
                 written.append(alert)
+        _cell, frame, series = results[-1]
         corrected = await self._corrections(
-            alerts, starts, series, outputs, settings, len(frame), now
+            alerts,
+            [int(t) for t in frame["ts"]],
+            series,
+            outputs,
+            settings,
+            len(frame),
+            now,
+            reliable_from=min(warm, len(frame) - 1),
         )
         events = [_event(f, now) for f in fires]
         for fire, event in zip(fires, events, strict=True):
@@ -562,6 +726,7 @@ class IndicatorEvaluator:
         group.retry_at = now + RETRY_SECONDS
         for alert in alerts:
             self._mark_error(alert, why, now, notice)
+            self.reported[alert.id] = why  # the group's message speaks for them
         if group.failing is None:
             group.failing = Episode(now, why)
             names = ", ".join(sorted({a.name or a.id for a in alerts}))
@@ -594,6 +759,7 @@ class IndicatorEvaluator:
             notice.messages.append(
                 f"⚠️ Indicator alert cannot be evaluated: {alert.name or alert.id}. {why}."
             )
+        self.reported[alert.id] = why
 
     async def _refresh(self, alerts: list[Alert], resolved: Resolved, notice: Notice) -> None:
         """The custom file changed (a new hash): each alert is re-armed on the new version,
@@ -604,24 +770,35 @@ class IndicatorEvaluator:
             if stop or rearm:
                 self._apply(alert, stop, rearm, notice, why="the file was edited")
 
-    def reconcile(
+    def _reconcile(
         self, alert: Alert, resolved: Resolved, params: dict[str, Any]
-    ) -> tuple[str | None, bool]:
-        """(stop reason, re-arm) for an alert whose instance has `params` (value inputs)
-        on the definition as it is now (`resolved`). Re-arm when the version or the value
-        inputs changed; stop when its output no longer fits (D6)."""
+    ) -> tuple[str | None, tuple[str, dict[str, Any]] | None]:
+        """(stop reason, (digest, value inputs) to re-arm on) for an alert whose instance
+        has `params` (value inputs) on the definition as it is now (`resolved`). Re-arm
+        when the version or the value inputs changed; stop when its output no longer
+        fits (D6). Changes nothing."""
         cond = alert.indicator
         assert cond is not None
         if resolved.schema is None:
-            return None, False  # cannot tell now: the run says why
+            return None, None  # cannot tell now: the run says why
         why = output_exists(resolved.schema, cond)
         if why is not None:
-            return f"its output no longer fits: {why}", False
+            return f"its output no longer fits: {why}", None
         new_digest = resolved.digest or cond.digest
         if new_digest == cond.digest and params == cond.params:
-            return None, False
-        cond.digest, cond.params = new_digest, dict(params)
-        return None, True
+            return None, None
+        return None, (new_digest, dict(params))
+
+    def reconcile(
+        self, alert: Alert, resolved: Resolved, params: dict[str, Any]
+    ) -> tuple[str | None, bool]:
+        """`_reconcile`, with the new version and values taken into the alert's condition."""
+        stop, rearm = self._reconcile(alert, resolved, params)
+        if rearm is not None:
+            cond = alert.indicator
+            assert cond is not None
+            cond.digest, cond.params = rearm[0], dict(rearm[1])
+        return stop, rearm is not None
 
     def _apply(
         self, alert: Alert, stop: str | None, rearm: bool, notice: Notice, *, why: str
@@ -636,18 +813,22 @@ class IndicatorEvaluator:
         notice.changed.append(alert)
         notice.save.append(alert)
 
-    async def instances_changed(
+    # Chart writes: planned, written with the chart, then applied --------------------------
+
+    def plan(
         self,
         instrument: str,
         instances: dict[str, tuple[Resolved, dict[str, Any]]],
-    ) -> Notice:
-        """The chart of `instrument` was written (`ChartIndicators.replace`): `instances`
-        maps each uid now on it to its definition and value inputs. An alert whose
-        instance is gone is stopped with its settings kept (D2); one whose values or file
-        changed is re-armed (D6), or stopped if its output is gone. One message per
-        write for the alerts it stopped because their instance was removed."""
-        notice = Notice()
-        removed: list[Alert] = []
+        *,
+        removed_reason: str = STOP_REMOVED,
+        removed_text: str | None = None,
+    ) -> list[Change]:
+        """What writing the chart of `instrument` with `instances` (each uid on it, with its
+        definition and value inputs) would do to its active indicator alerts, without
+        doing it: an alert whose instance is gone stops with its settings kept (D2), one
+        whose values or file changed re-arms (D6), or stops if its output is gone."""
+        out = []
+        text = removed_text or f"The indicator was removed from the {instrument} chart"
         for alert in self.active():
             if alert.instrument != instrument:
                 continue
@@ -655,26 +836,110 @@ class IndicatorEvaluator:
             assert cond is not None
             got = instances.get(cond.uid)
             if got is None:
-                self.touched(alert.id)
-                alert.status, alert.stop_reason = "stopped", STOP_REMOVED
-                notice.changed.append(alert)
-                notice.save.append(alert)
-                removed.append(alert)
+                out.append(Change(alert, stop=removed_reason, removed=text))
                 continue
-            resolved, params = got
-            stop, rearm = self.reconcile(alert, resolved, params)
-            if stop or rearm:
-                self._apply(alert, stop, rearm, notice, why="its parameters or file changed")
-        if removed:
-            names = ", ".join(a.name or a.id for a in removed)
-            many = len(removed) != 1
+            stop, rearm = self._reconcile(alert, *got)
+            if stop is not None:
+                out.append(Change(alert, stop=stop))
+            elif rearm is not None:
+                out.append(Change(alert, rearm=rearm))
+        return out
+
+    def begin(self, changes: list[Change]) -> None:
+        """Before writing `changes`: a run in progress leaves their alerts alone, so it
+        cannot write an older state over them (a write that fails costs that run's result
+        for them; their next run evaluates them again)."""
+        for change in changes:
+            self.touched(change.alert.id)
+
+    @staticmethod
+    def write_changes(db: Any, changes: list[Change]) -> None:
+        """`changes` on the plain connection, inside the caller's transaction (`atomic`):
+        all of them with the chart, or none."""
+        for change in changes:
+            alert = change.alert
+            if change.stop is not None:
+                AlertStore.write_stop(db, alert.id, change.stop)
+            elif change.rearm is not None:
+                cond = alert.indicator
+                assert cond is not None
+                digest, params = change.rearm
+                condition = {**cond.to_json(), "digest": digest, "params": params}
+                state = IndicatorState(warnings=list(alert.istate.warnings)).to_json()
+                AlertStore.write_rearm(db, alert.id, json.dumps(condition), json.dumps(state))
+
+    def apply_changes(self, changes: list[Change]) -> Notice:
+        """`changes`, written, taken into the alerts in memory; the messages to send: one
+        per write and reason for alerts whose instance went, one per other stop."""
+        notice = Notice()
+        removed: dict[str, list[Alert]] = {}
+        for change in changes:
+            alert = change.alert
+            self.touched(alert.id)
+            if change.stop is not None:
+                alert.status, alert.stop_reason = "stopped", change.stop
+                if change.removed is not None:
+                    removed.setdefault(change.removed, []).append(alert)
+                else:
+                    notice.messages.append(
+                        f"⏹️ Indicator alert stopped: {alert.name or alert.id}: {change.stop}."
+                    )
+            elif change.rearm is not None:
+                cond = alert.indicator
+                assert cond is not None
+                cond.digest, cond.params = change.rearm[0], dict(change.rearm[1])
+                alert.istate = IndicatorState(warnings=list(alert.istate.warnings))
+                log.info("indicator alert %s re-armed: its parameters or file changed", alert.id)
+            notice.changed.append(alert)
+        for text, alerts in removed.items():
+            names = ", ".join(a.name or a.id for a in alerts)
+            many = len(alerts) != 1
             notice.messages.append(
-                f"⏹️ {len(removed)} indicator alert{'s' if many else ''} stopped: {names}. "
-                f"The indicator was removed from the {instrument} chart; "
-                + ("they keep their settings." if many else "it keeps its settings.")
+                f"⏹️ {len(alerts)} indicator alert{'s' if many else ''} stopped: {names}. "
+                f"{text}; " + ("they keep their settings." if many else "it keeps its settings.")
             )
-        await self._save(notice)
         return notice
+
+    async def instances_changed(
+        self,
+        instrument: str,
+        instances: dict[str, tuple[Resolved, dict[str, Any]]],
+    ) -> Notice:
+        """The chart of `instrument` was written: `plan`, written in one step, applied.
+        (The server writes the plan together with the chart: `ChartIndicators.commit`.)"""
+        changes = self.plan(instrument, instances)
+        self.begin(changes)
+        await atomic(self.store.conn, lambda db: self.write_changes(db, changes))
+        return self.apply_changes(changes)
+
+    # The watchdog's view of errors --------------------------------------------------------
+
+    def watch(self, now: float | None = None) -> list[str]:
+        """The watchdog's messages: groups behind or caught up (`behind`), and alerts in
+        error not reported yet (`errors`)."""
+        return self.behind(now) + self.errors()
+
+    def errors(self) -> list[str]:
+        """One message for each active indicator alert in error that no message has named
+        yet, once per alert and reason (a failing group's own message counts). Nothing in
+        error goes unsaid."""
+        out = []
+        for alert in self.alerts():
+            if alert.type != "indicator":
+                continue
+            why = alert.istate.error
+            if not alert.active or why is None:
+                self.reported.pop(alert.id, None)
+                continue
+            if self.reported.get(alert.id) == why:
+                continue
+            self.reported[alert.id] = why
+            out.append(
+                f"⚠️ Indicator alert cannot be evaluated: {alert.name or alert.id} "
+                f"({alert.instrument} {alert.timeframe}). {why}. It stays active but is not "
+                "evaluated until this is fixed: edit, stop or delete it in OpenChart."
+            )
+        return out
 
     async def _corrections(
         self,
@@ -685,10 +950,15 @@ class IndicatorEvaluator:
         settings: dict[str, Any],
         n: int,
         now: float,
+        *,
+        reliable_from: int = 1,
     ) -> list[AlertEvent]:
         """D5: fires of the last day whose bar now has other values (the broker's candles
         replaced it) that no longer meet the condition. Each is recorded once, on its
-        event; the fire itself stands."""
+        event; the fire itself stands. A bar whose evaluated values moved by no more than
+        two computations of the same bars can differ by (`CORRECTION_NOISE`) is not
+        corrected: its candles did not change. Bars inside the frame's own warmup (before
+        `reliable_from`) are not compared, nor a bar with no value now: they cannot tell."""
         index = {s: i for i, s in enumerate(starts)}
         by_id = {a.id: a for a in alerts}
         out = []
@@ -697,17 +967,30 @@ class IndicatorEvaluator:
             i = index.get(event.bar) if event.bar is not None else None
             alert = by_id[event.alert_id]
             cond = alert.indicator
-            if i is None or i == 0 or cond is None:
+            if i is None or i == 0 or i < reliable_from or cond is None:
                 continue
             try:
                 values = _values(cond, outputs, settings, series, n)
             except EvaluationFailed:
                 continue
-            prev, s = _obs(cond.condition, *values[i - 1]), _obs(cond.condition, *values[i])
-            kind = outputs[cond.output].kind if cond.condition == "signal" else None
+            kind = outputs[cond.output].kind
+            obs = [_obs(cond.condition, *v) for v in values[: i + 1]]
+            s, j = obs[i], i - 1
+            if s is None:
+                continue
+            while j > 0 and keeps_side(cond.condition, kind, obs[j - 1], obs[j]):
+                j -= 1  # a histogram's bars on the value: the side before them
+            prev = obs[j]
+            a, b = values[i]
+            scale = max(abs(_num(a) or 0.0), abs(_num(b) or 0.0))
+            if (
+                event.observed is not None
+                and not moved(event.observed, s, scale)
+                and not moved(event.observed_prev, prev, scale)
+            ):
+                continue  # the same values as when it fired, up to the computation
             if not contradicts(cond.condition, kind, prev, s, event.cross):
                 continue
-            a, b = values[i]
             event.correction = {
                 "value": _num(a),
                 "other_value": _num(b),
@@ -832,4 +1115,7 @@ def _event(f: Fire, now: float) -> AlertEvent:
         bar=f.bar,
         value=f.value,
         other_value=f.other,
+        observed=f.observed,
+        observed_prev=f.observed_prev,
+        frame_start=f.frame_start,
     )

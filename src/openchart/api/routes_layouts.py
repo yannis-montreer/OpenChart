@@ -5,19 +5,34 @@ a copy of the chart's indicators with their parameters (CI-3): a layout saved wi
 `indicators` copies its instrument's list from the server, and `apply` puts the copy
 back on a chart. Every change is broadcast as `layouts_changed` with the list, so open
 pages keep their layout menu current.
+
+Applying keeps the chart's instances where the layout has them (docs/decisions-indicator-
+alert-gaps.md): each layout entry takes the uid of the chart instance it matches, first
+the one with its uid and definition, then the first unmatched one, in legend order, with
+the same definition and value inputs; so indicator alerts on them stay armed (or re-arm
+when the values differ). `apply-preview` lists the alerts an apply would stop or re-arm;
+an apply that would stop alerts is refused (409, with the preview) unless each of them is
+named (`stop_alerts=<id>`).
 """
 
 from __future__ import annotations
 
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
 
-from openchart.api.chart_indicators import ChartIndicators, InstanceList, parse_entries
+from openchart.api.chart_indicators import (
+    ChartIndicators,
+    ChartWrite,
+    InstanceList,
+    new_uid,
+    parse_entries,
+)
 from openchart.market.timeframes import parse_timeframe
 from openchart.server import Server
-from openchart.store.layouts import DEFAULT_KEY, LayoutStore
+from openchart.store.chart_indicators import Instance
+from openchart.store.layouts import DEFAULT_KEY, Layout, LayoutStore
 
 ChartType = Literal["candles", "bars", "line", "area", "heikin_ashi"]
 
@@ -128,11 +143,67 @@ def layout_routes(server: Server, charts: ChartIndicators) -> APIRouter:
         await announce()
         return layout.to_json(await default_id())
 
-    @router.post("/{layout_id}/apply")
-    async def apply(layout_id: str, instrument: str | None = None) -> dict[str, Any]:
-        """Put the layout's copy of the indicators on a chart (the layout's instrument
-        unless another is given). Values that no longer fit fall back with a note;
-        entries whose definition is gone are left out and listed in `skipped`."""
+    async def values(i: Instance) -> dict[str, Any]:
+        """An instance's value inputs (colours and widths left out): what matching compares."""
+        _, schema, _ = await charts.definition(i.kind, i.indicator)
+        if schema is None:
+            return dict(i.params)
+        style = {p.name for p in schema.params if p.group == "style"}
+        return {k: v for k, v in i.params.items() if k not in style}
+
+    async def matched(
+        instances: list[Instance], resets: dict[str, list[str]], current: list[Instance]
+    ) -> tuple[list[Instance], dict[str, list[str]]]:
+        """The layout's instances with the uids of the chart instances they match: first
+        the same uid and definition, then the first unmatched instance with the same
+        definition and value inputs, in legend order. An unmatched entry never takes a
+        uid that is on the chart (an alert would follow it to another indicator)."""
+        taken: set[str] = set()
+        uid_of: dict[int, str] = {}
+        by_uid = {c.uid: c for c in current}
+        for n, i in enumerate(instances):
+            c = by_uid.get(i.uid)
+            if c is not None and (c.kind, c.indicator) == (i.kind, i.indicator):
+                uid_of[n] = c.uid
+                taken.add(c.uid)
+        for n, i in enumerate(instances):
+            if n in uid_of:
+                continue
+            mine = await values(i)
+            for c in current:
+                same = (c.kind, c.indicator) == (i.kind, i.indicator)
+                if c.uid not in taken and same and await values(c) == mine:
+                    uid_of[n] = c.uid
+                    taken.add(c.uid)
+                    break
+        out: list[Instance] = []
+        new_resets: dict[str, list[str]] = {}
+        used = set(uid_of.values())
+        for n, i in enumerate(instances):
+            uid = uid_of.get(n)
+            if uid is None:
+                uid = i.uid if i.uid not in by_uid and i.uid not in used else new_uid()
+                used.add(uid)
+            if i.uid in resets:
+                new_resets[uid] = resets[i.uid]
+            out.append(
+                Instance(
+                    uid, i.kind, i.indicator, i.params, i.visible, i.price_labels, i.legend_values
+                )
+            )
+        return out, new_resets
+
+    def removed(layout: Layout, instrument: str) -> dict[str, str]:
+        return {
+            "removed_reason": f'the layout "{layout.name}" applied to the chart does not have'
+            " its indicator",
+            "removed_text": f'Applying the layout "{layout.name}" removed the indicator from'
+            f" the {instrument} chart",
+        }
+
+    async def planned(layout_id: str, instrument: str | None) -> tuple[Any, ...]:
+        """(layout, instrument, the chart write, entries left out, what it does to the
+        indicator alerts). Holding `charts.lock`."""
         layout = await store().get(layout_id)
         if layout is None:
             raise HTTPException(404, "no such layout")
@@ -141,13 +212,59 @@ def layout_routes(server: Server, charts: ChartIndicators) -> APIRouter:
             raise HTTPException(400, "the layout has no instrument: give ?instrument=")
         await charts.known_chart(server.source, instrument)
         entries, skipped = parse_entries(layout.state.get("indicators") or [])
+        instances, resets, left_out = await charts.checked(entries, strict=False)
+        current = await charts.store().list(server.source, instrument)
+        instances, resets = await matched(instances, resets, current)
+        write = ChartWrite(server.source, instrument, instances, resets)
+        changes = await charts.plan([write], **removed(layout, instrument))
+        return layout, instrument, write, skipped + left_out, changes
+
+    def preview_of(instrument: str, changes: list[Any]) -> dict[str, Any]:
+        return {
+            "instrument": instrument,
+            "alerts_stopped": [c.preview() for c in changes if c.stop is not None],
+            "alerts_rearmed": [c.preview() for c in changes if c.rearm is not None],
+        }
+
+    @router.get("/{layout_id}/apply-preview")
+    async def apply_preview(layout_id: str, instrument: str | None = None) -> dict[str, Any]:
+        """What applying the layout would do to the chart's indicator alerts. Changes
+        nothing."""
         async with charts.lock:
-            instances, resets, left_out = await charts.checked(entries, strict=False)
-            chart = await charts.replace(server.source, instrument, instances, resets)
+            _, instrument, _, _, changes = await planned(layout_id, instrument)
+        return preview_of(instrument, changes)
+
+    @router.post("/{layout_id}/apply")
+    async def apply(
+        layout_id: str,
+        instrument: str | None = None,
+        stop_alerts: list[str] = Query(default=[]),  # noqa: B008  (FastAPI's way)
+    ) -> dict[str, Any]:
+        """Put the layout's copy of the indicators on a chart (the layout's instrument
+        unless another is given). Values that no longer fit fall back with a note;
+        entries whose definition is gone are left out and listed in `skipped`. Refused
+        (409, with the preview) unless `stop_alerts` names exactly the indicator alerts
+        it would stop."""
+        async with charts.lock:
+            layout, instrument, write, skipped, changes = await planned(layout_id, instrument)
+            preview = preview_of(instrument, changes)
+            stopping = {x["id"] for x in preview["alerts_stopped"]}
+            if set(stop_alerts) != stopping:
+                many = len(stopping) != 1
+                message = (
+                    f"Applying it stops {len(stopping)} indicator alert{'s' if many else ''}:"
+                    " name each of them to confirm (stop_alerts=<id>)."
+                    if stopping
+                    else "Applying it stops no indicator alert: name none."
+                )
+                raise HTTPException(409, {"message": message, "preview": preview})
+            (chart,) = await charts.commit([write], **removed(layout, instrument))
         return {
             "layout": layout.to_json(await default_id()),
             "chart": chart,
-            "skipped": skipped + left_out,
+            "skipped": skipped,
+            "alerts_stopped": preview["alerts_stopped"],
+            "alerts_rearmed": preview["alerts_rearmed"],
         }
 
     @router.delete("/{layout_id}")

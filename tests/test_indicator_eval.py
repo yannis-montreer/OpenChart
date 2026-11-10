@@ -960,7 +960,7 @@ def test_advance_ignores_bars_already_evaluated():
         alert,
         bars,
         [(1.0, 0.0), (1.0, 0.0), (1.0, 0.0)],
-        signal_kind=None,
+        kind=None,
         newest=300,
         now=402,
         reason="restart",
