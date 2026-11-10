@@ -26,6 +26,7 @@ LATE_TEXT = {
     "wake": "detected after wake-up (the server was frozen, the computer probably slept)",
     "reconnect": "detected after the price feed reconnected",
     "restart": "detected after a server restart",
+    "worker": "detected after the indicator could be computed again",
 }
 
 
@@ -92,6 +93,33 @@ def alert_text(alert: Alert, event: AlertEvent, decimals: int, tz: tzinfo) -> st
         lines.append(
             f"⚠️ Late: {LATE_TEXT.get(event.late, event.late)}, at {fmt_time(event.detected_at, tz)}"
         )
+    return "\n".join(lines)
+
+
+def indicator_text(alert: Alert, event: AlertEvent, decimals: int, tz: tzinfo) -> str:
+    """ "EUR_USD 1h RSI rsi crossed up 30.00 at the bar close", for an indicator alert."""
+    cond = alert.indicator
+    assert cond is not None
+    what = f"{alert.instrument} {alert.timeframe} {cond.name} {cond.output}"
+    if event.cross == "signal":
+        lines = [f"🔔 {alert.name or alert.instrument}", f"{what}: signal on the bar"]
+    else:
+        target = (
+            fmt_price(cond.value, decimals)
+            if cond.condition == "cross_value"
+            else f"{cond.other_output} ({fmt_price(event.other_value, decimals)})"
+        )
+        lines = [
+            f"🔔 {alert.name or alert.instrument}",
+            f"{what} crossed {event.cross} {target}: {fmt_price(event.value, decimals)}",
+        ]
+    lines.append(f"at the bar close {fmt_time(event.ts, tz)} ({alert.trigger_price})")
+    if event.late:
+        lines.append(
+            f"⚠️ Late: {LATE_TEXT.get(event.late, event.late)}, at {fmt_time(event.detected_at, tz)}"
+        )
+    if "lookahead" in alert.istate.warnings:
+        lines.append("⚠️ This script looks ahead: replayed bars may differ from live ones.")
     return "\n".join(lines)
 
 
