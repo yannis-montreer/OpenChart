@@ -20,6 +20,9 @@ the same function the browser draws with), or a fixed level.
   for each alert, the minutes up to the one it last observed (`seen_through`): after a
   crash its saved state can be newer than the saved `last_eval`.
 
+Indicator alerts (`type="indicator"`) are held here only to be counted and expired; they
+are never observed: they are evaluated on closed bars elsewhere.
+
 The engine is synchronous and does no I/O: fires go to `fires` (an asyncio queue) and
 the server persists, broadcasts and delivers them. Each fire carries the alert's state
 as it was right after it (`Fire.state`), and stays in `unsaved` until the server has
@@ -173,8 +176,8 @@ class AlertEngine:
         self.last_eval[instrument] = max(t, self.last_eval.get(instrument, 0.0))
         prices = {"bid": bid, "ask": ask, "mid": round((bid + ask) / 2, MID_DECIMALS)}
         for alert in list(self.alerts.values()):
-            if alert.instrument != instrument or not alert.active:
-                continue
+            if alert.instrument != instrument or not alert.active or alert.type == "indicator":
+                continue  # indicator alerts are evaluated on closed bars (indicator_eval)
             if alert.expires_at is not None and t >= alert.expires_at:
                 continue
             if late is not None and t < self.replay_from.get(alert.id, t):
