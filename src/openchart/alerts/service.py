@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from openchart.alerts.engine import AlertEngine, Fire
+from openchart.alerts.indicator_service import IndicatorAlerts
 from openchart.alerts.notifiers.telegram import TelegramClient
 from openchart.alerts.notify import (
     Dispatcher,
@@ -61,6 +62,7 @@ class AlertService:
         self.freeze: Freeze | None = None
         self._tasks: list[asyncio.Task[Any]] = []
         self._pending: set[asyncio.Future[None]] = set()
+        self.indicators = IndicatorAlerts(self)
 
     # Lifecycle
 
@@ -76,17 +78,21 @@ class AlertService:
             asyncio.create_task(self._fires(), name="alert-fires"),
             asyncio.create_task(self._loop(), name="alert-loop"),
         ]
+        self.indicators.start()
 
     async def announce_start(self) -> None:
         active = self.engine.active()
         instruments = sorted({a.instrument for a in active}) or ["no instrument"]
+        on_indicators = sum(1 for a in active if a.type == "indicator")
         self.dispatcher.system(
             f"▶️ OpenChart alert engine started: watching {len(active)} active "
-            f"alert{'s' if len(active) != 1 else ''} ({', '.join(instruments)}). "
-            "The watchdog reports a stalled price feed."
+            f"alert{'s' if len(active) != 1 else ''} ({', '.join(instruments)})"
+            + (f", {on_indicators} on indicators" if on_indicators else "")
+            + ". The watchdog reports a stalled price feed."
         )
 
     async def stop(self) -> None:
+        await self.indicators.stop()
         for task in self._tasks:
             task.cancel()
         for task in self._tasks:
@@ -115,11 +121,17 @@ class AlertService:
 
     def put(self, alert: Alert, *, rearm: bool = True) -> None:
         self.engine.put(alert, rearm=rearm)
+        self.indicators.touched(alert)
         self.broadcast("update", alert)
 
     def removed(self, alert: Alert) -> None:
         self.engine.remove(alert.id)
+        self.indicators.touched(alert)
         self.broadcast("delete", alert)
+
+    async def chart_changed(self, instrument: str, instances: list[Any]) -> None:
+        """A chart's indicators were written (`ChartIndicators.replace`)."""
+        await self.indicators.chart_changed(instrument, instances)
 
     def drawing_changed(self, drawing: Drawing) -> None:
         self.engine.drawing_changed(drawing)
@@ -338,7 +350,7 @@ class AlertService:
         state = feed.stream.state.value + (
             f" ({self.server.feed_error})" if self.server.feed_error else ""
         )
-        for message in self.watchdog.check(views, state):
+        for message in self.watchdog.check(views, state) + self.indicators.behind():
             log.warning(message)
             self.dispatcher.system(message)
 

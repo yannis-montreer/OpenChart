@@ -309,8 +309,10 @@ class CustomIndicators:
         info: Info | None = None,
         *,
         warmup: int = 0,
+        priority: str = "normal",
     ) -> dict[str, pd.Series]:
-        """Values from the worker. A script's own error is not counted toward the
+        """Values from the worker (`priority`: "normal" for charts, "alert" for indicator
+        alerts, see `IndicatorRunner`). A script's own error is not counted toward the
         quarantine, so it is kept instead (owner, CI-1): the same script, parameters and
         bars answer the same error without running again, and a script that raised
         after more than half its deadline is not run again with those parameters for
@@ -331,7 +333,9 @@ class CustomIndicators:
             raise slow[1]
         t = time.monotonic()
         try:
-            out = await runner.compute(d.digest, d.file, d.source, params, bars, info_json)
+            out = await runner.compute(
+                d.digest, d.file, d.source, params, bars, info_json, priority=priority
+            )
             try:  # the worker is not trusted: what it sent back is checked again here
                 series = indicator.check_wire(out, len(frame))
             except ResultError as exc:

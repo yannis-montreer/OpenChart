@@ -68,6 +68,7 @@ def test_create_takes_a_snapshot_of_the_instance(ia):
         "error": None,
         "error_since": None,
         "warnings": [],
+        "behind": False,
     }
     assert alert["name"] == "XAU_USD, 1h RSI rsi crossing up 30"
     assert ok(ia.get("/api/alerts")) == [alert]
