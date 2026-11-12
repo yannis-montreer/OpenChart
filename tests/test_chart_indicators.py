@@ -447,6 +447,7 @@ def test_usage_lists_the_charts_and_layouts(cc):
             {"source": source, "instrument": "XAU_USD", "instances": 2},
         ],
         "layouts": [{"id": gold["id"], "name": "Gold", "instances": 2}],
+        "alerts": [],
     }
     assert cc.get("/api/custom-indicators/nope/usage").status_code == 404
 

@@ -192,7 +192,7 @@ async def test_indicator_alerts_migration_on_a_database_from_before_it(tmp_path)
         async with conn.execute("SELECT * FROM alert_events ORDER BY id") as cur:
             events = await cur.fetchall()
         assert [e[: len(old_events[0])] for e in events] == old_events
-        assert all(e[len(old_events[0]) :] == (None, None, None, None) for e in events)
+        assert all(set(e[len(old_events[0]) :]) == {None} for e in events)
         (alert,) = await AlertStore(conn).list()
         assert alert.type == "level_cross" and alert.state.s_prev == 1.0
         assert alert.indicator is None and alert.stop_reason is None

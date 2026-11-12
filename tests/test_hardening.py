@@ -229,10 +229,10 @@ def test_a_delete_whose_database_step_fails_leaves_everything_as_it_was(fc, monk
     in_use(fc)
     from openchart.store import chart_indicators as store_module
 
-    async def broken(self, *args, **kwargs):
+    def broken(*args, **kwargs):  # the chart write inside the delete's transaction
         raise RuntimeError("the database is gone")
 
-    monkeypatch.setattr(store_module.ChartIndicatorStore, "replace", broken)
+    monkeypatch.setattr(store_module.ChartIndicatorStore, "write", staticmethod(broken))
     with pytest.raises(RuntimeError):
         fc.delete("/api/custom-indicators/mine?confirm=true")
     assert (fc.folder / "mine.py").read_text() == "PLAIN\n"
@@ -253,15 +253,15 @@ def test_a_delete_that_fails_on_the_second_chart_puts_the_first_back(fc, monkeyp
     assert r.status_code == 200
     from openchart.store import chart_indicators as store_module
 
-    real, calls = store_module.ChartIndicatorStore.replace, []
+    real, calls = store_module.ChartIndicatorStore.write, []
 
-    async def second_fails(self, *args, **kwargs):
+    def second_fails(*args, **kwargs):  # inside the delete's one transaction
         calls.append(args)
         if len(calls) == 2:
             raise RuntimeError("the disk is full")
-        return await real(self, *args, **kwargs)
+        return real(*args, **kwargs)
 
-    monkeypatch.setattr(store_module.ChartIndicatorStore, "replace", second_fails)
+    monkeypatch.setattr(store_module.ChartIndicatorStore, "write", staticmethod(second_fails))
     with pytest.raises(RuntimeError):
         fc.delete("/api/custom-indicators/mine?confirm=true")
     monkeypatch.undo()

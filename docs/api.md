@@ -100,8 +100,10 @@ An alert on one indicator of the instrument's chart (docs/designs/indicator-aler
 - An indicator alert's JSON also has `stop_reason` (why it is stopped: `"stopped by you"`, or the server's reason; `null` while active) and `state: {last_bar, armed, error, error_since, warnings, behind}`: `last_bar` is the start of the last closed bar evaluated, `armed` is false until the first evaluation (which records and never fires), `error` says why it cannot be evaluated now, and `warnings` holds `lookahead`, `warmup_short`, `unchecked` (from your file's save-time checks) and `warmup_cut`. Warnings never stop an alert.
 - `PUT /api/alerts/{id}`: the same fields; `indicator` must keep its `uid` (`400` otherwise). A new condition, timeframe, price type or direction, or `status: "active"` on a stopped alert, checks the instance again and re-arms the alert. `level` and `trigger_mode: "touch"` are a `400`.
 - Evaluation: closed bars only, once a bar has ended 2 s ago and its prices are known; every bar after `last_bar`, oldest first. Fires found after missed time are `late`: `restart`, `wake`, `reconnect`, or `worker` (after the indicator could not be computed). `behind` is true while the alert lags the newest closed bar by more than 2 bars (and 5 minutes) with the market open. See `docs/decisions-indicator-alerts-engine.md`.
-- Removing the instance from the chart stops its alerts (`stop_reason` "the indicator was removed from the chart", settings kept); new values or a new file version re-arm them; an output that no longer exists stops them.
-- An indicator alert's event also has `bar` (start of the closed bar), `value`, `other_value` and `correction` (`null`, or the bar's values after the broker's candles replaced it, when they contradict the fire; an `alert_event` message carries the update).
+- Removing the instance from the chart stops its alerts (`stop_reason` "the indicator was removed from the chart", settings kept); new values or a new file version re-arm them; an output that no longer exists stops them. The chart and its alerts are written in one step.
+- An alert that cannot be evaluated stays `active` with `state.error` saying why: its condition is incomplete, its indicator no longer exists, its output no longer fits, or its instance is no longer on the chart. The watchdog sends one message per alert and reason. See `docs/decisions-indicator-alert-gaps.md`.
+- Crossings: lines and areas follow the line rule (touching the value and leaving it is a cross); on a histogram a bar exactly on the value is no side, so (-1, 0, -1) never fires; a marker or background is on (1) or off (any other number).
+- An indicator alert's event also has `bar` (start of the closed bar), `value`, `other_value`, `correction` (`null`, or the bar's values after the broker's candles replaced it, when they contradict the fire; an `alert_event` message carries the update), and what the fire was decided on: `observed` (output minus the value, or 1 for a signal), `observed_prev` (the same on the bar before) and `frame_start` (the first bar of the computation). Computations start on a fixed grid of bars, so live and replayed evaluations give the same values.
 - `GET /api/instruments/{instrument}/delete-preview`: `stored.indicator_alerts` counts the instrument's alerts on indicators (they are part of `alerts`, and the delete removes them with the others).
 
 ## Indicators
@@ -203,8 +205,8 @@ Everything under `/api/custom-indicators` answers **`403`** `{detail: "Editing c
 | `GET /api/custom-indicators/{id}/versions/{version}` | `{id, version, source, saved_at}` |
 | `POST /api/custom-indicators/{id}/versions/{version}/restore` | puts that version back (a save) → the definition |
 | `POST /api/custom-indicators/preview` | Run: unsaved `source` on a chart query → values, nothing stored |
-| `GET /api/custom-indicators/{id}/usage` | `{id, in_use, charts: [{source, instrument, instances}], layouts: [{id, name, instances}]}` |
-| `DELETE /api/custom-indicators/{id}` | moves `<id>.py` and `.history/<id>/` to `.deleted/<id>-<UTC time>/` (as `<id>.py` and `history/`) → `{id, moved_to, removed}` |
+| `GET /api/custom-indicators/{id}/usage` | `{id, in_use, charts: [{source, instrument, instances}], layouts: [{id, name, instances}], alerts: [{id, name, instrument, uid, status}]}` |
+| `DELETE /api/custom-indicators/{id}?confirm=&alerts=` | moves `<id>.py` and `.history/<id>/` to `.deleted/<id>-<UTC time>/` (as `<id>.py` and `history/`) → `{id, moved_to, removed}` |
 
 **Ids, files and sources (every route):**
 
@@ -247,7 +249,7 @@ Everything under `/api/custom-indicators` answers **`403`** `{detail: "Editing c
 **Usage and delete (CI-3):**
 
 - `404` for an id that is not one of your files.
-- **In use:** `DELETE` answers `409` `{detail: {message, usage}}`, the message as the confirmation shows it (`"SMA cross" is on 2 charts (EUR_USD, XAU_USD) and in 1 saved layout ("Gold H1"). Deleting it removes it from all of them.`). `?confirm=true` removes its instances from every chart and saved layout first (`chart_indicators_changed` for each chart, `layouts_changed`), then moves the files. Only custom instances count and go: a built-in indicator with the same id is untouched, and a layout entry saved without a `kind` counts only when no built-in has that id.
+- **In use:** `DELETE` answers `409` `{detail: {message, usage}}`, the message as the confirmation shows it (`"SMA cross" is on 2 charts (EUR_USD, XAU_USD) and in 1 saved layout ("Gold H1"). Deleting it removes it from all of them.`). Indicator alerts on it count too, whatever their status: the delete also needs each of them named, exactly (`?confirm=true&alerts=<id>&alerts=<id>`; a missing or extra id is a `409` that says which). `?confirm=true` removes its instances from every chart and saved layout and stops its active alerts ("its indicator ... was deleted", one message), all in one transaction (`chart_indicators_changed` for each chart, `layouts_changed`), and moves the files; if any step fails nothing of it stays. Only custom instances count and go: a built-in indicator with the same id is untouched, and a layout entry saved without a `kind` counts only when no built-in has that id.
 - `409` without any change when `.deleted` or `.history/<id>` is not a plain folder inside yours (a file, or a link elsewhere).
 - After a delete, every page gets `indicators_changed` `{id, op: "delete"}` (fetch the catalog again).
 
@@ -272,12 +274,13 @@ An answer whose warmup fits has neither. Clients that ignore the fields keep wor
 | `GET /api/layouts/{id}` | the same plus `layout` |
 | `POST /api/layouts` | `{name, layout, default?}` → the layout |
 | `PUT /api/layouts/{id}` | any of `name`, `layout`, `default` (`true` makes it the one that loads on start, `false` unsets it) |
-| `POST /api/layouts/{id}/apply?instrument=` | put the layout's indicators on a chart (the layout's instrument unless `instrument` is given) → `{layout, chart, skipped}` |
+| `GET /api/layouts/{id}/apply-preview?instrument=` | what `apply` would do to the chart's indicator alerts, changing nothing → `{instrument, alerts_stopped: [{id, name, uid, reason}], alerts_rearmed: [...]}` |
+| `POST /api/layouts/{id}/apply?instrument=&stop_alerts=` | put the layout's indicators on a chart (the layout's instrument unless `instrument` is given) → `{layout, chart, skipped, alerts_stopped, alerts_rearmed}` |
 | `DELETE /api/layouts/{id}` | delete it (and unset the default if it was) |
 
 - `layout`: `{instrument, timeframe, chart_type, price, theme, panel_open, panel_view, indicators}`; `chart_type` is `candles`, `bars`, `line`, `area` or `heikin_ashi`. At most one layout is the default.
 - **`indicators`** is a copy of a chart's instances (`{uid, kind, id, params, visible, price_labels, legend_values}`, as above). **Left out, the layout copies its instrument's list from the server**; given (older clients did this), it is checked like a `PUT` to a chart and stored complete, with a `kind` and a `uid` added to each entry.
-- **`apply`** replaces the chart's list with the copy (the same `uid`s), broadcast as `chart_indicators_changed`. It reads the copy as the import reads a browser's list: values that no longer fit fall back with the `reset` note; entries whose definition is gone (or that cannot be used) are left out and listed in `skipped`. `400` when neither the layout nor the request names an instrument.
+- **`apply`** replaces the chart's list with the copy, broadcast as `chart_indicators_changed`. Each entry takes the `uid` of the chart instance it matches: the one with its `uid` and the same definition, else the first unmatched one (legend order) with the same definition and value inputs; otherwise its own `uid`, or a new one if that `uid` is on the chart. Alerts on matched instances stay armed (or re-arm on new values). It answers `409` `{detail: {message, preview}}` unless `stop_alerts=<id>` names exactly the alerts it would stop (as `apply-preview` lists them). It reads the copy as the import reads a browser's list: values that no longer fit fall back with the `reset` note; entries whose definition is gone (or that cannot be used) are left out and listed in `skipped`. `400` when neither the layout nor the request names an instrument.
 
 ## Drawings
 
