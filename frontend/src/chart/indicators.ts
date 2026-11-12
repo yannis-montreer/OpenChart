@@ -39,6 +39,7 @@ import {
 
 import {
   ApiError,
+  type Alert,
   indicatorsApi,
   type IndicatorDef,
   type IndicatorEntry,
@@ -48,6 +49,7 @@ import {
   type MarkerOutput,
 } from "../api";
 import { button, h, icon, menuItem, showMenu } from "../ui/dom";
+import { bellButton } from "../ui/indicatorBell";
 import { ghostOf, legendState, newUid, type GhostState, type Instance } from "./chartList";
 import {
   buildBands,
@@ -163,6 +165,35 @@ export class IndicatorLayer {
   onChange: () => void = () => {};
   /** "Settings…" on an indicator's legend row. */
   onSettings: (uid: number) => void = () => {};
+  /** The indicator alerts on an instance, by the server's uid: the legend row's bell shows how many. */
+  alertsOf: (uid: string | undefined) => Alert[] = () => [];
+  /** The bell on a legend row: open the alert dialog for that instance (`anchor`: the bell, for a menu under it). */
+  onAlert: (uid: number, anchor: HTMLElement) => void = () => {};
+
+  /** The instances the legend lists that can have an alert, in legend order. */
+  list(): Array<{ uid: number; label: string }> {
+    return this.active.filter((a) => !a.preview && !a.ghost && a.entry.uid).map((a) => ({ uid: a.uid, label: indicatorLabel(a.def, a.entry.params) }));
+  }
+  /** Asked before the legend removes an instance: false keeps it (the app names the alerts that would stop). */
+  confirmRemove: (uid: number) => Promise<boolean> = async () => true;
+
+  /** What the legend row shows for an instance: for the alert dialog and the question before a removal. */
+  describe(uid: number): { def: IndicatorDef; serverUid: string | undefined; label: string } | undefined {
+    const a = this.find(uid);
+    return a ? { def: a.def, serverUid: a.entry.uid, label: a.ghost ? a.entry.id : indicatorLabel(a.def, a.entry.params) } : undefined;
+  }
+
+  /** The legend's Remove: asks first when alerts would stop. */
+  requestRemove(uid: number): void {
+    void this.confirmRemove(uid).then((ok) => {
+      if (ok) this.remove(uid);
+    });
+  }
+
+  /** The alerts changed: every row shows its bell again. */
+  refreshBells(): void {
+    for (const a of this.active) if (!a.preview && !a.ghost) this.renderRow(a);
+  }
 
   constructor(private view: ChartView) {
     view.onBars = (kind) => (kind === "history" ? this.reloadAll() : this.scheduleLive());
@@ -748,7 +779,7 @@ export class IndicatorLayer {
             onClick: () => this.update(a.uid, { ...a.entry, visible: !a.entry.visible }),
           }),
           h("hr"),
-          menuItem({ label: "Remove", icon: "trash", onClick: () => this.remove(a.uid) }),
+          menuItem({ label: "Remove", icon: "trash", onClick: () => this.requestRemove(a.uid) }),
         ),
       ),
     );
@@ -770,12 +801,14 @@ export class IndicatorLayer {
       ...(a.error ? [h("span", { class: "legend-row-error", "data-tip": a.error }, icon("warn", 14), "Could not compute")] : []),
       ...(!a.error && a.notice ? [h("span", { class: "legend-row-notice", "data-tip": a.notice.tip }, icon("warn", 14), a.notice.label)] : []),
       ...this.resetChip(a),
+      // The bell is outside the actions (they show on hover only): with alerts it stays visible, with their count.
+      ...(a.preview ? [] : [bellButton(this.alertsOf(a.entry.uid), (bell) => this.onAlert(a.uid, bell))]),
       h(
         "span",
         { class: "legend-row-actions" },
         eye,
         button({ icon: "settings", title: "Settings", onClick: () => this.onSettings(a.uid) }),
-        button({ icon: "trash", title: "Remove", onClick: () => this.remove(a.uid) }),
+        button({ icon: "trash", title: "Remove", onClick: () => this.requestRemove(a.uid) }),
         more,
       ),
     );
@@ -794,7 +827,7 @@ export class IndicatorLayer {
       h("span", { class: "legend-row-name", "data-tip": state.tip }, a.entry.id),
       h("span", { class: "legend-row-error", "data-tip": a.gone ? `${state.tip} It is taken off the list with your next change.` : state.tip }, icon("warn", 14), state.label),
       ...this.resetChip(a),
-      h("span", { class: "legend-row-actions" }, button({ icon: "trash", title: "Remove", onClick: () => this.remove(a.uid) })),
+      h("span", { class: "legend-row-actions" }, button({ icon: "trash", title: "Remove", onClick: () => this.requestRemove(a.uid) })),
     );
   }
 

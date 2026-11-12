@@ -22,7 +22,8 @@ export interface SyncApi {
   get(source: string, instrument: string): Promise<ChartIndicators>;
   put(source: string, instrument: string, body: { indicators: ChartIndicatorIn[]; revision?: number }): Promise<ChartIndicators>;
   import(source: string, instrument: string, indicators: unknown[]): Promise<ChartIndicators & { skipped: SkippedEntry[] }>;
-  apply(layoutId: string, instrument: string): Promise<{ layout: Layout; chart: ChartIndicators; skipped: SkippedEntry[] }>;
+  /** `stopAlerts`: the indicator alerts the person confirmed would stop (the server refuses any other list). */
+  apply(layoutId: string, instrument: string, stopAlerts: string[]): Promise<{ layout: Layout; chart: ChartIndicators; skipped: SkippedEntry[] }>;
 }
 
 export type ShowWhy = "open" | "remote" | "conflict" | "apply" | "dropped";
@@ -215,7 +216,7 @@ export class ChartSync {
   }
 
   /** Put a saved layout's list on a chart (replacing the chart's own). */
-  async applyLayout(layoutId: string, layoutName: string, source: string, instrument: string): Promise<void> {
+  async applyLayout(layoutId: string, layoutName: string, source: string, instrument: string, stopAlerts: string[] = []): Promise<void> {
     const key = { source, instrument };
     const k = keyOf(key);
     const mine = ++this.token;
@@ -228,7 +229,7 @@ export class ChartSync {
       try {
         await this.settled();
         if (mine !== this.token) return;
-        const done = await this.api.apply(layoutId, instrument);
+        const done = await this.api.apply(layoutId, instrument, stopAlerts);
         if (mine !== this.token) return;
         this.take(done.chart, "apply");
         this.loaded = true;

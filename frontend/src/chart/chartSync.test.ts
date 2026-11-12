@@ -719,3 +719,33 @@ describe("statuses after a definition was saved (CI-4)", () => {
     expect(h.shown).toHaveLength(1);
   });
 });
+
+describe("loading a layout that stops alerts", () => {
+  it("passes the alerts the person confirmed to the server", async () => {
+    const s = fakeServer({ [key(SRC, A)]: { revision: 3, indicators: [inst("ema")] } });
+    const h = fakeHooks();
+    const sync = new ChartSync(s.api, h.hooks);
+    await sync.open(SRC, A);
+    await sync.applyLayout("L1", "Gold H1", SRC, A, ["a1", "a2"]);
+    expect(s.api.apply).toHaveBeenLastCalledWith("L1", A, ["a1", "a2"]);
+  });
+
+  it("passes none when none were named", async () => {
+    const s = fakeServer({ [key(SRC, A)]: { revision: 3, indicators: [inst("ema")] } });
+    const sync = new ChartSync(s.api, fakeHooks().hooks);
+    await sync.open(SRC, A);
+    await sync.applyLayout("L1", "Gold H1", SRC, A);
+    expect(s.api.apply).toHaveBeenLastCalledWith("L1", A, []);
+  });
+
+  it("when the server refuses because the alerts changed meanwhile, says so in its words and reads the chart", async () => {
+    const s = fakeServer({ [key(SRC, A)]: { revision: 3, indicators: [inst("ema")] } });
+    s.api.fail = (what) => (what === "apply" ? apiErrorFrom(409, "Conflict", { detail: { message: "Applying it stops 2 indicator alerts: name each of them to confirm (stop_alerts=<id>).", preview: {} } }) : null);
+    const h = fakeHooks();
+    const sync = new ChartSync(s.api, h.hooks);
+    await sync.open(SRC, A);
+    await sync.applyLayout("L1", "Gold H1", SRC, A, []);
+    expect(h.events).toContainEqual({ type: "failed", instrument: A, message: expect.stringContaining("stops 2 indicator alerts") });
+    expect(s.calls.slice(-2)).toEqual([`apply ${A}`, `get ${A}`]);
+  });
+});
