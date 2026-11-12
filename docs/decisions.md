@@ -910,3 +910,22 @@ They stay where they are; this is the pointer to each (folded in by the release 
 - [`decisions-mutation-tools.md`](decisions-mutation-tools.md): repairs to the mutation tools and two concurrent-write tests (#52).
 
 Release 0.2.0 (this branch): version 0.2.0 in `__version__`, the viewer, `frontend/package.json` and its lock file; release notes `docs/release-notes/v0.2.0.md`. The migration chain it ships is 0008 (#33) and 0009 (#50), nothing newer. The editor stays off on a source install by design (the setting cannot override missing isolation), so the notes and the README say the editor needs the service install or Docker compose. `CLAUDE.md` now says feature branches write `docs/decisions-<topic>.md` instead of appending here.
+
+## Decision files of 2026-10-19 to 2026-11-12 (index, folded in by the release 0.3.0 branch)
+
+Same arrangement as the index above: one file per piece of work, left where it is; this is the pointer to each. Design: [`designs/indicator-alerts.md`](designs/indicator-alerts.md) (#59).
+
+- [`decisions-ci-test-timeout.md`](decisions-ci-test-timeout.md): the `Dispatcher.drain` hang and failing a hung test in 5 minutes with every thread's stack (#54).
+- [`decisions-backfill-test-clock.md`](decisions-backfill-test-clock.md): the backfill pagination test no longer depends on the second of the minute (#55).
+- [`decisions-instrument-removal.md`](decisions-instrument-removal.md): a removed instrument is hidden from the chart and listed under Removed in Settings (#56).
+- [`decisions-instrument-delete.md`](decisions-instrument-delete.md): Delete data from Settings: preview, typed confirmation, VACUUM in the server (#57).
+- [`decisions-alert-fire-atomic.md`](decisions-alert-fire-atomic.md): a fire and the alert's state written in one step, for line alerts too (#60).
+- [`decisions-layout-instance-uids.md`](decisions-layout-instance-uids.md): whether applying a layout keeps indicator instance uids (answer: only sometimes; the fix is in the gaps file) (#61).
+- [`decisions-instrument-delete-indicators.md`](decisions-instrument-delete-indicators.md): Delete data also deletes the chart's indicators and their revision (#62).
+- [`decisions-indicator-alerts.md`](decisions-indicator-alerts.md): the owner's answers D1 to D7 for indicator alerts, and how to upgrade the pinned aiosqlite (#63).
+- [`decisions-indicator-alerts-api.md`](decisions-indicator-alerts-api.md): step 1, the data model and API (#64, #66).
+- [`decisions-indicator-alerts-engine.md`](decisions-indicator-alerts-engine.md): step 2, evaluation on closed bars (#65).
+- [`decisions-indicator-alert-gaps.md`](decisions-indicator-alert-gaps.md): closing the engine's gaps, the layout fix, migration 0011 (#67).
+- [`decisions-indicator-alerts-ui.md`](decisions-indicator-alerts-ui.md): IA-4, the dialog, the panel, the legend bell and the confirmations (#68).
+
+Release 0.3.0 (this branch): version 0.3.0 in `__version__`, the viewer, `frontend/package.json` and its lock file, and the script usage examples; release notes `docs/release-notes/v0.3.0.md`. The migration chain it ships is 0010 and 0011 on top of 0.2.0's 0009, nothing newer. `aiosqlite` is pinned exactly in `pyproject.toml`; the release build installs the package with `pip install .`, so it gets the same pin. The roadmap is brought to the real state.
