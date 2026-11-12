@@ -1,8 +1,8 @@
 # OpenChart
 
-Self-hosted charting and alerting server for forex and metals. It runs 24/7 on your own PC, pulls prices from your own broker account, and pushes alerts on drawn lines (including sloped trendlines) to your phone, even when no chart is open.
+Self-hosted charting and alerting server for forex and metals. It runs 24/7 on your own PC, pulls prices from your own broker account, and pushes alerts on drawn lines (including sloped trendlines) and on indicators to your phone, even when no chart is open.
 
-> **Status:** version 0.2.0, a pre-release: usable for charting and alerts with an OANDA account (gold, currency pairs and other OANDA instruments); still young. See [What works](#what-works).
+> **Status:** version 0.3.0, a pre-release: usable for charting and alerts with an OANDA account (gold, currency pairs and other OANDA instruments); still young. See [What works](#what-works).
 
 ![OpenChart: gold, 1 hour, an EMA and a trendline with an alert](docs/images/chart.png)
 
@@ -69,7 +69,7 @@ Click **Finish setup**: the chart opens and gold's history downloads in the back
 3. Talk to **@userinfobot**: it replies with your **chat ID**.
 4. In OpenChart, **Settings** (gear, top right), **Telegram**: paste both, click **Send test message**.
 
-Alerts on lines and levels then reach your phone even when no chart is open, and the server tells you when it starts, when the price feed stalls and recovers, and when the PC was asleep.
+Alerts on lines, levels and indicators then reach your phone even when no chart is open, and the server tells you when it starts, when the price feed stalls and recovers, and when the PC was asleep.
 
 ### 6. Your phone and other PCs: Tailscale (3 minutes)
 
@@ -186,7 +186,9 @@ NSSM 2.24 is at https://nssm.cc/download (or `winget install NSSM.NSSM`). Stop a
 | Built-in indicators: SMA, RSI, MACD, Bollinger, ATR, Stochastic, tick volume | done (0.2.0) |
 | More drawing tools: vertical line, rectangle, channel, Fibonacci, text, measure | done (0.2.0) |
 | Storage: tick and minute retention, purge, bar cache | done (0.2.0) |
-| 5-second candles, bar replay, indicator alerts | not started |
+| Alerts on indicators (crossing a number, crossing another output, a marker or background firing; closed bars only); fire and alert state written in one step | done (0.3.0) |
+| Removed instruments: Removed section, Add back, Delete data with a preview and a typed confirmation | done (0.3.0) |
+| 5-second candles, bar replay | not started |
 
 ## Development setup
 
@@ -284,7 +286,11 @@ Works:
 
 - Several instruments (M9): add one in Settings, Instruments (search, Add). Its history downloads in the background, newest first (hourly candles within seconds, then minute candles), while the others keep streaming, all through the one price stream. A panel on the chart, the watchlist and Settings show the progress. Prices, the magnet, axis, legend, watchlist, alerts and Telegram use each instrument's own decimals; lines and alerts use its own trading hours and learned closures. Drawings and alerts belong to their instrument; indicators and the chart settings stay when you switch, as in TradingView.
 
-Not yet: multi-timeframe indicators and indicator alerts (deferred, see docs/decisions.md).
+- Alerts on indicators (since 0.3.0): the bell on an indicator's legend row, or `+` in the Alerts panel, opens one dialog for three conditions: an output crosses a number, crosses another output, or a marker or background fires. They are checked on closed bars only, so a signal arrives after the bar closes (1-minute timeframe and above; a chart on seconds uses 1m). The panel shows each alert's state, its warnings and, for a stopped alert, why: the indicator was removed, or a file edit removed the output. Applying a layout keeps them armed and asks before stopping any; deleting an indicator definition or an instrument names its alerts first ([docs/decisions-indicator-alerts.md](docs/decisions-indicator-alerts.md)).
+
+- Removed instruments (since 0.3.0): removing one hides it; Settings, Removed lists it with **Add back** and a separate **Delete data…** (a preview, then a typed confirmation) that frees the space.
+
+Not yet: multi-timeframe indicators (deferred, see docs/decisions.md).
 
 - Deep history: 1h, 4h, daily and weekly charts go back as far as the broker has H1 (gold on OANDA: March 2006). The server downloads it in the background on first start. Complete 4h/D/W bars are cached, so these charts load in milliseconds.
 
