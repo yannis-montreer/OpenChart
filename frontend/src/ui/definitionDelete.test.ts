@@ -129,3 +129,44 @@ describe("afterDelete", () => {
     expect(afterDelete("A", { id: "a", moved_to: ".deleted/a-x", removed: one }).body).toBe('Moved "A" to .deleted/a-x. Removed from 1 chart.');
   });
 });
+
+describe("a definition with alerts on it (the server's 409 lists them and wants each named)", () => {
+  const al = (id: string, status = "active") => ({ id, name: `alert ${id}`, instrument: "EUR_USD", uid: "u1", status });
+  const WITH: DefinitionUsage = { ...USAGE, alerts: [al("a"), al("b", "stopped")] };
+  const ONLY: DefinitionUsage = { id: "sma_cross", in_use: true, charts: [], layouts: [], alerts: [al("a")] };
+
+  it("says how many alerts stop, and keeps the ids that were shown", () => {
+    const next = afterUsage("SMA cross", WITH);
+    expect(next.text).toBe('"SMA cross" is used. Deleting it removes it from all of these and stops 1 active alert on it; the file moves to the .deleted folder.');
+    expect(next.alertIds).toEqual(["a", "b"]);
+    expect(next.inUse).toBe(true);
+  });
+
+  it("an alert alone keeps the definition in use, even with no chart or layout", () => {
+    const next = afterUsage("SMA cross", ONLY);
+    expect(next).toMatchObject({ phase: "confirm", inUse: true, alertIds: ["a"] });
+    expect(next.text).toContain("stops 1 active alert");
+  });
+
+  it("alerts that are all stopped already say so instead", () => {
+    const next = afterUsage("SMA cross", { ...ONLY, alerts: [al("a", "stopped"), al("b", "expired")] });
+    expect(next.text).toContain("2 alerts on it are already stopped and stay in the Alerts panel");
+  });
+
+  it("no alerts: the text and the ids are what they were", () => {
+    expect(afterUsage("SMA cross", USAGE).alertIds).toEqual([]);
+    expect(afterUsage("SMA cross", IDLE).alertIds).toEqual([]);
+  });
+
+  it("the button names what it stops", () => {
+    expect(confirmLabel(true, 2)).toBe("Delete and stop 2 alerts");
+    expect(confirmLabel(true, 1)).toBe("Delete and stop 1 alert");
+    expect(confirmLabel(true, 0)).toBe("Delete and remove from all");
+  });
+
+  it("a 409 for alerts not named shows the fresh list to confirm again", () => {
+    const err = new ApiError(409, "x. Not named: c.");
+    err.detail = { message: "x. Not named: c.", usage: { ...WITH, alerts: [al("a"), al("c")] } };
+    expect(afterError("SMA cross", err)).toMatchObject({ phase: "confirm", alertIds: ["a", "c"], text: "x. Not named: c." });
+  });
+});

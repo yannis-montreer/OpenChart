@@ -1,8 +1,10 @@
 /** Alerts panel in the right column: the alerts (status, pause, edit, delete) and a log. */
 
 import { alertsApi, type Alert, type AlertEvent } from "../api";
+import { conditionText, eventView, instanceAlerts, lateText, problemText, viewOf } from "../alerts/indicatorAlerts";
 import { confirmAlertDelete } from "./alertDialog";
 import { button, h, icon } from "./dom";
+import { toast } from "./toast";
 
 const TRIGGER_TEXT = (a: Alert) =>
   a.trigger_mode === "candle_close"
@@ -10,7 +12,6 @@ const TRIGGER_TEXT = (a: Alert) =>
     : ({ once: "Once only", once_per_bar: "Once per bar", repeating: "Once per minute" } as const)[a.frequency];
 const DIRECTION_TEXT = { cross: "Crossing", up: "Crossing Up", down: "Crossing Down" } as const;
 const STATUS_TEXT = { active: "Active", triggered: "Triggered", expired: "Expired", stopped: "Stopped" } as const;
-const LATE_TEXT = { wake: "after wake-up", reconnect: "after a feed outage", restart: "after a restart" } as const;
 
 function when(ts: number): string {
   const d = new Date(ts * 1000);
@@ -32,14 +33,17 @@ export class AlertsPanel {
   onChange: () => void = () => {};
   /** Decimals for prices of an instrument. */
   decimals: (instrument: string) => number = () => 5;
+  /** "New alert on an indicator": the app lists the chart's indicators under `anchor`. */
+  onNewIndicatorAlert: (anchor: HTMLElement) => void = () => {};
 
   constructor() {
     this.tabs = h("div", { class: "seg al-tabs", role: "tablist" });
     this.body = h("div", { class: "al-list", role: "list" });
+    const add = button({ icon: "plus", title: "New alert on an indicator", class: "al-new", onClick: () => this.onNewIndicatorAlert(add) });
     this.el = h(
       "div",
       { class: "alerts-panel" },
-      h("div", { class: "panel-head" }, h("span", { class: "title" }, "Alerts"), this.tabs),
+      h("div", { class: "panel-head" }, h("span", { class: "title" }, "Alerts"), add, this.tabs),
       this.body,
     );
     this.renderTabs();
@@ -61,6 +65,16 @@ export class AlertsPanel {
   /** Alerts on a drawing (to offer editing them). */
   forDrawing(drawingId: string): Alert[] {
     return [...this.alerts.values()].filter((a) => a.drawing_id === drawingId);
+  }
+
+  /** The indicator alerts on one instance of a chart (its legend row's bell). */
+  forInstance(instrument: string, uid: string | undefined): Alert[] {
+    return instanceAlerts([...this.alerts.values()], instrument, uid);
+  }
+
+  /** Every alert the panel holds. */
+  all(): Alert[] {
+    return [...this.alerts.values()];
   }
 
   changed(op: "create" | "update" | "delete", alert: Alert): void {
@@ -104,7 +118,11 @@ export class AlertsPanel {
     const alerts = [...this.alerts.values()].sort((a, b) => b.created_at - a.created_at);
     if (!alerts.length) {
       this.body.replaceChildren(
-        h("div", { class: "panel-empty" }, "No alerts yet. Right-click a line and choose Add alert, or use the Alert button for a price level (Alt+A)."),
+        h(
+          "div",
+          { class: "panel-empty" },
+          "No alerts yet. Right-click a line and choose Add alert, use the Alert button for a price level (Alt+A), or the bell on an indicator's legend row.",
+        ),
       );
       return;
     }
@@ -113,12 +131,12 @@ export class AlertsPanel {
 
   private alertRow(a: Alert): HTMLElement {
     const active = a.status === "active";
+    const indicator = a.type === "indicator";
+    const view = indicator ? viewOf(a) : null;
     const target = a.type === "level_cross" ? `${a.level}` : "line";
-    const facts = [
-      `${DIRECTION_TEXT[a.direction]} ${target}`,
-      TRIGGER_TEXT(a),
-      a.timeframe,
-    ].join(" · ");
+    const facts = indicator
+      ? [conditionText(a), a.frequency === "once" ? "Once only" : "Every time", a.timeframe].join(" · ")
+      : [`${DIRECTION_TEXT[a.direction]} ${target}`, TRIGGER_TEXT(a), a.timeframe].join(" · ");
     const last = a.last_fired_at
       ? `Fired ${a.fire_count}×, last ${when(a.last_fired_at)}`
       : a.expires_at
@@ -132,7 +150,7 @@ export class AlertsPanel {
         try {
           this.changed("update", await alertsApi.update(a.id, { status: active ? "stopped" : "active" }));
         } catch (err) {
-          window.alert((err as Error).message);
+          toast({ title: active ? "Could not stop the alert" : "Could not restart the alert", body: problemText(err), icon: "warn", timeout: 8000 });
         }
       },
     });
@@ -152,16 +170,27 @@ export class AlertsPanel {
         confirmAlertDelete(a, () => this.changed("delete", a));
       },
     });
+    const statusLine = view
+      ? h(
+          "div",
+          { class: "al-facts al-statusline" },
+          h("span", { class: `al-state ${view.kind}` }, view.label),
+          view.reason ? h("span", { class: "al-reason" }, view.reason) : null,
+          view.behind ? h("span", { class: "al-behind", "data-tip": "It is more than two bars behind the newest closed bar; it catches up and fires late, labelled as late." }, "Behind") : null,
+          ...view.chips.map((c) => h("span", { class: "al-warn", "data-tip": c.text }, icon("warn", 12), c.label)),
+          h("span", { class: "al-last" }, last),
+        )
+      : h("div", { class: "al-facts" }, active ? last : `${STATUS_TEXT[a.status]}. ${last}`);
     const row = h(
       "div",
-      { class: `al-item status-${a.status}`, role: "listitem", tabindex: "0" },
-      h("span", { class: "al-dot", "data-tip": STATUS_TEXT[a.status] }),
+      { class: `al-item status-${a.status}${view?.kind === "error" ? " status-error" : ""}`, role: "listitem", tabindex: "0" },
+      h("span", { class: "al-dot", "data-tip": view ? view.label : STATUS_TEXT[a.status] }),
       h(
         "div",
         { class: "al-text" },
         h("div", { class: "al-name" }, a.name),
         h("div", { class: "al-facts" }, `${a.instrument} · ${facts}`),
-        h("div", { class: "al-facts" }, active ? last : `${STATUS_TEXT[a.status]}. ${last}`),
+        statusLine,
       ),
       h("div", { class: "al-actions" }, toggle, edit, del),
     );
@@ -179,6 +208,7 @@ export class AlertsPanel {
         const alert = this.alerts.get(e.alert_id);
         const d = this.decimals(alert?.instrument ?? "");
         const fmt = (x: number | null) => (x === null ? "–" : x.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d }));
+        const ev = eventView(e);
         const delivery = e.delivered
           ? h("span", { class: "al-badge ok", "data-tip": e.attempts ? `Sent to Telegram${e.attempts > 1 ? ` after ${e.attempts} attempts` : ""}` : "Shown in the app" }, icon("check", 14))
           : e.error
@@ -195,10 +225,11 @@ export class AlertsPanel {
             delivery,
           ),
           h("div", { class: "al-name" }, alert?.name ?? e.alert_id),
-          h("div", { class: "al-facts num" }, `${fmt(e.price)} · line ${fmt(e.line_value)}`),
-          e.late
-            ? h("div", { class: "al-late" }, icon("history", 14), `Detected ${LATE_TEXT[e.late]}, at ${when(e.detected_at)}`)
-            : null,
+          ev.indicator
+            ? h("div", { class: "al-message" }, ev.text)
+            : h("div", { class: "al-facts num" }, `${fmt(e.price)} · line ${fmt(e.line_value)}`),
+          ev.correction ? h("div", { class: "al-facts al-correction" }, ev.correction) : null,
+          e.late ? h("div", { class: "al-late" }, icon("history", 14), `Detected ${lateText(e.late)}, at ${when(e.detected_at)}`) : null,
         );
       }),
     );

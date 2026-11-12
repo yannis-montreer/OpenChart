@@ -10,8 +10,13 @@ import { toast } from "./toast";
 export interface LayoutHooks {
   /** The chart as it is now. */
   state: () => LayoutState;
-  /** Load a layout onto the chart. */
-  apply: (layout: Layout) => void;
+  /** Load a layout onto the chart. `stopAlerts`: the indicator alerts the person confirmed it would stop. */
+  apply: (layout: Layout, stopAlerts: string[]) => void;
+  /**
+   * Asked before a layout is loaded: resolves the ids of the alerts it would stop and the
+   * person agreed to ([] when none), or null to leave everything as it is.
+   */
+  confirmApply?: (layout: Layout) => Promise<string[] | null>;
   /** Called before the chart is saved: its indicator list must have reached the server (the server copies it). */
   beforeSave?: () => Promise<void>;
 }
@@ -210,8 +215,10 @@ export class LayoutMenu {
   private async loadLayout(id: string): Promise<void> {
     try {
       const layout = await layoutsApi.get(id);
+      const stop = this.hooks.confirmApply ? await this.hooks.confirmApply(layout) : [];
+      if (stop === null) return;
       this.setCurrent(id);
-      this.hooks.apply(layout);
+      this.hooks.apply(layout, stop);
     } catch (err) {
       toast({ title: "Could not load the layout", body: message(err), icon: "warn" });
     }

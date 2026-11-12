@@ -44,7 +44,7 @@ export function deleteInstrumentDialog(name: string): Promise<{ result: DeletedI
       intro.textContent = `Delete everything stored for ${name}, ${deleteSize(preview)}? This cannot be undone. Adding it back later downloads its history afresh.`;
       list.replaceChildren(...deleteLines(preview, both.checked).map((line) => h("li", {}, line)));
       bothRow.hidden = !preview.needs_drawings_and_alerts;
-      bothLabel.textContent = `Also delete its ${drawingsAndAlerts(s.drawings, s.alerts)}`;
+      bothLabel.textContent = `Also delete its ${drawingsAndAlerts(s.drawings, s.alerts, s.indicator_alerts)}`;
       ok.disabled = working || !canDelete(preview, typed.value, both.checked);
     };
     const load = async () => {

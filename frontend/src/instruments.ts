@@ -41,9 +41,10 @@ export function removedLine(i: Instrument): string {
 const n = (value: number): string => value.toLocaleString("en-US");
 const count = (value: number, one: string, many = `${one}s`): string => `${n(value)} ${value === 1 ? one : many}`;
 
-/** "1 drawing and 2 alerts", leaving out a kind there is none of. */
-export function drawingsAndAlerts(drawings: number, alerts: number): string {
-  return [drawings ? count(drawings, "drawing") : "", alerts ? count(alerts, "alert") : ""].filter(Boolean).join(" and ");
+/** "1 drawing and 2 alerts (1 on an indicator)", leaving out a kind there is none of. */
+export function drawingsAndAlerts(drawings: number, alerts: number, onIndicators = 0): string {
+  const on = onIndicators ? ` (${onIndicators} on ${onIndicators === 1 ? "an indicator" : "indicators"})` : "";
+  return [drawings ? count(drawings, "drawing") : "", alerts ? `${count(alerts, "alert")}${on}` : ""].filter(Boolean).join(" and ");
 }
 
 /** What the delete removes, one line each; the drawings and alerts are kept unless `both`. */
@@ -53,7 +54,7 @@ export function deleteLines(p: DeletePreview, both: boolean): string[] {
   if (s.closures) lines.push(count(s.closures, "market closure"));
   if (s.tick_files) lines.push(`${count(s.tick_files, "tick file")} (${sizeText(s.tick_bytes)})`);
   if (s.indicators) lines.push(`${count(s.indicators, "indicator")} on its chart`);
-  const named = drawingsAndAlerts(s.drawings, s.alerts);
+  const named = drawingsAndAlerts(s.drawings, s.alerts, s.indicator_alerts);
   if (named) lines.push(both ? `${named}${s.alerts ? ", and their alert log" : ""}` : `Kept unless the box below is ticked: ${named}`);
   return lines;
 }

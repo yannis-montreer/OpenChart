@@ -5,6 +5,7 @@
  */
 
 import { customApi } from "../api";
+import { definitionActiveAlerts, definitionAlertLines } from "../alerts/confirmations";
 import { afterDelete, afterError, afterUsage, confirmLabel, usageLines, type DeleteNext } from "./definitionDelete";
 import { button, h } from "./dom";
 import { resultLine } from "./forms";
@@ -43,11 +44,14 @@ export function openDeleteDefinition(opts: {
   };
 
   let inUse = false;
+  /** The alerts shown: the delete names each of them. */
+  let alertIds: string[] = [];
   const lists = (next: DeleteNext) => {
     usage.replaceChildren();
     if (next.phase !== "confirm" || !next.usage) return;
     const { charts, layouts } = usageLines(next.usage);
-    for (const [heading, lines] of [["Charts", charts], ["Saved layouts", layouts]] as const) {
+    const alerts = definitionAlertLines(next.usage);
+    for (const [heading, lines] of [["Charts", charts], ["Saved layouts", layouts], ["Alerts", alerts]] as const) {
       if (lines.length) usage.append(h("div", {}, h("b", {}, heading), h("ul", {}, ...lines.map((l) => h("li", {}, l)))));
     }
   };
@@ -58,7 +62,8 @@ export function openDeleteDefinition(opts: {
     result.clear();
     if (next.phase === "confirm") {
       inUse = next.inUse === true;
-      del.textContent = confirmLabel(inUse);
+      alertIds = next.alertIds ?? [];
+      del.textContent = confirmLabel(inUse, next.usage ? definitionActiveAlerts(next.usage) : 0);
       del.hidden = false;
       del.disabled = false;
       cancel.textContent = "Cancel";
@@ -75,7 +80,7 @@ export function openDeleteDefinition(opts: {
     del.disabled = true;
     result.busy("Deleting…");
     try {
-      const done = await customApi.remove(opts.id, inUse);
+      const done = await customApi.remove(opts.id, inUse, alertIds);
       close();
       toast({ ...afterDelete(opts.title, done), icon: "trash" });
       opts.onChanged();

@@ -425,3 +425,152 @@
   color: var(--warn);
   font-size: 12px;
 }
+
+/* Alerts on indicators (IA-4) */
+
+/* The dialog: the indicator, the closed-bar note, the warnings (never blocking). */
+.al-indicator {
+  font-weight: 600;
+  color: var(--text-strong);
+  overflow-wrap: anywhere;
+}
+.al-closed-note {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.al-warnings {
+  margin: 0;
+  padding: 8px 10px 8px 26px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.al-warnings[hidden] {
+  display: none;
+}
+.al-warnings li + li {
+  margin-top: 4px;
+}
+.al-created {
+  margin: 0;
+  color: var(--text);
+}
+
+/* The panel: state, reason, warnings. */
+.al-statusline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+.al-state {
+  font-weight: 600;
+  color: var(--up);
+}
+.al-state.arming {
+  color: var(--accent);
+}
+.al-state.stopped,
+.al-state.error {
+  color: var(--warn);
+}
+.al-state.error {
+  color: var(--down);
+}
+.al-state.triggered,
+.al-state.expired {
+  color: var(--faint);
+}
+.al-reason {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.al-behind,
+.al-warn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--warn);
+}
+.al-last {
+  color: var(--muted);
+}
+.status-error .al-dot {
+  background: var(--down);
+}
+.al-message {
+  margin-top: 2px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.al-correction {
+  color: var(--warn);
+}
+.alerts-panel .panel-head .al-new {
+  margin-left: auto;
+  margin-right: 6px;
+}
+
+/* A confirmation that lists alerts. */
+.confirm-list {
+  margin: 0 16px 12px;
+  padding: 8px 10px 8px 26px;
+  max-height: 180px;
+  overflow-y: auto;
+  border-radius: 6px;
+  background: var(--hover);
+  font-size: 12.5px;
+}
+.confirm-list li + li {
+  margin-top: 3px;
+}
+
+/* The bell on a legend row: hidden until the row is hovered, unless the instance has alerts. */
+.legend-row .legend-bell {
+  position: relative;
+  width: 24px;
+  height: 22px;
+}
+.legend-row .legend-bell .icon {
+  width: 15px;
+  height: 15px;
+}
+@media (hover: hover) {
+  .legend-row:not(:hover):not(:focus-within) .legend-bell:not(.alert-on):not(.alert-off) {
+    display: none;
+  }
+}
+.legend-bell.alert-on {
+  color: var(--accent);
+}
+.legend-bell.alert-on svg {
+  fill: currentColor;
+}
+.legend-bell.alert-off {
+  color: var(--warn);
+}
+.legend-bell .bell-count {
+  position: absolute;
+  top: -3px;
+  right: -2px;
+  min-width: 13px;
+  height: 13px;
+  padding: 0 3px;
+  border-radius: 7px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 9.5px;
+  line-height: 13px;
+  text-align: center;
+}
+.legend-bell.alert-off .bell-count {
+  background: var(--warn);
+}

@@ -78,6 +78,7 @@ describe("Delete data… on a removed instrument", () => {
     alerts: 2,
     active_alerts: 1,
     indicators: 0,
+    indicator_alerts: 0,
   };
   const preview = (over: Partial<typeof stored> = {}): DeletePreview => ({
     instrument: "EUR_DKK",
@@ -98,6 +99,14 @@ describe("Delete data… on a removed instrument", () => {
     expect(deleteLines(preview({ indicators: 2 }), false)[3]).toBe("2 indicators on its chart");
     expect(deleteLines(preview({ indicators: 1 }), true)[3]).toBe("1 indicator on its chart");
     expect([drawingsAndAlerts(1, 0), drawingsAndAlerts(0, 3), drawingsAndAlerts(2, 1)]).toEqual(["1 drawing", "3 alerts", "2 drawings and 1 alert"]);
+  });
+
+  it("says how many of the alerts are on indicators, kept or deleted", () => {
+    expect(deleteLines(preview({ alerts: 5, indicator_alerts: 2 }), false).slice(-1)).toEqual(["Kept unless the box below is ticked: 1 drawing and 5 alerts (2 on indicators)"]);
+    expect(deleteLines(preview({ alerts: 5, indicator_alerts: 2 }), true).slice(-1)).toEqual(["1 drawing and 5 alerts (2 on indicators), and their alert log"]);
+    expect(deleteLines(preview({ alerts: 5, indicator_alerts: 1 }), true).slice(-1)).toEqual(["1 drawing and 5 alerts (1 on an indicator), and their alert log"]);
+    expect(deleteLines(preview({ alerts: 2, indicator_alerts: 0 }), true).slice(-1)).toEqual(["1 drawing and 2 alerts, and their alert log"]);
+    expect(drawingsAndAlerts(0, 3, 3)).toBe("3 alerts (3 on indicators)");
   });
 
   it("leaves out what there is none of", () => {

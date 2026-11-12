@@ -34,8 +34,13 @@ import { DrawingsPanel } from "./drawings/listPanel";
 import { dropLegacyIndicators, loadPrefs, readLegacyIndicators, resolveTimezone, savePrefs, type Prefs } from "./prefs";
 import { formatClock, offsetLabel } from "./time";
 import { versionNotice } from "./version";
+import { layoutApplyPrompt } from "./alerts/confirmations";
+import { eventView, problemText, viewOf } from "./alerts/indicatorAlerts";
 import { openAlertDialog } from "./ui/alertDialog";
+import { confirmWithAlerts } from "./ui/alertsConfirm";
 import { AlertsPanel } from "./ui/alertsPanel";
+import { openIndicatorAlertDialog } from "./ui/indicatorAlertDialog";
+import { confirmRemoveInstance } from "./ui/removeInstance";
 import { DownloadPanel, isDownloading, lineText } from "./ui/download";
 import { showLogin } from "./ui/auth";
 import { button, closeMenu, h, icon, installTooltips, menuItem, showMenu, showMenuAt, type IconName } from "./ui/dom";
@@ -119,7 +124,8 @@ export class App {
   private catalog: IndicatorCatalog = { indicators: [], errors: [], folder: "" };
   private layoutMenu = new LayoutMenu({
     state: () => this.layoutState(),
-    apply: (l) => this.applyLayout(l),
+    apply: (l, stop) => this.applyLayout(l, stop),
+    confirmApply: (l) => this.confirmLayout(l),
     beforeSave: () => this.sync.settled(),
   });
   private toolButtons = new Map<Tool, HTMLButtonElement>();
@@ -288,6 +294,13 @@ export class App {
     );
     this.indicators.onChange = () => this.sync.changed();
     this.indicators.onSettings = (uid) => this.indicatorSettings(uid);
+    this.indicators.alertsOf = (uid) => (this.instrument ? this.alertsPanel.forInstance(this.instrument.instrument, uid) : []);
+    this.indicators.onAlert = (uid, anchor) => void this.indicatorAlert(uid, anchor);
+    this.indicators.confirmRemove = (uid) => {
+      const info = this.indicators.describe(uid);
+      const alerts = info && this.instrument ? this.alertsPanel.forInstance(this.instrument.instrument, info.serverUid) : [];
+      return confirmRemoveInstance(info?.label ?? "this indicator", alerts);
+    };
     this.drawings.onToolChange = (tool) => {
       for (const [t, b] of this.toolButtons) b.classList.toggle("active", t === tool);
     };
@@ -382,7 +395,11 @@ export class App {
     this.watchlist = new Watchlist(this.els.wlBox, (name) => this.selectInstrument(name));
     panel.append(this.els.wlBox, this.alertsPanel.el);
     this.alertsPanel.onEdit = (a) => void this.editAlert(a);
-    this.alertsPanel.onChange = () => this.drawings.alertsChanged();
+    this.alertsPanel.onChange = () => {
+      this.drawings.alertsChanged();
+      this.indicators.refreshBells();
+    };
+    this.alertsPanel.onNewIndicatorAlert = (anchor) => this.pickIndicatorForAlert(anchor);
     this.alertsPanel.decimals = (name) => this.everything.find((i) => i.instrument === name)?.decimals ?? 5;
     this.els.panelBtn = button({ icon: "list", title: "Watchlist", onClick: () => this.togglePanel("watchlist") });
     this.els.alertsBtn = button({ icon: "bell", title: "Alerts and their log", onClick: () => this.togglePanel("alerts") });
@@ -970,7 +987,7 @@ export class App {
   }
 
   /** Load a layout chosen in the layout menu. */
-  private applyLayout(layout: Layout): void {
+  private applyLayout(layout: Layout, stopAlerts: string[] = []): void {
     this.takeLayout(layout);
     this.applyTheme();
     this.renderSymbol();
@@ -982,7 +999,7 @@ export class App {
     this.renderChartType();
     if (this.instrument) {
       this.indicators.setEntries([], false);
-      void this.sync.applyLayout(layout.id, layout.name, this.instrument.source, this.instrument.instrument);
+      void this.sync.applyLayout(layout.id, layout.name, this.instrument.source, this.instrument.instrument, stopAlerts);
     }
     void this.loadChart();
   }
@@ -1068,7 +1085,109 @@ export class App {
     }
   }
 
+  /**
+   * Before a layout is loaded: the server's preview of the indicator alerts it would stop. Resolves
+   * the ids the person agreed to stop ([] when none would), or null when they said no.
+   */
+  private async confirmLayout(layout: Layout): Promise<string[] | null> {
+    const inst = this.instruments.find((i) => i.instrument === layout.layout.instrument) ?? this.instrument;
+    if (!inst) return [];
+    try {
+      const prompt = layoutApplyPrompt(layout.name, await layoutsApi.applyPreview(layout.id, inst.instrument));
+      if (!prompt.needed) return [];
+      return (await confirmWithAlerts({ ...prompt, danger: true })) ? prompt.ids : null;
+    } catch (err) {
+      toast({ title: "Could not check which alerts the layout would stop", body: problemText(err), icon: "warn" });
+      return null;
+    }
+  }
+
+  /** The bell on an indicator's legend row: a new alert, or a short list of the instance's alerts and "New alert". */
+  private async indicatorAlert(uid: number, anchor?: HTMLElement): Promise<void> {
+    const info = this.indicators.describe(uid);
+    if (!this.instrument || !info?.serverUid) return;
+    const instrument = this.instrument;
+    const serverUid = info.serverUid;
+    const create = async () => {
+      await this.sync.settled(); // an instance added a moment ago must be on the server's list
+      openIndicatorAlertDialog({
+        instrument: instrument.instrument,
+        timeframe: this.prefs.timeframe,
+        price: this.prefs.price,
+        def: info.def,
+        uid: serverUid,
+        title: info.label,
+        telegramReady: await this.telegramReady(),
+        onSaved: (a) => this.alertsPanel.changed("update", a),
+      });
+    };
+    const existing = this.alertsPanel.forInstance(instrument.instrument, serverUid);
+    if (!existing.length || !anchor) return create();
+    showMenu(
+      anchor,
+      h(
+        "div",
+        { class: "select-menu", style: "min-width:280px", "aria-label": `Alerts on ${info.label}` },
+        ...existing.map((a) =>
+          menuItem({
+            label: a.name,
+            icon: a.status === "active" ? "bellRing" : "bellOff",
+            extra: h("span", { class: "al-pick-status" }, viewOf(a).label),
+            onClick: () => void this.editAlert(a),
+          }),
+        ),
+        h("hr"),
+        menuItem({ label: "New alert on this indicator…", icon: "plus", onClick: () => void create() }),
+      ),
+    );
+  }
+
+  /** The Alerts panel's "new alert on an indicator": pick one of the chart's indicators first. */
+  private pickIndicatorForAlert(anchor: HTMLElement): void {
+    const list = this.indicators.list();
+    if (!list.length) {
+      toast({ title: "No indicator on this chart", body: "Add an indicator first, then create its alert from here or from its bell.", icon: "info", timeout: 5000 });
+      return;
+    }
+    showMenu(
+      anchor,
+      h(
+        "div",
+        { class: "select-menu", style: "min-width:240px", "aria-label": "Alert on which indicator?" },
+        ...list.map((i) => menuItem({ label: i.label, icon: "bell", onClick: () => void this.indicatorAlert(i.uid) })),
+      ),
+    );
+  }
+
+  /** Edit an alert on an indicator, from the panel or the legend's list. */
+  private async editIndicatorAlert(alert: Alert): Promise<void> {
+    const spec = alert.indicator;
+    const def = spec && this.indicators.definitions().find((d) => d.id === spec.id && (d.kind ?? (d.builtin ? "builtin" : "custom")) === spec.kind);
+    if (!spec || !def) {
+      toast({
+        title: "This alert's indicator cannot be edited",
+        body: spec ? `${spec.name} is not in the catalog now. You can still stop or delete the alert.` : "Its stored condition is unreadable. You can still stop or delete the alert.",
+        icon: "warn",
+        timeout: 6000,
+      });
+      return;
+    }
+    openIndicatorAlertDialog({
+      alert,
+      instrument: alert.instrument,
+      timeframe: alert.timeframe,
+      price: alert.trigger_price,
+      def,
+      uid: spec.uid,
+      title: spec.name,
+      telegramReady: await this.telegramReady(),
+      onSaved: (a) => this.alertsPanel.changed("update", a),
+      onDeleted: (a) => this.alertsPanel.changed("delete", a),
+    });
+  }
+
   private async editAlert(alert: Alert): Promise<void> {
+    if (alert.type === "indicator") return this.editIndicatorAlert(alert);
     const inst = this.everything.find((i) => i.instrument === alert.instrument);
     let drawing: Drawing | undefined;
     if (alert.drawing_id) {
@@ -1102,10 +1221,12 @@ export class App {
     const inst = this.everything.find((i) => i.instrument === alert.instrument);
     const d = inst?.decimals ?? 5;
     const fmt = (x: number | null) => (x === null ? "–" : x.toFixed(d));
+    const view = eventView(event);
     toast({
       title: alert.name,
-      body: `${alert.instrument} crossed ${event.cross}: ${fmt(event.price)} (line ${fmt(event.line_value)})`,
-      note: event.late ? "Found late: the server was asleep, offline or restarting." : undefined,
+      // An indicator alert shows the text the server sent (the one Telegram got).
+      body: view.indicator ? view.text : `${alert.instrument} crossed ${event.cross}: ${fmt(event.price)} (line ${fmt(event.line_value)})`,
+      note: event.late ? `Found late (${view.late}).` : undefined,
       sound: true,
     });
   }

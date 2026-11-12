@@ -65,6 +65,8 @@ export interface StoredData {
   active_alerts: number;
   /** Indicators on its chart: they always go with the data. */
   indicators?: number;
+  /** How many of `alerts` are on indicators (only present when there are some). */
+  indicator_alerts?: number;
   m1?: number;
   h1?: number;
   cached?: number;
@@ -162,11 +164,13 @@ export const UNAUTHORIZED_EVENT = "openchart:unauthorized";
 async function request<T>(
   method: string,
   path: string,
-  opts: { params?: Record<string, string | number | undefined>; body?: unknown; headers?: Record<string, string> } = {},
+  opts: { params?: Record<string, string | number | string[] | undefined>; body?: unknown; headers?: Record<string, string> } = {},
 ): Promise<T> {
   const url = new URL(path, window.location.href);
   for (const [k, v] of Object.entries(opts.params ?? {})) {
-    if (v !== undefined) url.searchParams.set(k, String(v));
+    // A list is one `k=v` per item (FastAPI's `list[str] = Query()`), none when empty.
+    if (Array.isArray(v)) for (const item of v) url.searchParams.append(k, item);
+    else if (v !== undefined) url.searchParams.set(k, String(v));
   }
   const res = await fetch(url, {
     method,
@@ -193,7 +197,7 @@ async function request<T>(
   return res.json() as Promise<T>;
 }
 
-const get = <T>(path: string, params?: Record<string, string | number | undefined>) =>
+const get = <T>(path: string, params?: Record<string, string | number | string[] | undefined>) =>
   request<T>("GET", path, { params });
 
 export const api = {
@@ -334,10 +338,45 @@ export type AlertFrequency = "once" | "once_per_bar" | "repeating";
 export type AlertMode = "touch" | "candle_close";
 export type AlertChannel = "telegram" | "app";
 
+export type IndicatorAlertCondition = "cross_value" | "cross_output" | "signal";
+
+/** What an indicator alert watches, as the server stored it (null on an alert whose stored condition is unreadable). */
+export interface IndicatorAlertSpec {
+  uid: string;
+  kind: "builtin" | "custom";
+  id: string;
+  params: Record<string, unknown>;
+  digest: string;
+  output: string;
+  condition: IndicatorAlertCondition;
+  other_output: string | null;
+  value: number | null;
+  /** The indicator's short name, "RSI(14)". */
+  name: string;
+}
+
+/** What an indicator alert sends in `indicator` (the server fills in the rest). */
+export interface IndicatorAlertIn {
+  uid: string;
+  output: string;
+  condition: IndicatorAlertCondition;
+  other_output?: string;
+  value?: number;
+}
+
+export interface IndicatorAlertState {
+  last_bar: number | null;
+  armed: boolean;
+  error: string | null;
+  error_since: number | null;
+  warnings: string[];
+  behind: boolean;
+}
+
 export interface Alert {
   id: string;
   instrument: string;
-  type: "line_cross" | "level_cross";
+  type: "line_cross" | "level_cross" | "indicator";
   drawing_id: string | null;
   level: number | null;
   direction: AlertDirection;
@@ -354,6 +393,11 @@ export interface Alert {
   updated_at: number;
   last_fired_at: number | null;
   fire_count: number;
+  /** Indicator alerts only. */
+  indicator?: IndicatorAlertSpec | null;
+  /** Why it is stopped ("stopped by you", or the server's reason); null while active. */
+  stop_reason?: string | null;
+  state?: IndicatorAlertState;
 }
 
 export interface AlertEvent {
@@ -364,11 +408,20 @@ export interface AlertEvent {
   line_value: number | null;
   cross: "up" | "down";
   message: string;
-  late: "wake" | "reconnect" | "restart" | null;
+  late: "wake" | "reconnect" | "restart" | "worker" | null;
   detected_at: number;
   delivered: boolean;
   attempts: number;
   error: string | null;
+  /** Indicator alerts only: the closed bar it fired on, and what it was decided on. */
+  bar?: number;
+  value?: number | null;
+  other_value?: number | null;
+  /** The broker's candles later contradicted the fire; what they gave. */
+  correction?: Record<string, unknown> | null;
+  observed?: number | null;
+  observed_prev?: number | null;
+  frame_start?: number | null;
 }
 
 export type AlertInput = Partial<
@@ -376,7 +429,7 @@ export type AlertInput = Partial<
     Alert,
     "direction" | "trigger_price" | "trigger_mode" | "timeframe" | "frequency" | "cooldown_s" | "level" | "name" | "expires_at" | "notify"
   >
-> & { status?: "active" | "stopped"; clear_expiry?: boolean };
+> & { status?: "active" | "stopped"; clear_expiry?: boolean; indicator?: IndicatorAlertIn };
 
 export const alertsApi = {
   list: () => get<Alert[]>("api/alerts"),
@@ -619,12 +672,33 @@ export const layoutsApi = {
   update: (id: string, body: { name?: string; layout?: LayoutState; default?: boolean }) =>
     request<Layout>("PUT", `api/layouts/${id}`, { body }),
   remove: (id: string) => request<LayoutSummary>("DELETE", `api/layouts/${id}`),
-  /** Put the layout's indicators on a chart (the layout's instrument unless one is given). */
-  apply: (id: string, instrument?: string) =>
-    request<{ layout: Layout; chart: ChartIndicators; skipped: SkippedEntry[] }>("POST", `api/layouts/${id}/apply`, {
-      params: { instrument },
-    }),
+  /** What applying would do to the chart's indicator alerts; changes nothing. */
+  applyPreview: (id: string, instrument?: string) => get<ApplyPreview>(`api/layouts/${id}/apply-preview`, { instrument }),
+  /**
+   * Put the layout's indicators on a chart (the layout's instrument unless one is given).
+   * The server refuses (409 with the preview) unless `stopAlerts` names exactly the alerts it would stop.
+   */
+  apply: (id: string, instrument?: string, stopAlerts: string[] = []) =>
+    request<{ layout: Layout; chart: ChartIndicators; skipped: SkippedEntry[]; alerts_stopped?: ApplyAlert[]; alerts_rearmed?: ApplyAlert[] }>(
+      "POST",
+      `api/layouts/${id}/apply`,
+      { params: { instrument, stop_alerts: stopAlerts } },
+    ),
 };
+
+export interface ApplyAlert {
+  id: string;
+  name: string;
+  uid: string;
+  reason: string;
+}
+
+/** `GET /api/layouts/{id}/apply-preview`, and the `preview` of the apply's 409. */
+export interface ApplyPreview {
+  instrument: string;
+  alerts_stopped: ApplyAlert[];
+  alerts_rearmed: ApplyAlert[];
+}
 
 // Indicators per chart on the server (CI-3, docs/api.md)
 
@@ -691,6 +765,8 @@ export interface DefinitionUsage {
   in_use: boolean;
   charts: { source: string; instrument: string; instances: number }[];
   layouts: { id: string; name: string; instances: number }[];
+  /** The indicator alerts on it, any status (older servers: absent). */
+  alerts?: { id: string; name: string; instrument: string; uid: string; status: string }[];
 }
 
 export interface DeletedDefinition {
@@ -767,8 +843,9 @@ export interface PreviewValues extends IndicatorValues {
 export const customApi = {
   usage: (id: string) => get<DefinitionUsage>(`${definitionPath(id)}/usage`),
   /** Without `confirm`, a definition in use answers 409 with where it is used. */
-  remove: (id: string, confirm = false) =>
-    request<DeletedDefinition>("DELETE", definitionPath(id), { params: { confirm: confirm ? "true" : undefined } }),
+  /** With `confirm`, `alerts` must name exactly the indicator alerts on it (the server refuses a missing or an extra one). */
+  remove: (id: string, confirm = false, alerts: string[] = []) =>
+    request<DeletedDefinition>("DELETE", definitionPath(id), { params: { confirm: confirm ? "true" : undefined, alerts } }),
   templates: () => get<TemplateInfo[]>("api/custom-indicators/templates"),
   /** New: a copy of a template under `id`. 409 with `suggested` when the file exists. */
   create: (body: { id: string; template: string; title?: string }) => request<SavedDefinition>("POST", "api/custom-indicators", { body }),

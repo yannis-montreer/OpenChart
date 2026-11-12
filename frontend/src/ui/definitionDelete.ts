@@ -11,6 +11,7 @@
  */
 
 import { ApiError, type DefinitionUsage, type DeletedDefinition } from "../api";
+import { definitionActiveAlerts, definitionAlertIds } from "../alerts/confirmations";
 
 export type DeletePhase = "confirm" | "blocked" | "unsupported" | "gone" | "failed";
 
@@ -22,9 +23,11 @@ export interface DeleteNext {
   /** `confirm` only: whether something uses the definition, and where. */
   inUse?: boolean;
   usage?: DefinitionUsage;
+  /** `confirm` only: the indicator alerts that were shown. The delete names each of them; the server refuses one that is missing or extra. */
+  alertIds?: string[];
 }
 
-function count(n: number, one: string, many: string): string {
+function count(n: number, one: string, many = `${one}s`): string {
   return `${n} ${n === 1 ? one : many}`;
 }
 
@@ -36,8 +39,23 @@ export function usageLines(usage: DefinitionUsage): { charts: string[]; layouts:
   };
 }
 
-export function confirmLabel(inUse: boolean): string {
+/** The button: what it will do, naming the running alerts it stops. */
+export function confirmLabel(inUse: boolean, runningAlerts = 0): string {
+  if (runningAlerts > 0) return `Delete and stop ${count(runningAlerts, "alert")}`;
   return inUse ? "Delete and remove from all" : "Delete";
+}
+
+/** What deleting does to a used definition, in words. */
+function usedText(title: string, usage: DefinitionUsage): string {
+  const alerts = usage.alerts ?? [];
+  const running = definitionActiveAlerts(usage);
+  const where = usage.charts.length || usage.layouts.length ? "removes it from all of these" : "";
+  const stops = running ? `stops ${count(running, "active alert")} on it` : "";
+  const parts = [where, stops].filter(Boolean).join(" and ");
+  const idle = alerts.length && !running ? `the ${count(alerts.length, "alert")} on it ${alerts.length === 1 ? "is" : "are"} already stopped and stay in the Alerts panel` : "";
+  const head = parts ? `Deleting it ${parts}` : "Deleting it only moves the file to the .deleted folder";
+  const tail = parts ? "; the file moves to the .deleted folder." : ".";
+  return `"${title}" is used. ${head}${idle ? `; ${idle}` : ""}${tail}`;
 }
 
 /** The first answer: ask, and say where it is used when it is. */
@@ -47,13 +65,15 @@ export function afterUsage(title: string, usage: DefinitionUsage): DeleteNext {
         phase: "confirm",
         inUse: true,
         usage,
+        alertIds: definitionAlertIds(usage),
         refresh: false,
-        text: `"${title}" is used. Deleting it removes it from all of these; the file moves to the .deleted folder.`,
+        text: usedText(title, usage),
       }
     : {
         phase: "confirm",
         inUse: false,
         usage,
+        alertIds: definitionAlertIds(usage),
         refresh: false,
         text: `Delete "${title}"? The file moves to the .deleted folder inside your indicators folder; nothing is erased.`,
       };
@@ -88,7 +108,7 @@ export function afterError(_title: string, err: unknown): DeleteNext {
     case 409: {
       const usage = usageOf(err.detail);
       if (usage) {
-        return { phase: "confirm", inUse: usage.in_use, usage, text: err.message, refresh: false };
+        return { phase: "confirm", inUse: usage.in_use, usage, alertIds: definitionAlertIds(usage), text: err.message, refresh: false };
       }
       return { phase: "failed", text: `Could not delete: ${err.message}`, refresh: true };
     }
