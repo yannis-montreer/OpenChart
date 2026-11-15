@@ -22,12 +22,19 @@ from openchart.providers.base import InstrumentInfo, ProviderError
 from openchart.purge import DeleteRefused
 from openchart.retention import DEFAULT_TICK_RETENTION, TICK_RETENTION, change_m1_depth
 from openchart.server import Server
-from openchart.settings import TICK_RETENTION_KEY, EncryptedFileSecrets, describe_secret
+from openchart.settings import (
+    START_MESSAGE_VALUES,
+    TELEGRAM_START_MESSAGE,
+    TICK_RETENTION_KEY,
+    EncryptedFileSecrets,
+    describe_secret,
+)
 
 log = logging.getLogger(__name__)
 
 Environment = Literal["practice", "live"]
 TickRetention = Literal["7d", "30d", "90d", "1y", "forever", "off"]  # retention.TICK_RETENTION
+StartMessage = Literal["auto", "always", "never"]  # settings.START_MESSAGE_VALUES
 M1Depth = Literal["3m", "1y", "2y"]  # retention.M1_DEPTHS
 
 
@@ -62,6 +69,7 @@ class SettingsUpdate(BaseModel):
     tick_retention: TickRetention | None = None
     timezone: str | None = None
     listen_on_network: bool | None = None
+    telegram_start_message: StartMessage | None = None
 
 
 class OandaTestBody(BaseModel):
@@ -179,6 +187,8 @@ def account_routes(server: Server) -> APIRouter:
             "telegram": {
                 "chat_id": app.telegram_chat_id,
                 "token": describe_secret(server.secrets, "telegram_token"),
+                "start_message": app.telegram_start_message,
+                "start_message_choices": list(START_MESSAGE_VALUES),
             },
             "store_ticks": app.store_ticks,
             "tick_retention": app.tick_retention,
@@ -345,6 +355,8 @@ def account_routes(server: Server) -> APIRouter:
             await server.settings.set(TICK_RETENTION_KEY, retention)
             await server.settings.set("store_ticks", retention != "off")
             reconfigure = reconfigure or (retention != "off") != app.store_ticks
+        if body.telegram_start_message is not None:
+            await server.settings.set(TELEGRAM_START_MESSAGE, body.telegram_start_message)
         if body.timezone is not None:
             await server.settings.set("timezone", body.timezone)
         if body.listen_on_network is not None and body.listen_on_network != app.listen_on_network:

@@ -759,7 +759,10 @@ async def _cmd_settings(config: Config, args: argparse.Namespace) -> int:
             finally:
                 conn.close()
             print(f"{args.key} is now {_shown(value)}.")
-            print("A running server uses it from its next request: no restart needed.")
+            if args.key == "telegram-start-message":
+                print("A running server uses it at its next start.")
+            else:
+                print("A running server uses it from its next request: no restart needed.")
             if args.key == "indicator-editing" and value != "off":
                 print(
                     "Editing still needs the minimum isolation (the Indicators menu says "

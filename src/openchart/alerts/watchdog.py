@@ -1,6 +1,8 @@
 """Watchdog (SPEC section 9): the alert engine must never fail silently.
 
-- "Engine started" on every server start.
+- "Engine started" when the start carries information (after a run that did not stop
+  cleanly, or after more than a few minutes down), or at every start if the setting
+  `telegram-start-message` says `always` (`AlertService.announce_start`).
 - "Feed stalled" when no tick arrived for `stall_seconds` (default 5 minutes) while the
   instrument's market should be open, and "feed recovered" when ticks are back.
 - After a freeze (the computer slept) the server sends its own message; the watchdog

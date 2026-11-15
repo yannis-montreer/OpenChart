@@ -53,6 +53,18 @@ def _editing_value(text: str) -> str:
     return value
 
 
+TELEGRAM_START_MESSAGE = "telegram_start_message"
+# auto: only after a run that did not stop cleanly or a downtime of more than a few minutes
+START_MESSAGE_VALUES = ("auto", "always", "never")
+
+
+def _start_message_value(text: str) -> str:
+    value = text.strip().lower()
+    if value not in START_MESSAGE_VALUES:
+        raise ValueError(f"telegram-start-message must be one of {', '.join(START_MESSAGE_VALUES)}")
+    return value
+
+
 def _bool_value(text: str) -> bool:
     value = text.strip().lower()
     if value in _TRUE:
@@ -67,6 +79,8 @@ def _bool_value(text: str) -> bool:
 LOCAL_SETTINGS = {
     "indicator-editing": (INDICATOR_EDITING, _editing_value, "auto"),
     "behind-proxy": (BEHIND_PROXY, _bool_value, False),
+    # Also in Settings (PUT /api/settings: login and same-origin like every setting there).
+    "telegram-start-message": (TELEGRAM_START_MESSAGE, _start_message_value, "auto"),
 }
 SECRET_KEY_ENV = "OPENCHART_SECRET_KEY"
 SECRET_KEY_FILE_ENV = "OPENCHART_SECRET_KEY_FILE"
@@ -306,6 +320,7 @@ class AppSettings:
     timezone: str
     listen_on_network: bool
     tick_retention: str = "30d"  # retention.TICK_RETENTION; "off" when ticks are not stored
+    telegram_start_message: str = "auto"  # START_MESSAGE_VALUES
 
 
 TICK_RETENTION_KEY = "tick_retention"
@@ -318,6 +333,7 @@ async def load_app_settings(store: SettingsStore, config: Config) -> AppSettings
     retention = await store.get(TICK_RETENTION_KEY)
     if retention not in TICK_RETENTION:  # never chosen (before storage steps 2): the default
         retention = DEFAULT_TICK_RETENTION if store_ticks else "off"
+    start_message = await store.get(TELEGRAM_START_MESSAGE, "auto")
     return AppSettings(
         oanda_environment=await store.get("oanda_environment", config.oanda.environment),
         oanda_account_id=await store.get("oanda_account_id", config.oanda.account_id),
@@ -326,6 +342,7 @@ async def load_app_settings(store: SettingsStore, config: Config) -> AppSettings
         timezone=await store.get("timezone", ""),
         listen_on_network=await store.get("listen_on_network", config.host != "127.0.0.1"),
         tick_retention=retention,
+        telegram_start_message=start_message if start_message in START_MESSAGE_VALUES else "auto",
     )
 
 

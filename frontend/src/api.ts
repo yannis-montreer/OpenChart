@@ -220,7 +220,13 @@ export interface SecretInfo {
 
 export interface Settings {
   oanda: { environment: "practice" | "live"; account_id: string; token: SecretInfo };
-  telegram: { chat_id: string; token: SecretInfo };
+  telegram: {
+    chat_id: string;
+    token: SecretInfo;
+    /** The "alert engine started" message: only when it says something (auto), always, never. */
+    start_message?: string;
+    start_message_choices?: string[];
+  };
   store_ticks: boolean;
   /** How long raw ticks are kept ("7d" … "forever", or "off": not stored). */
   tick_retention?: string;

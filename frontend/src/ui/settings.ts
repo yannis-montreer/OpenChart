@@ -221,6 +221,13 @@ export class SettingsDialog {
       placeholder: s.telegram.token.set ? `Saved (${s.telegram.token.masked}). Paste a new one to replace it.` : "123456789:AA…",
     });
     const chat = textInput({ value: s.telegram.chat_id, placeholder: "e.g. 123456789" });
+    const startLabels: Record<string, string> = {
+      auto: "Only when it says something (after a crash or a long stop)",
+      always: "At every start",
+      never: "Never",
+    };
+    const startChoices = s.telegram.start_message_choices ?? ["auto", "always", "never"];
+    const startMessage = choiceSelect(startChoices, s.telegram.start_message ?? "auto", (c) => startLabels[c] ?? c);
     const result = resultLine();
     const test = secondary("Send test message", undefined, "send");
     test.addEventListener("click", () =>
@@ -239,7 +246,11 @@ export class SettingsDialog {
       withBusy(save, async () => {
         result.busy();
         try {
-          const out = await this.save({ telegram_token: token.input.value.trim(), telegram_chat_id: chat.value.trim() });
+          const out = await this.save({
+            telegram_token: token.input.value.trim(),
+            telegram_chat_id: chat.value.trim(),
+            telegram_start_message: startMessage.value,
+          });
           token.input.value = "";
           token.input.placeholder = `Saved (${out.telegram.token.masked}). Paste a new one to replace it.`;
           result.ok("Saved.");
@@ -270,6 +281,11 @@ export class SettingsDialog {
         "Alerts (coming in M6) are sent as Telegram messages. Create a bot with @BotFather and copy its token, send the bot a message, then get your chat ID from @userinfobot.",
       ),
       h("div", { class: "grid-2" }, field("Bot token", token.el), field("Chat ID", chat)),
+      field(
+        "“Alert engine started” message",
+        startMessage,
+        "Feed problems, freezes and late alerts are always reported. This only decides whether a normal start also sends a message. Also: openchart settings set telegram-start-message.",
+      ),
       h("div", { class: "row" }, test, save, s.telegram.token.set ? remove : null),
       result.el,
     ];
