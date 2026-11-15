@@ -125,6 +125,7 @@ def test_set_and_get(data_dir, capsys):
     assert capsys.readouterr().out.splitlines() == [
         "indicator-editing: auto (default)",
         "behind-proxy: off (default)",
+        "telegram-start-message: auto (default)",
     ]
     assert main(["settings", "set", "indicator-editing", "ON", "--data-dir", str(data_dir)]) == 0
     assert main(["settings", "set", "behind-proxy", "yes", "--data-dir", str(data_dir)]) == 0

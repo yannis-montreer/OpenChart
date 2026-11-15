@@ -17,7 +17,7 @@ Requests that change something (`POST`, `PUT`, `DELETE`) and websocket connectio
 | `POST /api/logout` | ends this browser's session |
 | `POST /api/password` | `{current, new}`; logs out every other session |
 | `GET /api/settings` | settings; secrets only as `{set, masked: "****1234", source: "saved" \| "environment" \| null}` |
-| `PUT /api/settings` | any of `oanda_environment`, `oanda_account_id`, `oanda_token`, `telegram_token`, `telegram_chat_id`, `clear_telegram`, `store_ticks`, `timezone`, `listen_on_network`. Empty or missing tokens are kept. New OANDA credentials are checked before saving (`400`). Another environment or account while price history is stored: `409` with the reason (it would mix two price feeds). Returns the settings plus `restart_required` |
+| `PUT /api/settings` | any of `oanda_environment`, `oanda_account_id`, `oanda_token`, `telegram_token`, `telegram_chat_id`, `clear_telegram`, `telegram_start_message` (`auto`, `always` or `never`: whether the "alert engine started" message is sent; `422` for another value), `store_ticks`, `timezone`, `listen_on_network`. Empty or missing tokens are kept. New OANDA credentials are checked before saving (`400`). Another environment or account while price history is stored: `409` with the reason (it would mix two price feeds). Returns the settings plus `restart_required` |
 | `POST /api/settings/test/oanda` | `{environment?, account_id?, token?}` (missing: the saved value) → `{ok, message}` |
 | `POST /api/settings/test/telegram` | `{token?, chat_id?}` → `{ok, message}`; sends a test message |
 | `GET /api/instruments/available?q=` | instruments of the broker account, matching `q` |

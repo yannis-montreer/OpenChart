@@ -32,6 +32,7 @@ from openchart.market.feed import Feed
 from openchart.market.series import SeriesReader
 from openchart.providers.base import AuthError, Provider
 from openchart.providers.stream import StreamState
+from openchart.runstate import PreviousRun, RunState
 from openchart.settings import (
     SECRET_NAMES,
     AppSettings,
@@ -77,6 +78,10 @@ class Server:
         indicator_launchers: list[Any] | None = None,
     ):
         self.config = config
+        self.now: Callable[[], float] = lambda: time.time()  # tests give a fake clock
+        self.run_state: RunState | None = None
+        self.previous_run = PreviousRun(None, None)
+        self._stop_began: float | None = None
         self._fixed_provider = provider  # tests inject one; it is then always used
         self._fixed_secrets = secrets
         self.provider_factory = provider_factory
@@ -134,6 +139,9 @@ class Server:
             # writes (migrate, repair...) must not run underneath either.
             raise DataFolderInUse(in_use_message(cfg.data_dir, "start the server"))
         self.lock = lock
+        # Read what the last run left, and mark this one as running (cleared at start).
+        self.run_state = RunState(cfg.data_dir, now=lambda: self.now())
+        self.previous_run = self.run_state.begin()
         self.db = await Database.open(cfg.db_path)
         self.store = CandleStore(self.db.conn)
         self.settings = SettingsStore(self.db.conn)
@@ -177,7 +185,7 @@ class Server:
         # In the background: the first worker takes a second or two (importing pandas).
         self._tasks.append(asyncio.create_task(self._start_indicator_worker(), name="worker"))
         self._tasks.append(asyncio.create_task(self._status_loop(), name="status"))
-        self.alerts = AlertService(self)
+        self.alerts = AlertService(self, now=lambda: self.now())
         await self.alerts.start()
 
         if not await self.auth.password_set():
@@ -493,8 +501,20 @@ class Server:
         status["error"] = self.feed_error
         return status
 
+    def _record_clean_stop(self) -> None:
+        if self.run_state is None:
+            return
+        try:
+            self.run_state.clean_stop(self._stop_began)
+        except OSError as exc:  # the next start then says "did not stop cleanly": harmless
+            log.warning("could not note the clean stop: %s", exc)
+        self.run_state = None
+
     async def stop(self) -> None:
-        """Also safe after a start that failed half way."""
+        """Also safe after a start that failed half way. Ctrl+C, the Windows service's
+        stop and `docker stop` all end here (uvicorn's graceful shutdown): a stop that
+        gets to the end notes it (`runstate`); one that does not (a kill) leaves `running`."""
+        self._stop_began = self.now()
         await self._stop_feed()
         if self.alerts is not None:
             await self.alerts.stop()
@@ -513,6 +533,7 @@ class Server:
         if self.db is not None:
             await self.db.close()
             self.db = None
+        self._record_clean_stop()
         if self.lock is not None:
             self.lock.release()
             self.lock = None

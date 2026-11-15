@@ -2,6 +2,7 @@
 a freeze, watchdog (SPEC sections 7 and 9)."""
 
 import json
+import sqlite3
 import time
 
 import httpx
@@ -301,6 +302,12 @@ def test_the_engine_announces_its_start(harness):
         run_setup(c, telegram_chat_id="42")
     from openchart.server import Server
 
+    # The message is sent at every start only when asked for (`telegram-start-message
+    # always`); by default it needs a reason (tests/test_start_message.py).
+    with sqlite3.connect(harness.config.db_path) as conn:
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('telegram_start_message', '\"always\"')"
+        )
     again = Server(harness.config, provider=harness.provider, secrets=harness.secrets)
     again.telegram_transport = httpx.MockTransport(handler)
     with TestClient(create_app(again)) as c:

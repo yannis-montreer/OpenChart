@@ -39,6 +39,7 @@ SAVE_INTERVAL = 30.0
 WATCHDOG_INTERVAL = 15.0
 FREEZE_REPORT_WAIT = 30.0  # wait this long for the catch-up before reporting a freeze
 LAST_EVAL_KEY = "alerts_last_eval"
+START_GAP_SECONDS = 5 * 60  # `auto`: a start after more downtime than this is announced
 
 
 @dataclass
@@ -81,13 +82,43 @@ class AlertService:
         self.indicators.start()
 
     async def announce_start(self) -> None:
+        """The "engine started" message, when it carries information (setting
+        `telegram-start-message`): `always` at every start, `never` not at all, `auto`
+        after a run that did not stop cleanly or when the engine was down for more than
+        `START_GAP_SECONDS` (from the clean-stop time in `runstate`: the engine's own
+        `last_eval` only moves with ticks, so it is days old after every weekend)."""
+        mode = (await self.server.app_settings()).telegram_start_message
+        reason = None
+        if mode == "auto":
+            previous = self.server.previous_run
+            now = self.now()
+            if previous.unclean:
+                reason = (
+                    "the previous run did not stop cleanly (a crash, a power cut or a forced stop)"
+                )
+            elif previous.state == "clean" and previous.ts is not None:
+                down = now - previous.ts
+                if down > START_GAP_SECONDS:
+                    tz = await self._zone()
+                    reason = (
+                        f"the engine was down for {fmt_duration(down)} "
+                        f"(from {fmt_time(previous.ts, tz)} to {fmt_time(now, tz)})"
+                    )
+            if reason is None:
+                return
+        elif mode == "never":
+            return
         active = self.engine.active()
         instruments = sorted({a.instrument for a in active}) or ["no instrument"]
         on_indicators = sum(1 for a in active if a.type == "indicator")
-        self.dispatcher.system(
-            f"▶️ OpenChart alert engine started: watching {len(active)} active "
+        watching = (
+            f"watching {len(active)} active "
             f"alert{'s' if len(active) != 1 else ''} ({', '.join(instruments)})"
             + (f", {on_indicators} on indicators" if on_indicators else "")
+        )
+        self.dispatcher.system(
+            "▶️ OpenChart alert engine started: "
+            + (f"{reason}. Now {watching}" if reason else watching)
             + ". The watchdog reports a stalled price feed."
         )
 
