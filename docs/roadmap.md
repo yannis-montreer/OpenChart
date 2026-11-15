@@ -1,7 +1,7 @@
 # Roadmap
 
 What is merged, what is parked on a branch, and what comes next. Decisions behind each
-item are in `docs/decisions.md` (and the `docs/decisions-*.md` files named below). Updated 2026-10-19, to main at #52 (release 0.2.0 prepared in a draft PR).
+item are in `docs/decisions.md` (and the `docs/decisions-*.md` files named below). Updated 2026-11-12, to main at #68 (release 0.3.0 prepared in a draft PR).
 
 ## Merged into main
 
@@ -40,8 +40,19 @@ item are in `docs/decisions.md` (and the `docs/decisions-*.md` files named below
 | Storage step 2: tick retention, minute history per instrument (migration 0009), purge with VACUUM, log limits (`docs/decisions-retention.md`) | #50 |
 | Docs up to date with main (roadmap, README, CI design note) | #51 |
 | Mutation tools repaired, two concurrent-write tests, forming-bar test on one fake clock (`docs/decisions-mutation-tools.md`) | #52 |
+| Release 0.2.0: version, release notes, README, docs | #53 |
+| The `Dispatcher.drain` hang; a hung test fails in 5 minutes with every thread's stack (`docs/decisions-ci-test-timeout.md`) | #54 |
+| The backfill pagination test no longer depends on the second of the minute (`docs/decisions-backfill-test-clock.md`) | #55 |
+| Removed instruments hidden from the chart, listed under Removed in Settings (`docs/decisions-instrument-removal.md`) | #56 |
+| Delete a removed instrument's data from Settings: preview, typed confirmation (`docs/decisions-instrument-delete.md`) | #57 |
+| Design: alerts on indicators (`docs/designs/indicator-alerts.md`) | #59 |
+| An alert fire and the alert's state written in one step, for line alerts too (`docs/decisions-alert-fire-atomic.md`) | #60 |
+| Layouts and indicator instance uids pinned by tests (`docs/decisions-layout-instance-uids.md`) | #61 |
+| Delete data also deletes the chart's indicators (`docs/decisions-instrument-delete-indicators.md`) | #62 |
+| `aiosqlite` pinned exactly, with a test of the call the atomic write uses; D1 to D7 recorded (`docs/decisions-indicator-alerts.md`) | #63 |
+| Alerts on indicators: data model and API (migration 0010), evaluation on closed bars, the engine's gaps (migration 0011), the frontend: dialog, panel, legend bell, confirmations (`docs/decisions-indicator-alerts-*.md`, `docs/decisions-indicator-alert-gaps.md`) | #64, #65, #66, #67, #68 |
 
-**v0.1.0 is released as a pre-release** (owner, 2026-10-15). **v0.2.0** is prepared (version, release notes, README) in a draft PR; the owner merges it, then tags `v0.2.0` and publishes the draft release.
+**v0.1.0 is released as a pre-release** (owner, 2026-10-15). **v0.2.0** is merged (#53) and tagged; its GitHub release is still a **draft** (2026-11-12): the owner publishes it or skips it for 0.3.0. **v0.3.0** is prepared (version, release notes, README, docs) in a draft PR; the owner merges it, then tags `v0.3.0` and publishes the draft release.
 
 ## Parked on branches (not merged)
 
@@ -61,15 +72,14 @@ In the owner's order. Each item is one branch from main and stops for review.
 2. **Storage steps 2 and later:** step 2 is merged (#50: tick retention 30 days by default, M1 depth 2 years by default, `purge` with VACUUM, log limits). Later steps are in `docs/storage-review.md` (parked below).
 3. **5-second candles and bar replay**, as separate milestones. 5s candles use the spread/offsets layout and are kept 1 year by default.
 4. **Drawing tools:** the first set is merged (#48). Further tools (SPEC section 10) as the owner asks.
-5. **Indicators:** the first set is merged (#47). Still deferred by the owner: indicator alerts and multi-timeframe indicators.
+5. **Indicators:** the first set is merged (#47), and alerts on indicators (#64 to #68, in 0.3.0). Still deferred by the owner: multi-timeframe indicators, and indicator alerts on seconds timeframes (D3: revisit with the 5-second candles milestone).
 6. **Multi-source providers:** MT5, cTrader. Dukascopy is opt-in, for personal installs only, never bundled or hosted; revisit it with this item.
 7. **Later (SPEC section 13):** backtester, paper trading, economic calendar, webhook notifier.
 
 ## Housekeeping
 
-- **Merged branches still present:** locally `docs-after-verify` and `mutation-tools-fix` (each with a worktree); on GitHub most of the milestone, CI and fix branches of #1 to #52.
-  - Delete them when convenient; the exact commands were given with the release 0.2.0 PR.
-  - Not merged, keep: `storage-review` (parked, below). `tmp-pr46` is a local-only merge commit of an old session; the owner decides.
+- **Branches (checked 2026-11-12):** on GitHub only `main` and `storage-review` remain (the merged ones are deleted); the live checkout has only `main`, and `git worktree list` shows no other worktree.
+  - Not merged, keep: `storage-review` (parked, below; its PR #58 is closed).
 - **Note on the lock file:** `server.lock` stays in the data folder by design; the lock on it is what counts. So "is the server stopped?" means:
   - nothing listening on the port;
   - no `openchart run` process;
