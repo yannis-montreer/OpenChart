@@ -21,7 +21,7 @@ are retried every 30 s). No alert was evaluated until the server was restarted b
    delay is over 10 minutes and none under 24 s, and two servers never retry in step.
 3. **Bound: 6 hours from the first rejection.** OANDA's maintenance windows and outages
    have lasted minutes to a few hours; 6 hours covers them, and a really revoked token is
-   still reported the same day (about 40 attempts in all). Then the feed stops as before,
+   still reported the same day (40 to 49 attempts in all, depending on the jitter). Then the feed stops as before,
    with the same error in the status (`error`).
 4. **Revoked or not: OANDA does not tell.** Its 401 answer is the same text for a revoked,
    expired or wrong token and for its own outage (the 15 November answer was exactly

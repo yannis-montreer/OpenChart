@@ -289,7 +289,9 @@ def test_a_rejection_that_never_ends_stops_after_6_hours_with_the_same_error(tmp
         settle(c)
         waited = sum(rig.sleeper.delays)
         assert 6 * HOUR - 600 <= waited < 6 * HOUR + 600
-        assert len(rig.sleeper.delays) < 45  # about one attempt every 10 min
+        # 40 retries without jitter (30 s ... 480 s, then 600 s each); with every delay at
+        # its shortest (a fifth off: 24 s ... 384 s, then 480 s each), 49.
+        assert 40 <= len(rig.sleeper.delays) <= 49
         s = status(c)
         assert s["error"] == REJECTED  # what it said before this change
         assert s["retry"] is None and s["provider_state"] != "retrying"
