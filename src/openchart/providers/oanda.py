@@ -118,7 +118,7 @@ class OandaProvider:
         stream_read_timeout: float = 30.0,
     ):
         if not config.configured:
-            raise AuthError("OANDA token and account ID are not configured")
+            raise AuthError("OANDA token and account ID are not configured", certain=True)
         self.config = config
         self.token_problem = token_problem(config.token)
         self.request_delay = request_delay
@@ -148,7 +148,7 @@ class OandaProvider:
 
     async def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         if self.token_problem:  # it would only be refused, without saying why
-            raise AuthError(self.token_problem)
+            raise AuthError(self.token_problem, certain=True)
         delay = 1.0
         for attempt in range(self.max_retries + 1):
             try:
@@ -248,7 +248,7 @@ class OandaProvider:
         path = f"/v3/accounts/{self.config.account_id}/pricing/stream"
         params = {"instruments": ",".join(instruments)}
         if self.token_problem:
-            raise AuthError(self.token_problem)
+            raise AuthError(self.token_problem, certain=True)
         async with self._stream.stream("GET", path, params=params) as resp:
             if resp.status_code in (401, 403):
                 await resp.aread()

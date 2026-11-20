@@ -115,7 +115,20 @@ export interface Status {
   provider_state: string;
   reconnects?: number;
   error?: string | null;
+  /** While the broker rejects the credentials and the server retries; null otherwise. */
+  retry?: RetryStatus | null;
   instruments: Record<string, InstrumentStatus>;
+}
+
+export interface RetryStatus {
+  reason: "credentials_rejected";
+  since: number;
+  /** Retries scheduled so far. */
+  attempts: number;
+  /** Server time of the next attempt; null while one is running. */
+  next_attempt: number | null;
+  next_attempt_in: number | null;
+  gives_up_at: number;
 }
 
 export interface CandleQuery {

@@ -89,7 +89,14 @@ class ProviderError(Exception):
 
 
 class AuthError(ProviderError):
-    """Credentials rejected. Retrying will not help."""
+    """Credentials rejected. `certain`: they cannot work (missing, or a token that cannot
+    be one), so retrying will not help. Otherwise the broker refused them, which it also
+    does while it has an outage of its own: the feed retries for a while
+    (`openchart.market.rejections`)."""
+
+    def __init__(self, message: str, *, certain: bool = False):
+        super().__init__(message)
+        self.certain = certain
 
 
 class RequestError(ProviderError):
