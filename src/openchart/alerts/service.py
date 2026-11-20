@@ -377,7 +377,14 @@ class AlertService:
             state = feed.stream.state.value + (
                 f" ({self.server.feed_error})" if self.server.feed_error else ""
             )
-            messages = self.watchdog.check(views, state) + self.indicators.behind()
+            if self.server.rejections is not None:
+                # The "price feed down" message already said it: no stall per instrument.
+                # Its timers start again, so prices get the usual time once it is back.
+                self.watchdog.reset()
+                stalls = []
+            else:
+                stalls = self.watchdog.check(views, state)
+            messages = stalls + self.indicators.behind()
         # Indicator alerts in error are reported even without a feed (never silently).
         for message in messages + self.indicators.errors():
             log.warning(message)

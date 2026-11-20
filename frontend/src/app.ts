@@ -32,6 +32,7 @@ import { chooseInstrument, visibleInstruments } from "./instruments";
 import { isLineType } from "./drawings/shapes";
 import { DrawingsPanel } from "./drawings/listPanel";
 import { dropLegacyIndicators, loadPrefs, readLegacyIndicators, resolveTimezone, savePrefs, type Prefs } from "./prefs";
+import { retryIndicator } from "./feedStatus";
 import { formatClock, offsetLabel } from "./time";
 import { versionNotice } from "./version";
 import { layoutApplyPrompt } from "./alerts/confirmations";
@@ -706,6 +707,9 @@ export class App {
       cls = "dot bad";
       label = "No feed";
       detail = s.provider_state === "not_configured" ? "No broker credentials on the server" : "No instruments enabled";
+    } else if (s.retry) {
+      cls = "dot bad";
+      ({ label, detail } = retryIndicator(s.error, s.retry));
     } else if (s.error) {
       cls = "dot bad";
       label = "Feed error";

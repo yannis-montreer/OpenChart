@@ -10,12 +10,13 @@ import asyncio
 import contextlib
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 from openchart import purge, retention
 from openchart.alerts.service import AlertService
+from openchart.alerts.watchdog import fmt_duration
 from openchart.api.auth import Auth
 from openchart.api.hub import Hub
 from openchart.config import Config, OandaConfig
@@ -29,6 +30,7 @@ from openchart.market.bars import BarCache
 from openchart.market.cache import CandleCache
 from openchart.market.candle_builder import CandleBuilder
 from openchart.market.feed import Feed
+from openchart.market.rejections import RETRY_LIMIT, Rejections, retry_delay
 from openchart.market.series import SeriesReader
 from openchart.providers.base import AuthError, Provider
 from openchart.providers.stream import StreamState
@@ -90,6 +92,9 @@ class Server:
         self.feed: Feed | None = None
         self.tick_writer: TickWriter | None = None
         self.feed_error: str | None = None
+        # The broker rejecting the credentials, while the feed retries (market.rejections).
+        self.rejections: Rejections | None = None
+        self.feed_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep  # tests: fake
         self.secrets: Secrets | None = None
         self.secrets_error: str | None = None
         self._feed_task: asyncio.Task[None] | None = None
@@ -312,6 +317,8 @@ class Server:
             else:
                 self.provider = None
             self.feed_error = None
+            if self.provider is None:
+                self.rejections = None  # nothing left to recover
             self.tick_writer = TickWriter(cfg.ticks_dir, self.source) if cfg.store_ticks else None
 
             rows = await self.store.instruments(self.source, enabled_only=True)
@@ -459,16 +466,60 @@ class Server:
             except asyncio.CancelledError:
                 raise
             except AuthError as exc:
-                self.feed_error = str(exc)
-                log.error("feed stopped: %s", exc)
-                self.hub.broadcast_status()
-                return
+                delay = self._rejected(exc)
+                if delay is None:
+                    return
+                await self.feed_sleep(delay)
+                if self.rejections is not None:
+                    self.rejections.next_attempt = None  # trying again now
+                    self.hub.broadcast_status()
             except Exception as exc:
                 # For example the network is down at boot and the first gap-fill fails.
                 self.feed_error = f"{type(exc).__name__}: {exc}"
                 log.exception("feed failed, retrying in %.0fs", FEED_RETRY_SECONDS)
                 self.hub.broadcast_status()
                 await asyncio.sleep(FEED_RETRY_SECONDS)
+
+    def _rejected(self, exc: AuthError) -> float | None:
+        """The broker rejected the credentials: seconds to wait before trying again, or
+        None to stop the feed as before (certain, or still rejected after `RETRY_LIMIT`).
+        One Telegram message when the rejections begin, one when they end (here if the
+        feed stops, in `_on_stream_state` when it is back); none per retry."""
+        now = self.now()
+        self.feed_error = str(exc)
+        said = str(exc).rstrip(". ")  # OANDA's text ends with a full stop of its own
+        r = self.rejections
+        if exc.certain or (r is not None and r.expired(now)):
+            self.rejections = None
+            log.error("feed stopped: %s", exc)
+            if r is not None:
+                self._feed_message(
+                    f"⛔ Price feed stopped: OANDA has rejected the credentials for "
+                    f"{fmt_duration(now - r.since)} ({said}), so it is taken as a revoked or "
+                    "wrong token and the server no longer retries. Check the OANDA token in "
+                    "OpenChart's Settings: saving it, or restarting the server, starts the "
+                    "feed again."
+                )
+            self.hub.broadcast_status()
+            return None
+        if r is None:
+            r = self.rejections = Rejections(since=now, error=str(exc))
+            self._feed_message(
+                f"⚠️ Price feed down: {said}. The token may still be valid: OANDA answers "
+                "this way during its own outages too. The server keeps retrying (at most "
+                f"every 10 min, for {fmt_duration(RETRY_LIMIT)}) and says when prices are "
+                "back; alerts cannot fire meanwhile, and crosses missed are checked then."
+            )
+        delay = retry_delay(r.attempts)
+        r.attempts += 1
+        r.next_attempt = now + delay
+        log.warning("feed down: %s; retry %d in %.0fs", said, r.attempts, delay)
+        self.hub.broadcast_status()
+        return delay
+
+    def _feed_message(self, text: str) -> None:
+        if self.alerts is not None:
+            self.alerts.dispatcher.system(text)
 
     async def broadcast_closures(self, instrument: str) -> None:
         """Browsers redraw lines with the instrument's newly learned closures."""
@@ -481,6 +532,14 @@ class Server:
     def _on_stream_state(self, state: StreamState, detail: str) -> None:
         if state is StreamState.CONNECTED:
             self.feed_error = None
+            r, self.rejections = self.rejections, None
+            if r is not None:
+                log.info("feed recovered: the broker accepts the credentials again")
+                self._feed_message(
+                    "✅ Price feed recovered: OANDA accepts the credentials again after "
+                    f"{fmt_duration(self.now() - r.since)}. Missed prices are repaired and "
+                    "the alerts checked against them; crosses from the outage are marked late."
+                )
         self.hub.broadcast_status()
 
     async def _status_loop(self) -> None:
@@ -496,9 +555,14 @@ class Server:
                 "provider_state": state,
                 "instruments": {},
                 "error": self.feed_error,
+                "retry": None,
             }
         status = self.feed.status()
         status["error"] = self.feed_error
+        r = self.rejections
+        status["retry"] = None if r is None else r.to_json(self.now())
+        if r is not None and r.next_attempt is not None:
+            status["provider_state"] = "retrying"
         return status
 
     def _record_clean_stop(self) -> None:
