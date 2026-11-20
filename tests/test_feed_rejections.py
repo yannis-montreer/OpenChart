@@ -434,8 +434,9 @@ def outage_scenario(tmp_path, failure):
         settle(c)
         events = c.get("/api/alerts/events?limit=100").json()
         kinds = {a["id"]: a["type"] for a in c.get("/api/alerts").json()}
+        # Times from the outage's start: two runs may start in different minutes.
         got = sorted(
-            (kinds[e["alert_id"]], e["ts"], e["cross"], e["late"], round(e["price"], 3))
+            (kinds[e["alert_id"]], e["ts"] - t1, e["cross"], e["late"], round(e["price"], 3))
             for e in events
         )
         return got, rig.telegram.feed()
